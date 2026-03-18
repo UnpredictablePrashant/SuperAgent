@@ -1,0 +1,39 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments and local dependency targets
+.venv/
+venv/
+env/
+.deps/
+
+# Build, packaging, and test artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Runtime outputs and generated artifacts
+output/
+logs/
+
+# Generated agents and plugin state
+tasks/generated_agents/manifest.json
+
+# IDE and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
