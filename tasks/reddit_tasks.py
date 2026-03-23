@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
@@ -93,6 +94,64 @@ Relevant context:
 """.strip()
 
 
+def _task_requires_content_fetch(task: str) -> bool:
+    lower = task.lower()
+    fetch_markers = [
+        "fetch",
+        "read",
+        "retrieve",
+        "get post",
+        "get comment",
+        "by id",
+        "post id",
+        "comment id",
+    ]
+    return any(marker in lower for marker in fetch_markers)
+
+
+def _missing_content_fields(code: str) -> list[str]:
+    checks = {
+        "title": [r"\btitle\b"],
+        "body/selftext/text": [r"\bselftext\b", r"\bbody\b", r"\btext\b"],
+        "author": [r"\bauthor\b", r"\busername\b"],
+        "subreddit": [r"\bsubreddit\b", r"\bsubredditname\b"],
+        "score": [r"\bscore\b", r"\bupvotes?\b", r"\bvote"],
+        "created time": [r"\bcreated\b", r"\bcreatedat\b", r"\bcreatedutc\b", r"\btimestamp\b"],
+    }
+    lower = code.lower()
+    missing = []
+    for field_name, patterns in checks.items():
+        if not any(re.search(pattern, lower) for pattern in patterns):
+            missing.append(field_name)
+    return missing
+
+
+def _call_reddit_backend(prompt: str, preferred_backend: str, api_key: str | None, model: str, reasoning_effort: str, working_directory: Path, timeout_seconds: int) -> tuple[str, str]:
+    backend_errors = []
+    raw_output = ""
+    backend_used = None
+
+    for backend in _resolve_backend(preferred_backend, api_key):
+        try:
+            if backend == "codex-cli":
+                raw_output = _call_codex_cli(prompt, model, working_directory, timeout_seconds)
+            elif backend == "openai-sdk":
+                raw_output = _call_openai_sdk(prompt, model, reasoning_effort, api_key or "")
+            elif backend == "responses-http":
+                raw_output = _call_responses_http(prompt, model, reasoning_effort, api_key or "", timeout_seconds)
+            else:
+                raise ValueError(f"Unsupported reddit backend: {backend}")
+            backend_used = backend
+            break
+        except Exception as exc:
+            backend_errors.append(f"{backend}: {exc}")
+
+    if not backend_used:
+        raise RuntimeError("reddit_agent could not generate code.\n" + "\n".join(backend_errors))
+
+    return raw_output, backend_used
+
+
 def reddit_agent(state):
     active_task, task_content, _ = begin_agent_session(state, "reddit_agent")
     state["reddit_agent_calls"] = state.get("reddit_agent_calls", 0) + 1
@@ -130,29 +189,48 @@ def reddit_agent(state):
         missing_files=missing_files,
     )
 
-    backend_errors = []
-    raw_output = ""
-    backend_used = None
-
-    for backend in _resolve_backend(preferred_backend, api_key):
-        try:
-            if backend == "codex-cli":
-                raw_output = _call_codex_cli(prompt, model, working_directory, timeout_seconds)
-            elif backend == "openai-sdk":
-                raw_output = _call_openai_sdk(prompt, model, reasoning_effort, api_key or "")
-            elif backend == "responses-http":
-                raw_output = _call_responses_http(prompt, model, reasoning_effort, api_key or "", timeout_seconds)
-            else:
-                raise ValueError(f"Unsupported reddit backend: {backend}")
-            backend_used = backend
-            break
-        except Exception as exc:
-            backend_errors.append(f"{backend}: {exc}")
-
-    if not backend_used:
-        raise RuntimeError("reddit_agent could not generate code.\n" + "\n".join(backend_errors))
-
+    raw_output, backend_used = _call_reddit_backend(
+        prompt=prompt,
+        preferred_backend=preferred_backend,
+        api_key=api_key,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        working_directory=working_directory,
+        timeout_seconds=timeout_seconds,
+    )
     summary, language, code = _parse_coding_response(raw_output)
+    validation_retry = False
+    missing_content_fields = []
+
+    if _task_requires_content_fetch(task):
+        missing_content_fields = _missing_content_fields(code)
+        if missing_content_fields:
+            validation_retry = True
+            validation_instruction = (
+                "CRITICAL: This is a Reddit content retrieval task. "
+                "Return code that retrieves and returns full content fields, not only IDs. "
+                "The response object must include: title, body/selftext/text, author, subreddit, score, and created timestamp."
+            )
+            retry_extra = "\n".join(part for part in [extra_instructions.strip(), validation_instruction] if part)
+            retry_prompt = _build_reddit_prompt(
+                task=task,
+                framework=framework,
+                extra_instructions=retry_extra,
+                target_write_path=target_write_path,
+                context_blob=context_blob,
+                missing_files=missing_files,
+            )
+            raw_output, backend_used = _call_reddit_backend(
+                prompt=retry_prompt,
+                preferred_backend=preferred_backend,
+                api_key=api_key,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                working_directory=working_directory,
+                timeout_seconds=timeout_seconds,
+            )
+            summary, language, code = _parse_coding_response(raw_output)
+            missing_content_fields = _missing_content_fields(code)
 
     raw_filename = f"reddit_agent_raw_{call_number}.txt"
     code_filename = f"reddit_agent_code_{call_number}.txt"
@@ -181,6 +259,8 @@ def reddit_agent(state):
         f"Context files: {', '.join(context_files) if context_files else 'none'}",
         f"Missing context files: {', '.join(missing_files) if missing_files else 'none'}",
         f"Documentation source: {REDDIT_DOC_URL}",
+        f"Validation retry used: {validation_retry}",
+        f"Missing content fields after validation: {', '.join(missing_content_fields) if missing_content_fields else 'none'}",
         "",
         "Generated Code:",
         code,
@@ -194,6 +274,8 @@ def reddit_agent(state):
     state["reddit_model"] = model
     state["reddit_backend_used"] = backend_used
     state["reddit_raw_output"] = raw_output
+    state["reddit_validation_retry"] = validation_retry
+    state["reddit_missing_content_fields"] = missing_content_fields
     state["draft_response"] = report
 
     log_task_update(
