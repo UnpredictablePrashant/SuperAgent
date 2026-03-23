@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superagent-runtime"
+version = "0.1.0"
+description = "Plugin-driven multi-agent runtime and orchestration CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "langgraph",
+  "langchain",
+  "langchain-openai",
+  "openai",
+  "python-dotenv",
+  "beautifulsoup4",
+  "pypdf",
+  "python-docx",
+  "qdrant-client",
+  "fastmcp",
+  "telethon",
+  "boto3",
+  "playwright",
+]
+
+[project.scripts]
+superagent = "superagent.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["superagent", "tasks", "mcp_servers"]
+exclude = ["tests", "docs", "output", "logs"]

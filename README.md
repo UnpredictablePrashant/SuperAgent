@@ -1132,46 +1132,117 @@ Use [.env.example](/mnt/d/Personal%20Data/projects/multi-agents/sample-agents/.e
 
 ## Local Run
 
-Install dependencies:
+### Easy Install (Linux / macOS)
 
 ```bash
-pip install -r requirements.txt
+./scripts/install.sh
+```
+
+This script:
+
+- creates `.venv` (if missing)
+- installs the package in editable mode
+- adds `.venv/bin` to your shell PATH (`~/.bashrc` or `~/.zshrc`)
+
+Then reload shell config:
+
+```bash
+source ~/.bashrc
+```
+
+or:
+
+```bash
+source ~/.zshrc
+```
+
+### Easy Install (Windows with Chocolatey)
+
+Preferred Windows flow via `choco`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_choco.ps1
+```
+
+This flow:
+
+- uses Chocolatey to install Python when missing
+- runs the SuperAgent installer
+- adds `.venv\Scripts` to your user PATH
+
+Important:
+
+- `choco` does not install directly from a GitHub repository URL by default
+- for a proper `choco install superagent` experience, publish a Chocolatey package (`.nupkg`) that points to versioned GitHub Release assets
+- this repo now builds Python distribution artifacts into `dist/` in GitHub Actions and publishes them as Release assets on tag pushes (`v*`)
+
+### Easy Install (Windows PowerShell)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+This script:
+
+- creates `.venv` (if missing)
+- installs the package in editable mode
+- adds `.venv\Scripts` to your user PATH
+- recreates `.venv` automatically if it detects a non-Windows venv layout
+
+Open a new terminal after install.
+
+### Manual Install (any OS)
+
+```bash
+python -m pip install -e .
+```
+
+Verify command is available:
+
+```bash
+superagent --help
 ```
 
 Run a single CLI query:
 
 ```bash
-python -m superagent.cli run "analyze this company and build a report"
+superagent run "analyze this company and build a report"
 ```
 
 List discovered agents:
 
 ```bash
-python -m superagent.cli agents list
+superagent agents list
 ```
 
 Inspect discovered plugins:
 
 ```bash
-python -m superagent.cli plugins list
+superagent plugins list
 ```
 
 Run the lightweight gateway server:
 
 ```bash
-python -m superagent.cli gateway
+superagent gateway
 ```
 
 Run the always-on daemon:
 
 ```bash
-python -m superagent.cli daemon
+superagent daemon
 ```
 
 Run the setup UI:
 
 ```bash
-python -m superagent.cli setup-ui
+superagent setup-ui
+```
+
+Legacy form still works:
+
+```bash
+python -m superagent.cli <subcommand>
 ```
 
 ## Docker Run
@@ -1204,6 +1275,7 @@ Files involved:
 - [Makefile](/mnt/d/Personal%20Data/projects/multi-agents/sample-agents/Makefile)
 - [scripts/ci_check.sh](/mnt/d/Personal%20Data/projects/multi-agents/sample-agents/scripts/ci_check.sh)
 - [.github/workflows/ci.yml](/mnt/d/Personal%20Data/projects/multi-agents/sample-agents/.github/workflows/ci.yml)
+- [.github/workflows/release.yml](/mnt/d/Personal%20Data/projects/multi-agents/sample-agents/.github/workflows/release.yml)
 - [tests/test_registry.py](/mnt/d/Personal%20Data/projects/multi-agents/sample-agents/tests/test_registry.py)
 - [tests/test_setup_registry.py](/mnt/d/Personal%20Data/projects/multi-agents/sample-agents/tests/test_setup_registry.py)
 - [tests/test_cli.py](/mnt/d/Personal%20Data/projects/multi-agents/sample-agents/tests/test_cli.py)
@@ -1217,6 +1289,8 @@ What CI currently enforces:
 - CLI smoke tests
 - runtime entrypoint import smoke tests
 - Docker image build
+- `dist/` package build artifact upload in CI
+- GitHub Release publishing of `dist/*` assets when tags matching `v*` are pushed
 
 Local commands:
 
