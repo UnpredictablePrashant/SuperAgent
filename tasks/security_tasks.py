@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
+from tasks.security_policy import apply_security_profile_defaults, require_security_authorization
 from tasks.research_infra import html_to_text, llm_json, llm_text
 from tasks.utils import OUTPUT_DIR, log_task_update, write_text_file
 
@@ -32,10 +33,9 @@ def _resolve_paths(raw_paths, working_directory: str | None = None) -> list[str]
 
 
 def _require_authorized_security_scope(state: dict):
-    if not state.get("security_authorized", False):
-        raise PermissionError(
-            "Security agents require explicit authorization. Set state['security_authorized']=True only for assets you are permitted to assess."
-        )
+    target = _target_base_url(state, "")
+    apply_security_profile_defaults(state)
+    require_security_authorization(state, target)
 
 
 def _target_base_url(state: dict, task_content: str) -> str:
@@ -70,7 +70,7 @@ def _fetch_url(url: str, timeout: int = 20) -> dict:
         return {"url": url, "status": None, "headers": {}, "body": "", "error": str(exc)}
 
 
-def _candidate_api_doc_urls(target: str) -> list[str]:
+def _candidate_api_doc_urls(target: str, extra_paths: list[str] | None = None) -> list[str]:
     parsed = urlparse(target if target.startswith(("http://", "https://")) else f"https://{target}")
     base = f"{parsed.scheme}://{parsed.netloc}"
     candidates = [
@@ -90,6 +90,9 @@ def _candidate_api_doc_urls(target: str) -> list[str]:
         "/redoc",
         "/graphql",
     ]
+    for path in extra_paths or []:
+        if isinstance(path, str) and path.startswith("/"):
+            candidates.append(path)
     return [base + path for path in candidates]
 
 
@@ -149,8 +152,11 @@ def security_scope_guard_agent(state):
     state["security_scope_guard_calls"] = state.get("security_scope_guard_calls", 0) + 1
     call_number = state["security_scope_guard_calls"]
     target = _target_base_url(state, task_content)
+    apply_security_profile_defaults(state)
     authorized = bool(state.get("security_authorized", False))
     scan_mode = state.get("security_scan_mode", "defensive")
+    auth_note = str(state.get("security_authorization_note", "")).strip()
+    scan_profile = str(state.get("security_scan_profile", "deep")).strip()
 
     prompt = f"""
 You are a security scope guard agent.
@@ -163,8 +169,14 @@ Target:
 Authorized flag:
 {authorized}
 
+Authorization note:
+{auth_note or "missing"}
+
 Requested mode:
 {scan_mode}
+
+Requested scan profile:
+{scan_profile}
 
 Return ONLY valid JSON:
 {{
@@ -196,8 +208,12 @@ Return ONLY valid JSON:
     if not authorized:
         result["decision"] = "deny"
         result["reason"] = "Authorization flag not present."
+    elif not auth_note:
+        result["decision"] = "deny"
+        result["reason"] = "Authorization note (ticket/approval reference) missing."
     summary = (
         f"Decision: {result.get('decision', 'deny')}\n"
+        f"Scan Profile: {scan_profile}\n"
         f"Allowed Actions: {', '.join(result.get('allowed_actions', []))}\n"
         f"Disallowed Actions: {', '.join(result.get('disallowed_actions', []))}\n"
         f"Reason: {result.get('reason', '')}"
@@ -225,7 +241,9 @@ def api_surface_mapper_agent(state):
 
     docs = []
     endpoints = []
-    for url in _candidate_api_doc_urls(target):
+    extra_doc_paths = state.get("security_api_doc_paths") or []
+    doc_limit = int(state.get("security_api_doc_limit", 45))
+    for url in _candidate_api_doc_urls(target, extra_paths=extra_doc_paths)[:doc_limit]:
         fetched = _fetch_url(url, timeout=int(state.get("security_timeout", 20)))
         body = fetched.get("body", "")
         record = {
@@ -315,7 +333,8 @@ def web_recon_agent(state):
     parsed = urlparse(target)
     base = f"{parsed.scheme}://{parsed.netloc}"
     extra_paths = {}
-    for rel in ["/robots.txt", "/sitemap.xml"]:
+    recon_paths = state.get("security_web_recon_paths") or ["/robots.txt", "/sitemap.xml"]
+    for rel in recon_paths:
         try:
             req = Request(base + rel, headers=headers)
             with urlopen(req, timeout=10) as response:

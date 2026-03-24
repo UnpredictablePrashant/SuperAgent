@@ -1,0 +1,36 @@
+I’ll inspect the current repository files directly and compile a project-specific production-readiness report with file-level evidence, without requesting authorization or making any changes.
+I need actual repository file access to do the requested passive code review with file-level evidence, but in this worker context I do not have the repository contents mounted or exposed. That is the only blocker.
+
+What I checked:
+- The task context and prior agent messages
+- Available tools/services and setup state
+- Recent generated helper code from `coding_agent`
+
+What is missing:
+- A readable filesystem view of the current local project repository
+- Any file listing, source tree, or file contents from the target repo
+
+Because of that, I cannot truthfully produce:
+- architecture analysis tied to real modules/files
+- security findings with exact paths/line references
+- dependency hygiene assessment against actual manifests/lockfiles
+- test/CI/CD/configuration/observability/deployment findings with evidence
+
+If repository access becomes available in this worker session, I would perform a strictly passive review and return a report structured as:
+- Architecture overview
+- Security assessment
+- Dependency hygiene
+- Testing maturity
+- CI/CD readiness
+- Configuration and secrets handling
+- Observability and operability
+- Deployment/runtime risks
+- Prioritized remediation plan
+
+And every finding would include evidence like:
+- `path/to/file.ext`
+- line references where available
+- concrete risk
+- remediation steps prioritized by severity
+
+At present, any project-specific assessment beyond the above would be fabricated, so I will not invent repository findings.

@@ -12,8 +12,11 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
+from tasks.setup_config_store import apply_setup_env_defaults, get_setup_component_snapshot
+from tasks.sqlite_store import get_setup_provider_tokens, set_setup_provider_tokens
 
 load_dotenv()
+apply_setup_env_defaults()
 
 OUTPUT_DIR = "output"
 TOKEN_STORE_PATH = Path(OUTPUT_DIR) / "integration_tokens.json"
@@ -45,15 +48,29 @@ def _write_text(path: Path, content: str) -> None:
 
 
 def load_token_store() -> dict:
+    providers = {}
+    for provider in ("google", "microsoft", "slack"):
+        payload = get_setup_provider_tokens(provider)
+        if payload:
+            providers[provider] = payload
+    if providers:
+        return providers
     data = _read_json(TOKEN_STORE_PATH, {})
     return data if isinstance(data, dict) else {}
 
 
 def save_token_store(data: dict) -> None:
+    if isinstance(data, dict):
+        for provider, payload in data.items():
+            if isinstance(payload, dict):
+                set_setup_provider_tokens(provider, payload, updated_at=str(_now_ts()))
     _write_json(TOKEN_STORE_PATH, data)
 
 
 def get_provider_tokens(provider: str) -> dict:
+    db_payload = get_setup_provider_tokens(provider)
+    if db_payload:
+        return db_payload if isinstance(db_payload, dict) else {}
     data = load_token_store()
     provider_payload = data.get(provider, {})
     return provider_payload if isinstance(provider_payload, dict) else {}
@@ -63,6 +80,7 @@ def set_provider_tokens(provider: str, tokens: dict) -> dict:
     data = load_token_store()
     merged = {**get_provider_tokens(provider), **tokens}
     data[provider] = merged
+    set_setup_provider_tokens(provider, merged, updated_at=str(_now_ts()))
     save_token_store(data)
     return merged
 
@@ -401,7 +419,11 @@ def _build_service_status() -> dict:
         "openai": _service_record(
             "openai",
             bool(os.getenv("OPENAI_API_KEY", "").strip()),
-            "OpenAI API key for the core LLM stack.",
+            (
+                "OpenAI API key for the core LLM stack. "
+                f"general_model={os.getenv('OPENAI_MODEL_GENERAL', os.getenv('OPENAI_MODEL', 'gpt-4o-mini'))}, "
+                f"coding_model={os.getenv('OPENAI_MODEL_CODING', os.getenv('OPENAI_CODEX_MODEL', os.getenv('OPENAI_MODEL_GENERAL', os.getenv('OPENAI_MODEL', 'gpt-4o-mini'))))}."
+            ),
         ),
         "serpapi": _service_record(
             "serpapi",
@@ -491,12 +513,40 @@ def _build_service_status() -> dict:
             "Playwright available for interactive browser automation.",
             setup_hint="Install Playwright and browser binaries to enable interactive browser control.",
         ),
+        "privileged_control": _service_record(
+            "privileged_control",
+            True,
+            "Privileged control policy is available. Configure explicit approvals, scope, and kill-switch before high-privilege runs.",
+            setup_hint="Review privileged_control component in setup UI/CLI before enabling root or destructive automation.",
+        ),
         "whatsapp": _service_record(
             "whatsapp",
             bool(os.getenv("WHATSAPP_ACCESS_TOKEN", "").strip() and os.getenv("WHATSAPP_PHONE_NUMBER_ID", "").strip()),
             "WhatsApp Business Cloud API credentials. No inbox-reading agent is implemented yet.",
         ),
     }
+    component_map = {
+        "openai": "openai",
+        "serpapi": "serpapi",
+        "elevenlabs": "elevenlabs",
+        "google_workspace": "google_workspace",
+        "telegram": "telegram",
+        "slack": "slack",
+        "microsoft_graph": "microsoft_graph",
+        "qdrant": "qdrant",
+        "aws": "aws",
+        "whatsapp": "whatsapp",
+        "privileged_control": "privileged_control",
+        "cve_database": "security_tools",
+    }
+    for service_name, component_id in component_map.items():
+        snapshot = get_setup_component_snapshot(component_id)
+        if snapshot and not snapshot.get("enabled", True):
+            services[service_name]["configured"] = False
+            services[service_name]["details"] = f"{services[service_name]['details']} Component disabled in setup DB."
+            services[service_name]["setup_hint"] = (
+                services[service_name].get("setup_hint", "") + " Re-enable this component from setup UI or CLI."
+            ).strip()
     return services
 
 
@@ -587,6 +637,7 @@ def _build_agent_status(services: dict, agent_cards: list[dict]) -> tuple[dict, 
         "heartbeat_agent",
         "monitor_rule_agent",
         "stock_monitor_agent",
+        "long_document_agent",
     ]
 
     for agent_name in llm_agents:
@@ -673,6 +724,12 @@ def _build_agent_status(services: dict, agent_cards: list[dict]) -> tuple[dict, 
     coding_ok = services["openai"]["configured"] or services["codex_cli"]["configured"]
     mark(
         "coding_agent",
+        coding_ok,
+        [] if coding_ok else ["openai_or_codex_cli"],
+        "Requires OpenAI API access or a local codex CLI.",
+    )
+    mark(
+        "master_coding_agent",
         coding_ok,
         [] if coding_ok else ["openai_or_codex_cli"],
         "Requires OpenAI API access or a local codex CLI.",

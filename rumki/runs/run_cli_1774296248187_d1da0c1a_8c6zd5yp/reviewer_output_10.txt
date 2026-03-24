@@ -1,0 +1,59 @@
+{
+  "decision": "revise",
+  "reason": "Latest output is incorrect and incomplete: it includes an unsupported extreme gold price claim, uses non-allowed/weak sources for core macro claims, is truncated, omits required ticker-by-ticker analysis and scenarios, and lacks claim-to-source mapping.",
+  "is_output_correct": false,
+  "revised_objective": "Produce a complete, fully source-verified analysis of the gold market and gold-related stocks/ETFs as of March 23, 2026 using only directly supporting reputable primary sources or top-tier wire services. Hard requirements: (1) Spot gold trend: use exact gold price/date references only if directly supported by Reuters, AP, LBMA, CME/COMEX settlement data, ICE, or equivalent primary market data. If an exact March 23, 2026 spot gold price cannot be directly sourced, explicitly state that limitation and instead cite the latest directly supported gold price points with dates and sources. Do not include any unsupported or extreme price claims. (2) Macro drivers: include U.S. real yields from FRED DFII10, inflation expectations from FRED T10YIE, USD from ICE DXY or Reuters, central-bank demand from World Gold Council plus IMF/official-sector data where available, ETF flows/holdings from World Gold Council plus SPDR Gold Shares and iShares Gold Trust issuer data, and geopolitical/event framing only where causally supported by Reuters or AP. (3) Gold equities and ETFs: analyze NEM, GOLD, AEM, GLD, IAU, GDX, and GDXJ. For miners, discuss operating leverage, AISC/cost risks, production/guidance, reserves/life-of-mine or project pipeline where relevant, jurisdiction risk, and capital allocation only where directly supported by company 10-K/annual report, earnings release, presentation, or Reuters/AP. For ETFs, discuss structure, expense ratio, holdings focus, and flow/holding trends from issuer/fund documents and WGC. (4) Scenarios: provide explicit bullish, base, and bearish cases tied directly to the sourced drivers above. (5) Citations: include a source list mapping every major factual claim to a direct supporting source. Exclude aggregator/opinion or indirect-support sources such as Investing.com, Kitco, Morningstar, MarketPulse, MarketScreener, Axios, Kiplinger, Motley Fool, MarketBeat, FXStreet, YCharts, Business Standard, Tradingster, Guardian live blogs, MoneyWeek, bank newsletters, and similar for factual support; Bloomberg may be used only if directly available and clearly supporting the exact claim, but primary sources and Reuters/AP are preferred. Output must be complete, not truncated, and must clearly mark all data gaps where direct support is unavailable.",
+  "step_reviews": [
+    {
+      "agent": "reviewer_agent",
+      "status": "correct",
+      "notes": "Prior review instructions consistently tightened the sourcing and completeness requirements appropriately."
+    },
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "Multiple attempts used prohibited/indirect sources, included unsupported extreme price claims, were truncated, and failed to provide the required complete ticker-by-ticker sourced analysis with scenarios and claim mapping."
+    },
+    {
+      "agent": "reviewer_agent",
+      "status": "correct",
+      "notes": "Correctly rejected the earlier noncompliant draft and restated constraints."
+    },
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "Output remained noncompliant with unsupported pricing claims and weak sourcing."
+    },
+    {
+      "agent": "reviewer_agent",
+      "status": "correct",
+      "notes": "Correctly required direct-source support and explicit handling of data gaps."
+    },
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "Still relied on prohibited/non-direct sources and omitted required sections."
+    },
+    {
+      "agent": "reviewer_agent",
+      "status": "correct",
+      "notes": "Latest review direction was appropriate and aligned with the objective."
+    },
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "Latest output is truncated, includes an unsupported AP-linked extreme gold price claim, cites JPMorgan newsletter material for macro context, and does not satisfy the required comprehensive analysis structure."
+    }
+  ],
+  "next_agent": "deep_research_agent",
+  "corrected_values": {
+    "instructions": "Start over and produce the final analysis only when every factual claim is directly supported. Do not use AP/Reuters articles to infer prices unless the article explicitly states the exact price and date. Do not include any claim that gold traded above $5,000/oz or similar unless directly supported by an allowed source; otherwise omit it. Use only: Reuters/AP for reported market moves and event framing; LBMA/CME/COMEX/ICE/FRED/WGC/IMF/SPDR Gold Shares/iShares/company filings and releases for data. Include sections exactly as follows: (1) Gold price trend and sourcing limitations; (2) Macro drivers with dated values from FRED DFII10 and T10YIE and Reuters/ICE DXY if available; (3) Central-bank demand; (4) ETF flows and holdings; (5) Ticker-by-ticker analysis for NEM, GOLD, AEM, GLD, IAU, GDX, GDXJ; (6) Bull/base/bear scenarios; (7) Data gaps and limitations; (8) claim-to-source mapping table. If direct support for March 23, 2026 spot gold is unavailable, say so explicitly and cite the latest directly supported price points instead. Every miner claim must cite company 10-K/annual report/earnings release/presentation or Reuters/AP. Every ETF claim must cite issuer/fund docs and WGC where relevant. Output must be complete and not truncated.",
+    "forbidden_sources_reminder": "Do not use Investing.com, Kitco, Morningstar, MarketPulse, MarketScreener, Axios, Kiplinger, Motley Fool, MarketBeat, FXStreet, YCharts, Business Standard, Tradingster, Guardian live blogs, MoneyWeek, bank newsletters, or similar indirect/secondary sources for factual support.",
+    "quality_bar": "No unsupported numbers, no inferred prices, no missing tickers, no missing scenarios, and no missing source mapping."
+  }
+}
+Parsed Decision: revise
+Reason: Latest output is incorrect and incomplete: it includes an unsupported extreme gold price claim, uses non-allowed/weak sources for core macro claims, is truncated, omits required ticker-by-ticker analysis and scenarios, and lacks claim-to-source mapping.
+Revised Objective: Produce a complete, fully source-verified analysis of the gold market and gold-related stocks/ETFs as of March 23, 2026 using only directly supporting reputable primary sources or top-tier wire services. Hard requirements: (1) Spot gold trend: use exact gold price/date references only if directly supported by Reuters, AP, LBMA, CME/COMEX settlement data, ICE, or equivalent primary market data. If an exact March 23, 2026 spot gold price cannot be directly sourced, explicitly state that limitation and instead cite the latest directly supported gold price points with dates and sources. Do not include any unsupported or extreme price claims. (2) Macro drivers: include U.S. real yields from FRED DFII10, inflation expectations from FRED T10YIE, USD from ICE DXY or Reuters, central-bank demand from World Gold Council plus IMF/official-sector data where available, ETF flows/holdings from World Gold Council plus SPDR Gold Shares and iShares Gold Trust issuer data, and geopolitical/event framing only where causally supported by Reuters or AP. (3) Gold equities and ETFs: analyze NEM, GOLD, AEM, GLD, IAU, GDX, and GDXJ. For miners, discuss operating leverage, AISC/cost risks, production/guidance, reserves/life-of-mine or project pipeline where relevant, jurisdiction risk, and capital allocation only where directly supported by company 10-K/annual report, earnings release, presentation, or Reuters/AP. For ETFs, discuss structure, expense ratio, holdings focus, and flow/holding trends from issuer/fund documents and WGC. (4) Scenarios: provide explicit bullish, base, and bearish cases tied directly to the sourced drivers above. (5) Citations: include a source list mapping every major factual claim to a direct supporting source. Exclude aggregator/opinion or indirect-support sources such as Investing.com, Kitco, Morningstar, MarketPulse, MarketScreener, Axios, Kiplinger, Motley Fool, MarketBeat, FXStreet, YCharts, Business Standard, Tradingster, Guardian live blogs, MoneyWeek, bank newsletters, and similar for factual support; Bloomberg may be used only if directly available and clearly supporting the exact claim, but primary sources and Reuters/AP are preferred. Output must be complete, not truncated, and must clearly mark all data gaps where direct support is unavailable.
+Next Agent: deep_research_agent
+Corrected Values: {"instructions": "Start over and produce the final analysis only when every factual claim is directly supported. Do not use AP/Reuters articles to infer prices unless the article explicitly states the exact price and date. Do not include any claim that gold traded above $5,000/oz or similar unless directly supported by an allowed source; otherwise omit it. Use only: Reuters/AP for reported market moves and event framing; LBMA/CME/COMEX/ICE/FRED/WGC/IMF/SPDR Gold Shares/iShares/company filings and releases for data. Include sections exactly as follows: (1) Gold price trend and sourcing limitations; (2) Macro drivers with dated values from FRED DFII10 and T10YIE and Reuters/ICE DXY if available; (3) Central-bank demand; (4) ETF flows and holdings; (5) Ticker-by-ticker analysis for NEM, GOLD, AEM, GLD, IAU, GDX, GDXJ; (6) Bull/base/bear scenarios; (7) Data gaps and limitations; (8) claim-to-source mapping table. If direct support for March 23, 2026 spot gold is unavailable, say so explicitly and cite the latest directly supported price points instead. Every miner claim must cite company 10-K/annual report/earnings release/presentation or Reuters/AP. Every ETF claim must cite issuer/fund docs and WGC where relevant. Output must be complete and not truncated.", "forbidden_sources_reminder": "Do not use Investing.com, Kitco, Morningstar, MarketPulse, MarketScreener, Axios, Kiplinger, Motley Fool, MarketBeat, FXStreet, YCharts, Business Standard, Tradingster, Guardian live blogs, MoneyWeek, bank newsletters, or similar indirect/secondary sources for factual support.", "quality_bar": "No unsupported numbers, no inferred prices, no missing tickers, no missing scenarios, and no missing source mapping."}

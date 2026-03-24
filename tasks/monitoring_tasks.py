@@ -10,6 +10,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
+from tasks.file_memory import bootstrap_file_memory, run_memory_maintenance
 from tasks.gateway_tasks import notification_dispatch_agent
 from tasks.research_infra import llm_text
 from tasks.setup_registry import build_setup_snapshot
@@ -95,6 +96,7 @@ def _fetch_stooq_quote(symbol: str) -> dict:
 def heartbeat_agent(state):
     _, task_content, _ = begin_agent_session(state, "heartbeat_agent")
     initialize_db()
+    state = bootstrap_file_memory(state)
     state["heartbeat_agent_calls"] = state.get("heartbeat_agent_calls", 0) + 1
     call_number = state["heartbeat_agent_calls"]
     service_name = state.get("heartbeat_service_name") or "superagent-daemon"
@@ -113,6 +115,10 @@ def heartbeat_agent(state):
             "disabled_agents": disabled_agents,
         },
     }
+    payload["memory_maintenance"] = run_memory_maintenance(
+        state,
+        force=bool(state.get("memory_compaction_force", False)),
+    )
     insert_heartbeat_event(payload)
     summary = llm_text(
         f"""You are a heartbeat monitoring agent.

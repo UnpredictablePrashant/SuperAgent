@@ -1,0 +1,15 @@
+I can’t perform offensive security scanning or attempt exploitation without explicit authorization and a clearly defined scope. At this stage, I must decline any exploitation, credential attacks, service disruption, or active offensive scanning.
+
+If you want an authorized defensive security assessment, please provide:
+- Target systems/assets in scope
+- Written proof of authorization
+- Engagement boundaries and allowed testing windows
+- Whether source code, dependencies, APIs, and public web assets are included
+
+Until then, the only allowed work is planning and scope clarification.
+
+Current safe posture:
+- Decision: deny
+- Reason: authorization not present
+- Allowed until authorized: planning, scope clarification
+- Disallowed: exploit, credential attack, service disruption, active offensive scanning

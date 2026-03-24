@@ -2,13 +2,17 @@ import os
 import logging
 import sys
 import tempfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+from tasks.setup_config_store import apply_setup_env_defaults
 
 load_dotenv()
+apply_setup_env_defaults()
 
 OUTPUT_DIR = "output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -16,7 +20,58 @@ RUN_OUTPUT_ROOT = os.path.join(OUTPUT_DIR, "runs")
 os.makedirs(RUN_OUTPUT_ROOT, exist_ok=True)
 ACTIVE_OUTPUT_DIR = OUTPUT_DIR
 
-llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+_ACTIVE_AGENT_NAME: ContextVar[str] = ContextVar("active_agent_name", default="")
+_LLM_CLIENTS: dict[str, ChatOpenAI] = {}
+_DEFAULT_GENERAL_MODEL = os.getenv("OPENAI_MODEL_GENERAL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+_DEFAULT_CODING_MODEL = os.getenv("OPENAI_MODEL_CODING", os.getenv("OPENAI_CODEX_MODEL", _DEFAULT_GENERAL_MODEL))
+_CODING_AGENTS = {
+    "coding_agent",
+    "master_coding_agent",
+    "agent_factory_agent",
+    "dynamic_agent_runner",
+    "reddit_agent",
+}
+
+
+def model_for_agent(agent_name: str = "") -> str:
+    name = (agent_name or "").strip()
+    if name:
+        agent_key = f"OPENAI_MODEL_AGENT_{name.upper()}"
+        agent_specific = os.getenv(agent_key, "").strip()
+        if agent_specific:
+            return agent_specific
+    if name in _CODING_AGENTS:
+        return os.getenv("OPENAI_MODEL_CODING", os.getenv("OPENAI_CODEX_MODEL", _DEFAULT_CODING_MODEL)).strip() or _DEFAULT_CODING_MODEL
+    return os.getenv("OPENAI_MODEL_GENERAL", os.getenv("OPENAI_MODEL", _DEFAULT_GENERAL_MODEL)).strip() or _DEFAULT_GENERAL_MODEL
+
+
+def _client_for_model(model: str) -> ChatOpenAI:
+    key = model.strip() or _DEFAULT_GENERAL_MODEL
+    client = _LLM_CLIENTS.get(key)
+    if client is None:
+        client = ChatOpenAI(model=key)
+        _LLM_CLIENTS[key] = client
+    return client
+
+
+@contextmanager
+def agent_model_context(agent_name: str):
+    token = _ACTIVE_AGENT_NAME.set(agent_name or "")
+    try:
+        yield
+    finally:
+        _ACTIVE_AGENT_NAME.reset(token)
+
+
+class RoutedLLM:
+    def invoke(self, prompt, *args, **kwargs):
+        forced_agent = kwargs.pop("agent_name", "")
+        agent_name = forced_agent or _ACTIVE_AGENT_NAME.get("")
+        model = model_for_agent(agent_name)
+        return _client_for_model(model).invoke(prompt, *args, **kwargs)
+
+
+llm = RoutedLLM()
 
 logger = logging.getLogger("multi_agent_workflow")
 logger.setLevel(logging.INFO)
@@ -70,9 +125,13 @@ def set_active_output_dir(path: str) -> str:
     return ACTIVE_OUTPUT_DIR
 
 
-def create_run_output_dir(run_id: str) -> str:
+def create_run_output_dir(run_id: str, base_dir: str | None = None) -> str:
+    root = base_dir.strip() if isinstance(base_dir, str) and base_dir.strip() else RUN_OUTPUT_ROOT
+    if base_dir:
+        root = os.path.join(root, "runs")
+    os.makedirs(root, exist_ok=True)
     prefix = f"{run_id}_"
-    run_dir = tempfile.mkdtemp(prefix=prefix, dir=RUN_OUTPUT_ROOT)
+    run_dir = tempfile.mkdtemp(prefix=prefix, dir=root)
     return set_active_output_dir(run_dir)
 
 

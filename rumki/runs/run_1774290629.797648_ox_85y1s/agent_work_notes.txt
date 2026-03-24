@@ -1,0 +1,37 @@
+Run ID: run_1774290629.797648
+Started At: 2026-03-23T18:30:29.797648+00:00
+User Query: smoke test after cli fallback
+========================================================================
+
+[2026-03-23T18:30:33.808414+00:00] run=run_1774290629.797648 actor=user stage=request
+smoke test after cli fallback
+
+[2026-03-23T18:30:50.591022+00:00] run=run_1774290629.797648 actor=orchestrator_agent stage=dispatch
+agent=worker_agent
+task_id=task_1774290645.623068
+intent=Need a general-purpose smoke test response for the vague CLI fallback request.
+content=Interpret the user request 'smoke test after cli fallback' and produce a concise smoke-test acknowledgement or clarify what should be tested using the available CLI-capable setup.
+
+[2026-03-23T18:30:50.617554+00:00] run=run_1774290629.797648 actor=worker_agent stage=accepted
+task_id=task_1774290645.623068
+sender=orchestrator_agent
+work_item=Interpret the user request 'smoke test after cli fallback' and produce a concise smoke-test acknowledgement or clarify what should be tested using the available CLI-capable setup.
+
+[2026-03-23T18:30:55.461588+00:00] run=run_1774290629.797648 actor=worker_agent stage=completed
+task_id=task_1774290645.623068
+recipients=orchestrator_agent, reviewer_agent
+output=Smoke test acknowledged.
+
+CLI-capable fallback appears available via `codex_cli` in the current setup. If you want, I can help validate the fallback path with a minimal smoke test such as:
+
+- confirm CLI tool is reachable
+- run a basic no-op/help command
+- verify expected exit code
+- verify stdout/stderr handling
+- confirm fallback triggers when primary path is unavailable
+
+If by “smoke test after cli fallback” you mean a specific workflow, please specify:
+1. what command or feature should fall back to CLI,
+2. what “success” should look like,
+3. whether you want only availability checks or an end-to-end test.
+

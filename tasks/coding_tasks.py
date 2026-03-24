@@ -6,12 +6,60 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
-from tasks.utils import OUTPUT_DIR, log_task_update, resolve_output_path, write_text_file
+from tasks.privileged_control import (
+    append_privileged_audit_event,
+    build_privileged_policy,
+    path_allowed,
+    redact_sensitive_text,
+)
+from tasks.utils import OUTPUT_DIR, llm, log_task_update, resolve_output_path, write_text_file
 
 
 RESPONSES_API_URL = "https://api.openai.com/v1/responses"
-DEFAULT_CODEX_MODEL = os.getenv("OPENAI_CODEX_MODEL", "gpt-5.3-codex")
+DEFAULT_CODEX_MODEL = os.getenv("OPENAI_MODEL_CODING", os.getenv("OPENAI_CODEX_MODEL", "gpt-5.3-codex"))
 DEFAULT_REASONING_EFFORT = os.getenv("OPENAI_CODEX_REASONING_EFFORT", "medium")
+
+AGENT_METADATA = {
+    "coding_agent": {
+        "description": "Generates production-ready code artifacts and can write the result to a target file path.",
+        "skills": ["coding", "implementation", "code generation"],
+        "input_keys": [
+            "coding_task",
+            "coding_working_directory",
+            "coding_context_files",
+            "coding_write_path",
+            "coding_language",
+            "coding_instructions",
+        ],
+        "output_keys": [
+            "coding_summary",
+            "coding_language",
+            "coding_code",
+            "coding_written_path",
+            "coding_backend_used",
+        ],
+        "requirements": ["openai_or_codex_cli"],
+    },
+    "master_coding_agent": {
+        "description": "Long-running coding project orchestrator that produces detailed project plans and delegates implementation/setup work to specialist agents.",
+        "skills": ["project architecture", "coding orchestration", "delegation", "delivery planning"],
+        "input_keys": [
+            "master_coding_request",
+            "coding_task",
+            "coding_working_directory",
+            "coding_context_files",
+            "coding_write_path",
+            "coding_instructions",
+        ],
+        "output_keys": [
+            "master_coding_summary",
+            "master_coding_plan",
+            "master_coding_delegation",
+            "master_coding_next_agent",
+        ],
+        "requirements": ["openai_or_codex_cli"],
+    },
+}
 
 
 def _read_context_files(file_paths: list[str], working_directory: Path) -> tuple[str, list[str]]:
@@ -125,6 +173,110 @@ def _strip_code_fences(code: str) -> str:
     return stripped
 
 
+def _strip_json_fences(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        lines = cleaned.splitlines()
+        if len(lines) >= 2:
+            return "\n".join(lines[1:-1]).strip()
+    return cleaned
+
+
+def _build_master_coding_prompt(
+    objective: str,
+    working_directory: Path,
+    context_files: list[str],
+    context_blob: str,
+    missing_files: list[str],
+    available_agents: list[str],
+    setup_summary: str,
+    setup_actions: list[dict],
+) -> str:
+    return f"""
+You are master_coding_agent in a multi-agent runtime.
+
+Your job:
+- Build a complete, detailed project plan for the coding objective.
+- If implementation is needed, delegate to specialist agents.
+- If components, tools, or dependencies must be installed/configured, delegate that setup work to other agents instead of pretending it is already done.
+
+Current objective:
+{objective}
+
+Working directory:
+{working_directory}
+
+Available agents:
+{json.dumps(available_agents, ensure_ascii=False)}
+
+Current setup summary:
+{setup_summary or "None"}
+
+Available setup actions:
+{json.dumps(setup_actions, ensure_ascii=False)}
+
+Context files requested:
+{json.dumps(context_files, ensure_ascii=False)}
+
+Missing context files:
+{json.dumps(missing_files, ensure_ascii=False)}
+
+Context content:
+{context_blob or "No file context provided."}
+
+Decision rules:
+- Prefer `coding_agent` for concrete file/code generation.
+- Prefer `os_agent` when installs/system setup are needed.
+- Prefer `agent_factory_agent` only if an entirely new capability/agent is required.
+- Use `worker_agent` for fallback explanation when another required delegate is unavailable.
+- Choose `finish` only if the final response is complete and no further delegation is needed.
+
+Return ONLY valid JSON using this exact schema:
+{{
+  "summary": "short summary",
+  "project_plan": {{
+    "goal": "one-line goal",
+    "architecture": ["key design decision"],
+    "phases": [
+      {{
+        "name": "phase name",
+        "tasks": ["task 1", "task 2"],
+        "deliverables": ["deliverable 1"],
+        "acceptance_criteria": ["criterion 1"]
+      }}
+    ],
+    "required_components": [
+      {{
+        "name": "component/tool/library",
+        "status": "present|missing|unknown",
+        "purpose": "why needed",
+        "install_hint": "command or setup step"
+      }}
+    ],
+    "quality_gates": ["tests, lint, docs, verification gates"],
+    "risk_controls": ["major risk and mitigation"]
+  }},
+  "delegation": {{
+    "next_agent": "coding_agent|os_agent|agent_factory_agent|worker_agent|reviewer_agent|finish",
+    "reason": "why this next agent",
+    "task_content": "clear task for the next agent",
+    "state_updates": {{
+      "key": "value"
+    }}
+  }},
+  "final_response": "detailed user-facing response; include architecture, plan, components, and execution details"
+}}
+""".strip()
+
+
+def _parse_master_coding_output(raw_output: str) -> dict:
+    cleaned = _strip_json_fences(raw_output)
+    parsed = json.loads(cleaned)
+    if not isinstance(parsed, dict):
+        raise ValueError("master_coding_agent output must be a JSON object.")
+    return parsed
+
+
 def _call_codex_cli(prompt: str, model: str, working_directory: Path, timeout_seconds: int) -> str:
     temp_output_path = Path(resolve_output_path("coding_agent_codex_cli_last_message.txt"))
     command = [
@@ -221,6 +373,7 @@ def coding_agent(state):
     reasoning_effort = state.get("coding_reasoning_effort", DEFAULT_REASONING_EFFORT)
     timeout_seconds = int(state.get("coding_timeout", 90))
     api_key = os.getenv("OPENAI_API_KEY")
+    privileged_policy = build_privileged_policy(state)
 
     log_task_update("Coding Agent", f"Generation pass #{call_number} started.")
     log_task_update(
@@ -281,9 +434,24 @@ def coding_agent(state):
         written_path = Path(target_write_path)
         if not written_path.is_absolute():
             written_path = working_directory / written_path
+        if privileged_policy.get("read_only", False):
+            raise PermissionError("coding_agent write blocked: privileged read-only mode is enabled.")
+        if not path_allowed(str(written_path), privileged_policy.get("allowed_paths", [])):
+            raise PermissionError(f"coding_agent write blocked: target path is outside allowed scope: {written_path}")
         written_path.parent.mkdir(parents=True, exist_ok=True)
         written_path.write_text(code, encoding="utf-8")
         state["coding_written_path"] = str(written_path)
+        append_privileged_audit_event(
+            state,
+            actor="coding_agent",
+            action="file_write",
+            status="completed",
+            detail={
+                "path": str(written_path),
+                "language": detected_language,
+                "summary": redact_sensitive_text(summary),
+            },
+        )
 
     report_lines = [
         f"Backend: {backend_used}",
@@ -316,3 +484,145 @@ def coding_agent(state):
         recipients=["orchestrator_agent", "worker_agent"],
     )
     return state
+
+
+def master_coding_agent(state):
+    active_task, task_content, _ = begin_agent_session(state, "master_coding_agent")
+    state["master_coding_agent_calls"] = state.get("master_coding_agent_calls", 0) + 1
+    call_number = state["master_coding_agent_calls"]
+
+    objective = (
+        state.get("master_coding_request")
+        or state.get("coding_task")
+        or task_content
+        or state.get("current_objective")
+        or state.get("user_query", "")
+    ).strip()
+    if not objective:
+        raise ValueError("master_coding_agent requires a coding objective in state or task content.")
+
+    working_directory = Path(state.get("coding_working_directory", ".")).resolve()
+    context_files = state.get("coding_context_files", [])
+    available_agents = list(state.get("available_agents", []))
+    setup_summary = state.get("setup_summary", "")
+    setup_actions = state.get("setup_actions", [])
+
+    log_task_update("Master Coding Agent", f"Planning pass #{call_number} started for long-running coding workflow.")
+    context_blob, missing_files = _read_context_files(context_files, working_directory)
+    prompt = _build_master_coding_prompt(
+        objective=objective,
+        working_directory=working_directory,
+        context_files=context_files,
+        context_blob=context_blob,
+        missing_files=missing_files,
+        available_agents=available_agents,
+        setup_summary=setup_summary,
+        setup_actions=setup_actions if isinstance(setup_actions, list) else [],
+    )
+    response = llm.invoke(prompt)
+    raw_output = response.content if hasattr(response, "content") else str(response)
+
+    try:
+        result = _parse_master_coding_output(raw_output)
+    except Exception:
+        result = {
+            "summary": "Built a detailed fallback coding plan and delegated implementation to coding_agent.",
+            "project_plan": {
+                "goal": objective,
+                "architecture": ["Use existing runtime patterns and agent interfaces in this repository."],
+                "phases": [
+                    {
+                        "name": "Scaffold",
+                        "tasks": ["Create project skeleton and base configuration."],
+                        "deliverables": ["Initial runnable repository layout."],
+                        "acceptance_criteria": ["Project boots and base commands run."],
+                    },
+                    {
+                        "name": "Implement",
+                        "tasks": ["Build core modules and connect required integrations."],
+                        "deliverables": ["Feature-complete implementation."],
+                        "acceptance_criteria": ["Primary requirements implemented end-to-end."],
+                    },
+                    {
+                        "name": "Validate",
+                        "tasks": ["Add tests, docs, and operational runbook."],
+                        "deliverables": ["Test suite and project documentation."],
+                        "acceptance_criteria": ["Key paths verified with reproducible commands."],
+                    },
+                ],
+                "required_components": [],
+                "quality_gates": ["Unit tests pass", "Smoke test run succeeds", "Docs updated"],
+                "risk_controls": ["Capture assumptions early and validate dependencies before implementation."],
+            },
+            "delegation": {
+                "next_agent": "coding_agent",
+                "reason": "Fallback path after invalid planner JSON.",
+                "task_content": objective,
+                "state_updates": {"coding_task": objective},
+            },
+            "final_response": f"Detailed coding project plan prepared for: {objective}",
+        }
+
+    delegation = result.get("delegation", {})
+    if not isinstance(delegation, dict):
+        delegation = {}
+    next_agent = str(delegation.get("next_agent", "coding_agent")).strip() or "coding_agent"
+    allowed_next = {"coding_agent", "os_agent", "agent_factory_agent", "worker_agent", "reviewer_agent", "finish"}
+    if next_agent not in allowed_next:
+        next_agent = "coding_agent"
+
+    if next_agent != "finish" and available_agents and next_agent not in available_agents:
+        next_agent = "worker_agent" if "worker_agent" in available_agents else "finish"
+
+    state_updates = delegation.get("state_updates", {})
+    if not isinstance(state_updates, dict):
+        state_updates = {}
+    task_for_next = (
+        str(delegation.get("task_content", "")).strip()
+        or objective
+    )
+    reason = str(delegation.get("reason", "")).strip() or "Continue detailed project delivery."
+
+    project_plan = result.get("project_plan", {})
+    summary = str(result.get("summary", "Detailed master coding plan prepared.")).strip()
+    final_response = str(result.get("final_response", "")).strip() or summary
+
+    state["master_coding_summary"] = summary
+    state["master_coding_plan"] = project_plan
+    state["master_coding_delegation"] = delegation
+    state["master_coding_next_agent"] = next_agent
+    state["master_coding_task_content"] = task_for_next
+    state["master_coding_state_updates"] = state_updates
+    state["master_coding_reason"] = reason
+    state["draft_response"] = final_response
+
+    report_payload = {
+        "summary": summary,
+        "objective": objective,
+        "project_plan": project_plan,
+        "delegation": {
+            "next_agent": next_agent,
+            "reason": reason,
+            "task_content": task_for_next,
+            "state_updates": state_updates,
+        },
+        "final_response": final_response,
+    }
+    write_text_file(f"master_coding_agent_output_{call_number}.txt", json.dumps(report_payload, indent=2, ensure_ascii=False))
+    write_text_file(f"master_coding_agent_raw_{call_number}.txt", raw_output)
+
+    log_task_update(
+        "Master Coding Agent",
+        f"Planning pass #{call_number} finished. Suggested next agent: {next_agent}.",
+        final_response,
+    )
+    recipients = ["orchestrator_agent"]
+    if next_agent != "finish":
+        recipients.append(next_agent)
+    return publish_agent_output(
+        state,
+        "master_coding_agent",
+        final_response,
+        f"master_coding_result_{call_number}",
+        recipients=recipients,
+    )

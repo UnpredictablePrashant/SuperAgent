@@ -1,0 +1,20 @@
+Date of analysis: March 23, 2026 (United States)
+
+Bottom line
+- Gold remains in a momentum-led uptrend after setting a series of fresh record highs in late January and early March 2026. The move has been powered by safe‑haven demand amid elevated geopolitical risk, ongoing central‑bank buying (notably China), rising ETF inflows, and shifting expectations around rates and the US dollar. Volatility is high; pullbacks have been sharp but short‑lived. ([investing.com](https://www.investing.com/news/economy-news/gold-races-to-5100-record-peak-on-safehaven-demand-4464427?utm_source=openai))
+
+1) Spot gold trend and recent catalysts
+- Price action: Spot/futures broke to new all‑time highs in late January (Reuters/AP) and again the following week (Kitco). Price spikes coincided with bouts of risk aversion and safe‑haven flows. ([investing.com](https://www.investing.com/news/economy-news/gold-races-to-5100-record-peak-on-safehaven-demand-4464427?utm_source=openai))
+- Demand backdrop: 2025 was a record demand year (5,002t total; 863t from central banks). WGC expects geopolitics to keep official‑sector demand elevated in 2026. ([gold.org](https://www.gold.org/download/file/20498/FY_2025_GDT_Press_Release.pdf?utm_source=openai))
+- ETF flows: Physically‑backed gold ETFs extended a multi‑month inflow streak into early 2026; global holdings reached a record month‑end level by January. ([gold.org](https://www.gold.org/goldhub/research/etf-flows?utm_source=openai))
+- China’s central bank: PBoC extended its buying streak into 2026 (15th–16th straight months through Jan/Feb), reinforcing the official‑sector bid. ([investing.com](https://www.investing.com/news/economic-indicators/chinas-central-bank-buys-gold-for-15th-consecutive-month-4492250?utm_source=openai))
+
+2) Macro drivers: rates, inflation, USD, geopolitics
+- Real rates: The 10‑year TIPS yield hovered near the mid‑2% area in early March (a headwind in theory), but safe‑haven and central‑bank demand have dominated the tape. Watch any sustained move higher in real yields. ([macrotrends.net](https://www.macrotrends.net/3546/10-year-tips-yield?utm_source=openai))
+- Inflation expectations: 10‑year breakeven inflation has been steady around the low‑2% range in March, with risk of near‑term upside if energy shocks persist. ([ycharts.com](https://ycharts.com/indicators/10_year_breakeven_inflation_rate_daily?utm_source=openai))
+- US dollar: After weakening through 2025, the dollar bounced in early March on safe‑haven flows; DXY hovered in the high‑90s/near 99–100 in the first half of March. A weaker dollar tends to support gold, while a sharp USD rebound is a risk. ([bloomberg.com](https://www.bloomberg.com/news/articles/2025-06-30/dollar-index-slumps-10-8-in-biggest-first-half-loss-since-1973-mcjmj1mo?utm_source=openai))
+- Geopolitics: Ongoing Middle East tensions and broader great‑power frictions have repeatedly triggered flight‑to‑quality bids for bullion. Expect gold to react asymmetrically to escalation headlines. ([apnews.com](https://apnews.com/article/cfcf7fb103655bb78ead3f0078ac457f?utm_source=openai))
+
+3) Implications for gold miners and ETFs
+- Major bullion ETFs: GLD, IAU, GLDM (and SGOL/BAR) remain the simplest access points; flows have been supportive and (for now) trend‑reinforcing. Monitor WGC’s monthly ETF‑flows updates for turns. ([gold.org](https://www.gold.org/goldhub/research/etf-flows?utm_source=openai))
+- Miner equities: Operating leverage to price is significant. With AISC frameworks for large caps (e.g., Barrick, Newmont) in the ~$1,5xx–$1,8xx/oz range for 2025–26, current spot levels imply strong margin capture—and higher dividends/buybacks if prices hold. Cost pressures (diesel, labor, royalties) and jurisdictional risks remain. 

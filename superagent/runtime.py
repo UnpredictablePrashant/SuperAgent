@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
+from pathlib import Path
 
 from langgraph.graph import END, StateGraph
 
@@ -16,11 +18,30 @@ from tasks.a2a_protocol import (
     make_task,
     task_for_agent,
 )
+from tasks.file_memory import (
+    append_daily_memory_note,
+    append_long_term_memory,
+    append_session_event,
+    bootstrap_file_memory,
+    close_session_memory,
+    update_planning_file,
+    update_session_file,
+)
+from tasks.privileged_control import append_privileged_audit_event, build_privileged_policy
 from tasks.review_tasks import reviewer_agent
 from tasks.setup_registry import build_setup_snapshot
-from tasks.sqlite_store import initialize_db, insert_agent_execution, insert_run, update_run
+from tasks.sqlite_store import (
+    get_channel_session,
+    initialize_db,
+    insert_agent_execution,
+    insert_run,
+    update_run,
+    upsert_channel_session,
+    upsert_task_session,
+)
 from tasks.utils import (
     OUTPUT_DIR,
+    agent_model_context,
     create_run_output_dir,
     llm,
     log_task_update,
@@ -41,6 +62,18 @@ class AgentRuntime:
 
     def _agent_cards(self) -> list[dict]:
         return self.registry.agent_cards()
+
+    def _resolve_working_directory(self, state_overrides: dict | None = None) -> str:
+        overrides = state_overrides or {}
+        working_dir = str(overrides.get("working_directory") or overrides.get("SUPERAGENT_WORKING_DIR") or os.getenv("SUPERAGENT_WORKING_DIR", "")).strip()
+        if not working_dir:
+            raise RuntimeError(
+                "Working folder is not configured. Set SUPERAGENT_WORKING_DIR in Setup UI (Core Runtime), "
+                "or pass state_overrides['working_directory'] before running tasks."
+            )
+        resolved = Path(working_dir).expanduser().resolve()
+        resolved.mkdir(parents=True, exist_ok=True)
+        return str(resolved)
 
     def _agent_descriptions(self) -> dict[str, str]:
         return self.registry.agent_descriptions()
@@ -76,6 +109,68 @@ class AgentRuntime:
         if len(cleaned) <= limit:
             return cleaned
         return cleaned[: limit - 3] + "..."
+
+    def _is_project_audit_request(self, state: dict) -> bool:
+        text = " ".join(
+            [
+                str(state.get("user_query", "")),
+                str(state.get("current_objective", "")),
+            ]
+        ).lower()
+        markers = (
+            "production ready",
+            "production-ready",
+            "codebase",
+            "repository",
+            "repo",
+            "analyze my project",
+            "analyze my code",
+            "audit project",
+            "fixation required",
+        )
+        return any(marker in text for marker in markers)
+
+    def _read_file_excerpt(self, path: Path, limit: int = 5000) -> str:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+        if len(raw) <= limit:
+            return raw
+        return raw[:limit] + "\n... [truncated]"
+
+    def _build_repo_scan_summary(self, working_directory: str) -> str:
+        root = Path(working_directory).resolve()
+        if not root.exists():
+            return f"Working directory does not exist: {root}"
+        top_entries = sorted(p.name for p in root.iterdir())[:60]
+        important_patterns = [
+            "README.md",
+            "pyproject.toml",
+            "requirements.txt",
+            "package.json",
+            "Dockerfile",
+            "docker-compose.yml",
+            "Makefile",
+            ".env.example",
+        ]
+        sections = [
+            f"Repository root: {root}",
+            f"Top-level entries ({len(top_entries)} shown): {top_entries}",
+        ]
+        for pattern in important_patterns:
+            path = root / pattern
+            if not path.exists() or not path.is_file():
+                continue
+            excerpt = self._read_file_excerpt(path, limit=6000)
+            if excerpt:
+                sections.append(f"\n=== {path.name} ===\n{excerpt}")
+
+        py_files = sorted([p for p in root.rglob("*.py") if ".venv" not in p.parts and ".deps" not in p.parts])[:120]
+        if py_files:
+            rel_paths = [str(p.relative_to(root)) for p in py_files[:120]]
+            sections.append(f"\nPython files sampled ({len(rel_paths)}):\n" + "\n".join(rel_paths))
+        return "\n".join(sections)
 
     def _history_as_text(self, state: dict) -> str:
         history = state.get("agent_history", [])
@@ -115,7 +210,100 @@ class AgentRuntime:
         run_id = state.get("run_id")
         if run_id:
             insert_agent_execution(run_id, timestamp, agent_name, status, reason, self._truncate(output_text))
+        self._write_session_record(state, status="running", active_agent=agent_name)
         return state
+
+    def _session_payload(self, state: dict, *, status: str, active_agent: str = "", completed_at: str = "") -> dict:
+        channel_session = state.get("channel_session", {}) if isinstance(state.get("channel_session"), dict) else {}
+        return {
+            "session_id": state.get("session_id", ""),
+            "run_id": state.get("run_id", ""),
+            "channel": state.get("incoming_channel", ""),
+            "session_key": channel_session.get("session_key", ""),
+            "started_at": state.get("session_started_at", ""),
+            "updated_at": datetime.now(UTC).isoformat(),
+            "completed_at": completed_at,
+            "status": status,
+            "active_agent": active_agent,
+            "step_count": len(state.get("agent_history", [])),
+            "summary": {
+                "objective": state.get("current_objective", ""),
+                "last_agent": state.get("last_agent", ""),
+                "last_status": state.get("last_agent_status", ""),
+                "last_error": state.get("last_error", ""),
+            },
+        }
+
+    def _write_session_record(self, state: dict, *, status: str, active_agent: str = "", completed_at: str = "") -> None:
+        if not state.get("session_id"):
+            return
+        upsert_task_session(self._session_payload(state, status=status, active_agent=active_agent, completed_at=completed_at))
+        note = f"status={status}\nactive_agent={active_agent or state.get('last_agent', '')}"
+        update_session_file(state, status=status, active_agent=active_agent, note=note)
+        append_session_event(state, "runtime", "session_status", note)
+        self._write_channel_session_progress(state, status=status, active_agent=active_agent, completed_at=completed_at)
+
+    def _base_channel_session_key(self, state: dict) -> str:
+        key = str(state.get("channel_session_key", "")).strip()
+        if key:
+            return key
+        channel = str(state.get("incoming_channel", "webchat") or "webchat").strip().lower()
+        workspace_id = str(state.get("incoming_workspace_id", "") or "default").strip()
+        sender_id = str(state.get("incoming_sender_id", "") or "unknown").strip()
+        chat_id = str(state.get("incoming_chat_id", "") or sender_id or "unknown").strip()
+        scope = "group" if bool(state.get("incoming_is_group", False)) else "main"
+        return ":".join([channel, workspace_id, chat_id, scope])
+
+    def _write_channel_session_progress(self, state: dict, *, status: str, active_agent: str = "", completed_at: str = "") -> None:
+        session_key = self._base_channel_session_key(state)
+        if not session_key:
+            return
+        previous = get_channel_session(session_key) or {}
+        previous_state = previous.get("state", {}) if isinstance(previous, dict) else {}
+        if not isinstance(previous_state, dict):
+            previous_state = {}
+        history = previous_state.get("history", [])
+        if not isinstance(history, list):
+            history = []
+        if status == "completed":
+            history.append(
+                {
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "run_id": state.get("run_id", ""),
+                    "objective": state.get("current_objective", state.get("user_query", "")),
+                    "final_output": self._truncate(state.get("final_output") or state.get("draft_response") or "", 600),
+                }
+            )
+            history = history[-20:]
+        session_payload = {
+            "session_key": session_key,
+            "channel": state.get("incoming_channel", ""),
+            "chat_id": state.get("incoming_chat_id", ""),
+            "sender_id": state.get("incoming_sender_id", ""),
+            "workspace_id": state.get("incoming_workspace_id", ""),
+            "is_group": bool(state.get("incoming_is_group", False)),
+            "updated_at": datetime.now(UTC).isoformat(),
+            "state": {
+                **previous_state,
+                "last_text": state.get("user_query", ""),
+                "last_run_id": state.get("run_id", ""),
+                "last_objective": state.get("current_objective", state.get("user_query", "")),
+                "last_plan": state.get("plan", ""),
+                "last_plan_data": state.get("plan_data", {}),
+                "last_plan_steps": state.get("plan_steps", []),
+                "last_plan_step_index": int(state.get("plan_step_index", 0) or 0),
+                "last_status": status,
+                "last_active_agent": active_agent or state.get("last_agent", ""),
+                "last_error": state.get("last_error", ""),
+                "failure_checkpoint": state.get("failure_checkpoint", {}),
+                "completed_at": completed_at,
+                "awaiting_user_input": bool(state.get("plan_needs_clarification", False)),
+                "pending_user_question": state.get("pending_user_question", ""),
+                "history": history,
+            },
+        }
+        upsert_channel_session(session_key, session_payload)
+        state["channel_session"] = session_payload
 
     def _infer_agent_output(self, before: dict, after: dict) -> str:
         if after.get("draft_response") and after.get("draft_response") != before.get("draft_response"):
@@ -168,7 +356,159 @@ class AgentRuntime:
     def _parse_orchestrator_output(self, raw_output: str) -> dict:
         return json.loads(self._strip_code_fences(raw_output))
 
+    def _is_deep_research_request(self, state: dict) -> bool:
+        text = " ".join(
+            [
+                state.get("user_query", ""),
+                state.get("current_objective", ""),
+                state.get("research_query", ""),
+            ]
+        ).lower()
+        if not text.strip():
+            return False
+
+        explicit_markers = (
+            "deep research",
+            "deep-research",
+            "in-depth research",
+            "comprehensive research",
+            "extensive research",
+            "thorough research",
+        )
+        if any(marker in text for marker in explicit_markers):
+            return True
+
+        citation_markers = ("with citations", "cite sources", "source-backed", "source backed")
+        research_markers = ("research", "investigate", "investigation", "literature review", "prior art")
+        return any(marker in text for marker in citation_markers) and any(marker in text for marker in research_markers)
+
+    def _is_long_document_request(self, state: dict) -> bool:
+        if bool(state.get("long_document_mode", False)):
+            return True
+
+        requested_pages = int(state.get("long_document_pages", 0) or 0)
+        if requested_pages >= 20:
+            return True
+
+        text = " ".join(
+            [
+                str(state.get("user_query", "")),
+                str(state.get("current_objective", "")),
+            ]
+        ).lower()
+        if not text.strip():
+            return False
+
+        direct_markers = (
+            "long document",
+            "long-form document",
+            "book chapter",
+            "whitepaper",
+            "monograph",
+            "50 page",
+            "50-page",
+            "100 page",
+            "100-page",
+            "exhaustive report",
+        )
+        if any(marker in text for marker in direct_markers):
+            return True
+
+        has_page_signal = "page" in text or "pages" in text
+        has_length_signal = any(token in text for token in ("very long", "exhaustive", "chapter by chapter", "multi-part"))
+        return has_page_signal and has_length_signal
+
+    def _kill_switch_triggered(self, state: dict) -> bool:
+        policy = build_privileged_policy(state)
+        path_value = str(policy.get("kill_switch_file", "")).strip()
+        if not path_value:
+            return False
+        try:
+            return Path(path_value).expanduser().resolve().exists()
+        except Exception:
+            return False
+
+    def _looks_like_resume_request(self, text: str) -> bool:
+        query = str(text or "").strip().lower()
+        if not query:
+            return False
+        markers = ("resume", "continue", "retry", "start from", "pick up", "carry on")
+        return any(marker in query for marker in markers)
+
+    def _resume_block_reason(self, error_message: str) -> str:
+        message = str(error_message or "").strip().lower()
+        blockers = {
+            "not configured": "missing setup/configuration for the failed agent",
+            "api key": "required API credentials are missing",
+            "permission": "permission/authorization was denied",
+            "unauthorized": "authorization failed",
+            "forbidden": "authorization failed",
+            "kill switch": "kill switch is enabled",
+            "working folder is not configured": "working directory is not configured",
+        }
+        for marker, reason in blockers.items():
+            if marker in message:
+                return reason
+        return ""
+
+    def _build_failure_checkpoint(self, state: dict, agent_name: str, error_message: str, active_task: dict | None) -> dict:
+        step_index = int(state.get("plan_step_index", 0) or 0)
+        block_reason = self._resume_block_reason(error_message)
+        can_resume = not bool(block_reason)
+        return {
+            "failed_at": datetime.now(UTC).isoformat(),
+            "agent": agent_name,
+            "step_index": step_index,
+            "task_id": active_task.get("task_id") if isinstance(active_task, dict) else "",
+            "task_content": active_task.get("content") if isinstance(active_task, dict) else "",
+            "error": error_message,
+            "can_resume": can_resume,
+            "block_reason": block_reason,
+        }
+
+    def _next_planned_agents(self, state: dict) -> list[dict]:
+        steps = state.get("plan_steps", [])
+        if not isinstance(steps, list) or not steps:
+            return []
+        index = int(state.get("plan_step_index", 0) or 0)
+        if index < 0 or index >= len(steps):
+            return []
+        current = steps[index]
+        if not isinstance(current, dict):
+            return []
+        group = str(current.get("parallel_group") or "").strip()
+        if not group:
+            return [current]
+        batch = [current]
+        cursor = index + 1
+        while cursor < len(steps):
+            candidate = steps[cursor]
+            if not isinstance(candidate, dict):
+                break
+            if str(candidate.get("parallel_group") or "").strip() != group:
+                break
+            batch.append(candidate)
+            cursor += 1
+        return batch
+
+    def _mark_planned_step_complete(self, state: dict) -> None:
+        state["plan_step_index"] = int(state.get("plan_step_index", 0) or 0) + 1
+        state["plan_execution_count"] = int(state.get("plan_execution_count", 0) or 0) + 1
+        update_planning_file(
+            state,
+            status="executing",
+            objective=state.get("current_objective", state.get("user_query", "")),
+            plan_text=state.get("plan", ""),
+            clarifications=state.get("plan_clarification_questions", []),
+            execution_note=(
+                f"Executed step index {state.get('plan_step_index', 0)} "
+                f"via agent {state.get('last_agent', '')}."
+            ),
+        )
+
     def _execute_agent(self, state: dict, agent_name: str) -> dict:
+        if self._kill_switch_triggered(state):
+            raise RuntimeError("Kill switch triggered. Refusing further execution.")
         state = self.apply_runtime_setup(state)
         if not self._is_agent_available(state, agent_name):
             unavailable_reason = (
@@ -177,6 +517,7 @@ class AgentRuntime:
             )
             state["last_error"] = unavailable_reason
             state["review_pending"] = False
+            state["failure_checkpoint"] = self._build_failure_checkpoint(state, agent_name, unavailable_reason, state.get("active_task"))
             return self._append_history(state, agent_name, "skipped", state.get("orchestrator_reason", ""), unavailable_reason)
 
         spec = self.registry.agents[agent_name]
@@ -193,6 +534,18 @@ class AgentRuntime:
             state = append_task(state, active_task)
 
         state["active_task"] = active_task
+        append_daily_memory_note(
+            state,
+            "orchestrator_agent",
+            "dispatch",
+            f"agent={agent_name}\ntask_id={active_task['task_id']}\nintent={active_task.get('intent', '')}",
+        )
+        append_session_event(
+            state,
+            "orchestrator_agent",
+            "dispatch",
+            f"agent={agent_name}\ntask_id={active_task['task_id']}\nintent={active_task.get('intent', '')}",
+        )
         record_work_note(
             state,
             "orchestrator_agent",
@@ -211,12 +564,18 @@ class AgentRuntime:
 
         before_state = {k: v for k, v in state.items() if k != "a2a"}
         try:
-            state = spec.handler(state)
+            with agent_model_context(agent_name):
+                state = spec.handler(state)
             output_text = self._infer_agent_output(before_state, state)
             if active_task.get("status") == "pending":
                 state = complete_task(state, active_task["task_id"], "completed")
             state["review_pending"] = agent_name != "reviewer_agent"
             state = self._append_history(state, agent_name, "success", state.get("orchestrator_reason", ""), output_text)
+            append_daily_memory_note(state, agent_name, "completed", self._truncate(output_text, 1000))
+            append_session_event(state, agent_name, "completed", self._truncate(output_text, 600))
+            if agent_name == str(state.get("planned_active_agent", "")).strip():
+                self._mark_planned_step_complete(state)
+                state["planned_active_agent"] = ""
         except Exception as exc:
             error_message = str(exc)
             state["last_error"] = error_message
@@ -233,8 +592,11 @@ class AgentRuntime:
                 ),
             )
             state = self._append_history(state, agent_name, "error", state.get("orchestrator_reason", ""), error_message)
+            append_daily_memory_note(state, agent_name, "failed", self._truncate(error_message, 1000))
+            append_session_event(state, agent_name, "failed", self._truncate(error_message, 600))
             record_work_note(state, agent_name, "failed", f"task_id={active_task['task_id']}\nerror={error_message}")
             log_task_update("System", f"{agent_name} failed.", error_message)
+            state["failure_checkpoint"] = self._build_failure_checkpoint(state, agent_name, error_message, active_task)
         return state
 
     def orchestrator_agent(self, state: dict) -> dict:
@@ -252,6 +614,83 @@ class AgentRuntime:
                 or state.get("last_agent_output")
                 or "Reached the orchestration step limit without a better final answer."
             )
+            return state
+
+        if bool(state.get("resume_blocked", False)):
+            failed = state.get("failure_checkpoint", {}) if isinstance(state.get("failure_checkpoint"), dict) else {}
+            failed_agent = failed.get("agent", "unknown")
+            failed_error = failed.get("error", state.get("last_error", ""))
+            reason = state.get("resume_block_reason", "safe resume is not possible")
+            message = (
+                "Cannot resume from the failed checkpoint.\n"
+                f"Reason: {reason}\n"
+                f"Failed agent: {failed_agent}\n"
+                f"Error: {failed_error}\n"
+                "Fix the blocker and start a new run, or rerun with --new-session."
+            )
+            state["next_agent"] = "__finish__"
+            state["final_output"] = message
+            state = append_message(state, make_message("orchestrator_agent", "user", "resume-blocked", message))
+            return state
+
+        if state.get("incoming_payload") and not state.get("gateway_message") and self._is_agent_available(state, "channel_gateway_agent"):
+            reason = "Normalize the incoming channel payload before orchestration."
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "channel_gateway_agent"
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="channel_gateway_agent",
+                    intent="channel-ingest-normalization",
+                    content=state.get("user_query", ""),
+                    state_updates={},
+                ),
+            )
+            return state
+
+        if state.get("gateway_message") and not state.get("channel_session") and self._is_agent_available(state, "session_router_agent"):
+            reason = "Resolve or create a channel session before task execution."
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "session_router_agent"
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="session_router_agent",
+                    intent="session-routing",
+                    content=state.get("user_query", ""),
+                    state_updates={},
+                ),
+            )
+            return state
+
+        if not state.get("plan_ready", False) and self._is_agent_available(state, "planner_agent"):
+            if state.get("last_agent") != "planner_agent":
+                reason = "Create a detailed step-by-step plan before execution."
+                state["orchestrator_reason"] = reason
+                state["next_agent"] = "planner_agent"
+                state = append_task(
+                    state,
+                    make_task(
+                        sender="orchestrator_agent",
+                        recipient="planner_agent",
+                        intent="planning",
+                        content=current_objective,
+                        state_updates={},
+                    ),
+                )
+                return state
+
+        if bool(state.get("plan_needs_clarification", False)):
+            questions = state.get("plan_clarification_questions", [])
+            clarification = (
+                "I need clarification before executing the plan:\n"
+                + "\n".join(f"- {item}" for item in questions)
+            ) if questions else "I need more detail before executing the plan."
+            state["next_agent"] = "__finish__"
+            state["final_output"] = clarification
+            state = append_message(state, make_message("orchestrator_agent", "user", "clarification", clarification))
             return state
 
         if state.get("last_agent") and state.get("last_agent") != "reviewer_agent" and state.get("review_pending") and self._is_agent_available(state, "reviewer_agent"):
@@ -285,6 +724,51 @@ class AgentRuntime:
             )
             return state
 
+        if state.get("last_agent") == "reviewer_agent" and state.get("review_decision") == "approve":
+            final_text = state.get("draft_response") or state.get("last_agent_output") or "Completed."
+            state["next_agent"] = "__finish__"
+            state["final_output"] = final_text
+            state = append_message(state, make_message("orchestrator_agent", "user", "final", final_text))
+            update_planning_file(
+                state,
+                status="completed",
+                objective=current_objective,
+                plan_text=state.get("plan", ""),
+                clarifications=state.get("plan_clarification_questions", []),
+                execution_note="Reviewer approved final output against the original objective.",
+            )
+            return state
+
+        planned_batch = self._next_planned_agents(state)
+        if planned_batch:
+            next_step = planned_batch[0]
+            next_agent = str(next_step.get("agent") or "worker_agent").strip()
+            task_content = str(next_step.get("task") or current_objective)
+            if len(planned_batch) > 1:
+                task_content = (
+                    f"{task_content}\n\nParallel batch hint: execute independently from other steps in group "
+                    f"'{next_step.get('parallel_group')}'."
+                )
+            next_agent, reason = self._handle_unavailable_agent_choice(
+                state,
+                next_agent,
+                f"Execute planned step {next_step.get('id', '')}: {next_step.get('success_criteria', '')}",
+            )
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = next_agent
+            state["planned_active_agent"] = next_agent
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient=next_agent,
+                    intent="planned-step",
+                    content=task_content,
+                    state_updates={"current_objective": task_content},
+                ),
+            )
+            return state
+
         if state.get("last_agent") == "agent_factory_agent" and state.get("dynamic_agent_ready") and self._is_agent_available(state, "dynamic_agent_runner"):
             reason = "A generated agent is ready. Execute it through the dynamic agent runner."
             state["orchestrator_reason"] = reason
@@ -306,6 +790,134 @@ class AgentRuntime:
             )
             return state
 
+        if state.get("last_agent") == "master_coding_agent":
+            delegated_agent = str(state.get("master_coding_next_agent", "")).strip()
+            delegated_reason = str(state.get("master_coding_reason", "")).strip() or "Continue master coding workflow."
+            delegated_task = (
+                state.get("master_coding_task_content")
+                or state.get("current_objective")
+                or state.get("user_query", "")
+            )
+            delegated_updates = state.get("master_coding_state_updates", {})
+            if not isinstance(delegated_updates, dict):
+                delegated_updates = {}
+
+            if delegated_agent == "finish":
+                state["orchestrator_reason"] = delegated_reason
+                state["next_agent"] = "__finish__"
+                state["final_output"] = state.get("draft_response") or state.get("last_agent_output") or "Master coding workflow completed."
+                state = append_message(state, make_message("orchestrator_agent", "user", "final", state["final_output"]))
+                return state
+
+            if delegated_agent:
+                delegated_agent, delegated_reason = self._handle_unavailable_agent_choice(state, delegated_agent, delegated_reason)
+                if delegated_agent == "finish":
+                    state["orchestrator_reason"] = delegated_reason
+                    state["next_agent"] = "__finish__"
+                    state["final_output"] = state.get("draft_response") or state.get("last_agent_output") or "Master coding workflow stopped."
+                    state = append_message(state, make_message("orchestrator_agent", "user", "final", state["final_output"]))
+                    return state
+                state["orchestrator_reason"] = delegated_reason
+                state["next_agent"] = delegated_agent
+                state = append_task(
+                    state,
+                    make_task(
+                        sender="master_coding_agent",
+                        recipient=delegated_agent,
+                        intent="master-coding-delegation",
+                        content=delegated_task,
+                        state_updates=delegated_updates,
+                    ),
+                )
+                return state
+
+        if (
+            state.get("last_agent") != "master_coding_agent"
+            and self._is_agent_available(state, "master_coding_agent")
+            and self._is_project_audit_request(state)
+        ):
+            reason = "The request is a project/codebase audit. Route to master_coding_agent for a structured production-readiness assessment."
+            objective = state.get("current_objective") or state.get("user_query", "")
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "master_coding_agent"
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="master_coding_agent",
+                    intent="project-audit-dispatch",
+                    content=objective,
+                    state_updates={"master_coding_request": objective, "coding_task": objective},
+                ),
+            )
+            return state
+
+        if (
+            state.get("last_agent") != "deep_research_agent"
+            and self._is_agent_available(state, "deep_research_agent")
+            and not self._is_long_document_request(state)
+            and self._is_deep_research_request(state)
+        ):
+            reason = "The request is a deep research task. Route to deep_research_agent for OpenAI web-grounded deep research."
+            research_query = state.get("current_objective") or state.get("user_query", "")
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "deep_research_agent"
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="deep_research_agent",
+                    intent="deep-research-dispatch",
+                    content=research_query,
+                    state_updates={"research_query": research_query},
+                ),
+            )
+            record_work_note(
+                state,
+                "orchestrator_agent",
+                "decision",
+                f"next_agent=deep_research_agent\nreason={reason}\nstate_updates={{'research_query': '{research_query}'}}",
+            )
+            return state
+
+        if (
+            state.get("last_agent") != "long_document_agent"
+            and self._is_agent_available(state, "long_document_agent")
+            and self._is_long_document_request(state)
+        ):
+            reason = (
+                "The request is a very long/exhaustive document objective. "
+                "Route to long_document_agent for staged section research and final merge."
+            )
+            long_doc_objective = state.get("current_objective") or state.get("user_query", "")
+            updates = {
+                "current_objective": long_doc_objective,
+                "long_document_mode": True,
+            }
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "long_document_agent"
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="long_document_agent",
+                    intent="long-document-dispatch",
+                    content=long_doc_objective,
+                    state_updates=updates,
+                ),
+            )
+            record_work_note(
+                state,
+                "orchestrator_agent",
+                "decision",
+                (
+                    "next_agent=long_document_agent\n"
+                    f"reason={reason}\n"
+                    f"state_updates={json.dumps(updates, ensure_ascii=False)}"
+                ),
+            )
+            return state
+
         prompt = f"""
 You are the orchestration agent for a plugin-driven multi-agent AI system.
 
@@ -319,6 +931,7 @@ Rules:
 - If incoming_channel or incoming_payload is present and gateway_message has not been created yet, prefer channel_gateway_agent first.
 - If gateway_message exists but channel_session is missing, prefer session_router_agent before other work.
 - If the user asks for an unavailable integration, use worker_agent to explain the missing setup unless agent_factory_agent is better suited.
+- For end-to-end software build requests that need detailed architecture, project planning, and delegated implementation/setup, prefer master_coding_agent first.
 - Finish when the current state already contains a good final answer.
 - Never use any agent for exploitation, credential attacks, service disruption, or unauthorized access.
 - If the reviewer already requested a retry, follow that instruction rather than inventing a different reroute.
@@ -352,6 +965,9 @@ Reviewer corrected values:
 Current setup summary:
 {state.get("setup_summary", "")}
 
+File memory context:
+{self._truncate(state.get("file_memory_context", "") or "None", 1800)}
+
 Disabled or unavailable agents:
 {json.dumps(state.get("disabled_agents", {}), indent=2, ensure_ascii=False)}
 
@@ -377,7 +993,8 @@ Return ONLY valid JSON in this exact schema:
 }}
 """.strip()
 
-        response = llm.invoke(prompt)
+        with agent_model_context("orchestrator_agent"):
+            response = llm.invoke(prompt)
         raw_output = response.content.strip() if hasattr(response, "content") else str(response).strip()
         try:
             decision = self._parse_orchestrator_output(raw_output)
@@ -435,25 +1052,55 @@ Return ONLY valid JSON in this exact schema:
         return workflow.compile()
 
     def save_graph(self, app):
+        # Graph rendering can fail on some LangGraph versions for dynamic dict state.
+        # Keep this as an opt-in diagnostic feature so normal runs are not noisy.
+        if os.getenv("SUPERAGENT_SAVE_GRAPH", "").strip().lower() not in {"1", "true", "yes", "on"}:
+            return
         try:
-            png_data = app.get_graph().draw_mermaid_png()
-            graph_path = resolve_output_path("graph.png")
-            with open(graph_path, "wb") as f:
-                f.write(png_data)
-            log_task_update("System", f"Workflow graph saved to {graph_path}")
+            graph = app.get_graph()
+            mermaid_text = graph.draw_mermaid()
+            mermaid_path = resolve_output_path("graph.mmd")
+            with open(mermaid_path, "w", encoding="utf-8") as f:
+                f.write(mermaid_text)
+            log_task_update("System", f"Workflow graph (Mermaid) saved to {mermaid_path}")
+
+            if os.getenv("SUPERAGENT_SAVE_GRAPH_PNG", "").strip().lower() in {"1", "true", "yes", "on"}:
+                png_data = graph.draw_mermaid_png()
+                graph_path = resolve_output_path("graph.png")
+                with open(graph_path, "wb") as f:
+                    f.write(png_data)
+                log_task_update("System", f"Workflow graph PNG saved to {graph_path}")
         except Exception as exc:
-            logger.error(f"Failed to generate graph PNG: {exc}")
+            logger.warning(f"Skipping graph export: {exc}")
 
     def new_run_id(self) -> str:
         return f"run_{datetime.now(UTC).timestamp()}"
 
     def build_initial_state(self, user_query: str, **overrides) -> dict:
+        resolved_run_id = overrides.get("run_id", self.new_run_id())
+        session_started_at = overrides.get("session_started_at") or datetime.now(UTC).isoformat()
         initial_state = {
-            "run_id": overrides.get("run_id", self.new_run_id()),
+            "run_id": resolved_run_id,
+            "session_id": overrides.get("session_id") or f"session_{resolved_run_id}",
+            "session_started_at": session_started_at,
             "work_notes_file": overrides.get("work_notes_file", "agent_work_notes.txt"),
             "user_query": user_query,
             "current_objective": user_query,
             "plan": "",
+            "plan_data": {},
+            "plan_steps": [],
+            "plan_step_index": 0,
+            "plan_execution_count": 0,
+            "plan_ready": False,
+            "plan_needs_clarification": False,
+            "plan_clarification_questions": [],
+            "planned_active_agent": "",
+            "pending_user_question": "",
+            "resume_requested": False,
+            "resume_ready": False,
+            "resume_blocked": False,
+            "resume_block_reason": "",
+            "failure_checkpoint": {},
             "draft_response": "",
             "review_reason": "",
             "review_decision": "",
@@ -476,8 +1123,81 @@ Return ONLY valid JSON in this exact schema:
             "use_vector_memory": True,
         }
         initial_state.update(overrides)
+        prior_channel_session = initial_state.get("channel_session", {})
+        prior_channel_state = prior_channel_session.get("state", {}) if isinstance(prior_channel_session, dict) else {}
+        if isinstance(prior_channel_state, dict):
+            if prior_channel_state.get("last_plan") and not initial_state.get("plan"):
+                initial_state["plan"] = str(prior_channel_state.get("last_plan", ""))
+            if prior_channel_state.get("last_plan_data"):
+                initial_state["plan_data"] = prior_channel_state.get("last_plan_data", {})
+            if prior_channel_state.get("last_plan_steps"):
+                initial_state["plan_steps"] = prior_channel_state.get("last_plan_steps", [])
+            if isinstance(prior_channel_state.get("last_plan_step_index"), int):
+                initial_state["plan_step_index"] = max(0, int(prior_channel_state.get("last_plan_step_index", 0)))
+            if initial_state.get("plan_steps"):
+                initial_state["plan_ready"] = True
+            if prior_channel_state.get("last_objective"):
+                initial_state["session_previous_objective"] = str(prior_channel_state.get("last_objective", ""))
+            if prior_channel_state.get("history"):
+                initial_state["session_history"] = prior_channel_state.get("history", [])
+            if prior_channel_state.get("failure_checkpoint"):
+                initial_state["failure_checkpoint"] = prior_channel_state.get("failure_checkpoint", {})
+            if prior_channel_state.get("awaiting_user_input"):
+                previous_objective = str(prior_channel_state.get("last_objective", "")).strip()
+                if previous_objective:
+                    initial_state["current_objective"] = f"{previous_objective}\n\nUser clarification: {user_query}"
+                initial_state["plan_needs_clarification"] = False
+                initial_state["plan_ready"] = False
+            previous_failed = str(prior_channel_state.get("last_status", "")).strip().lower() == "failed"
+            resume_checkpoint = initial_state.get("failure_checkpoint", {})
+            resume_requested = self._looks_like_resume_request(user_query)
+            if previous_failed and resume_requested and isinstance(resume_checkpoint, dict):
+                initial_state["resume_requested"] = True
+                can_resume = bool(resume_checkpoint.get("can_resume", False))
+                block_reason = str(resume_checkpoint.get("block_reason", "") or "")
+                if can_resume and initial_state.get("plan_steps"):
+                    failed_index = int(resume_checkpoint.get("step_index", initial_state.get("plan_step_index", 0)) or 0)
+                    initial_state["plan_step_index"] = max(0, min(failed_index, max(0, len(initial_state.get("plan_steps", [])) - 1)))
+                    initial_state["plan_ready"] = True
+                    initial_state["plan_needs_clarification"] = False
+                    initial_state["resume_ready"] = True
+                    failed_task = str(resume_checkpoint.get("task_content", "") or "").strip()
+                    if failed_task:
+                        initial_state["current_objective"] = failed_task
+                else:
+                    initial_state["resume_blocked"] = True
+                    initial_state["resume_block_reason"] = block_reason or "missing plan checkpoints for safe restart"
         initial_state = self.apply_runtime_setup(initial_state)
+        initial_state["privileged_policy"] = build_privileged_policy(initial_state)
+        if self._is_project_audit_request(initial_state):
+            try:
+                working_directory = str(initial_state.get("working_directory", "")).strip()
+                if working_directory:
+                    initial_state["repo_scan_summary"] = self._build_repo_scan_summary(working_directory)
+            except Exception as exc:
+                initial_state["repo_scan_summary"] = f"Repository scan failed: {exc}"
         ensure_a2a_state(initial_state, initial_state.get("available_agent_cards") or self._agent_cards())
+        initial_state = bootstrap_file_memory(initial_state)
+        update_session_file(initial_state, status="initialized")
+        update_planning_file(
+            initial_state,
+            status="initialized",
+            objective=initial_state.get("current_objective", initial_state.get("user_query", "")),
+            plan_text=initial_state.get("plan", ""),
+            clarifications=initial_state.get("plan_clarification_questions", []),
+            execution_note="Session initialized.",
+        )
+        append_privileged_audit_event(
+            initial_state,
+            actor="runtime",
+            action="run_initialized",
+            status="ok",
+            detail={
+                "run_id": initial_state.get("run_id", ""),
+                "working_directory": initial_state.get("working_directory", ""),
+                "privileged_policy": initial_state.get("privileged_policy", {}),
+            },
+        )
         return initial_state
 
     def invoke(self, initial_state: dict) -> dict:
@@ -486,19 +1206,39 @@ Return ONLY valid JSON in this exact schema:
 
     def run_query(self, user_query: str, *, state_overrides: dict | None = None, create_outputs: bool = True) -> dict:
         initialize_db()
-        run_id = (state_overrides or {}).get("run_id", self.new_run_id())
+        overrides = dict(state_overrides or {})
+        if not overrides.get("channel_session_key"):
+            overrides["channel_session_key"] = self._base_channel_session_key(overrides)
+        existing_channel_session = None
+        if overrides.get("channel_session_key"):
+            existing_channel_session = get_channel_session(str(overrides.get("channel_session_key")))
+            if existing_channel_session:
+                overrides["channel_session"] = existing_channel_session
+        working_directory = self._resolve_working_directory(overrides)
+        run_id = overrides.get("run_id", self.new_run_id())
         started_at = datetime.now(UTC).isoformat()
-        run_output_dir = create_run_output_dir(run_id) if create_outputs else OUTPUT_DIR
+        run_output_dir = create_run_output_dir(run_id, base_dir=working_directory) if create_outputs else working_directory
         insert_run(run_id, user_query, started_at, "running")
         reset_text_file(
             "agent_work_notes.txt",
             f"Run ID: {run_id}\nStarted At: {started_at}\nUser Query: {user_query}\n{'=' * 72}\n\n",
         )
-        initial_state = self.build_initial_state(user_query, run_id=run_id, run_output_dir=run_output_dir, **(state_overrides or {}))
+        initial_state_overrides = dict(overrides)
+        initial_state_overrides["run_id"] = run_id
+        initial_state_overrides["run_output_dir"] = run_output_dir
+        initial_state_overrides["working_directory"] = working_directory
+        initial_state = self.build_initial_state(
+            user_query,
+            **initial_state_overrides,
+        )
+        if self._kill_switch_triggered(initial_state):
+            raise RuntimeError("Kill switch triggered. Remove kill-switch file to continue.")
         if not self._is_agent_available(initial_state, "worker_agent"):
             raise RuntimeError("Core LLM setup is incomplete. OPENAI_API_KEY is required before the agent system can run.")
         initial_state = append_message(initial_state, make_message("user", "orchestrator_agent", "request", user_query))
         record_work_note(initial_state, "user", "request", user_query)
+        append_daily_memory_note(initial_state, "user", "request", user_query)
+        self._write_session_record(initial_state, status="running")
         try:
             app = self.build_workflow()
             self.save_graph(app)
@@ -507,9 +1247,54 @@ Return ONLY valid JSON in this exact schema:
             if create_outputs:
                 write_text_file("final_output.txt", final_output)
             update_run(run_id, status="completed", completed_at=datetime.now(UTC).isoformat(), final_output=final_output)
+            append_daily_memory_note(result, "system", "run_completed", self._truncate(final_output, 1000))
+            append_long_term_memory(result, "Run Summary", self._truncate(final_output, 1200))
+            self._write_session_record(result, status="completed", completed_at=datetime.now(UTC).isoformat())
+            update_planning_file(
+                result,
+                status="completed",
+                objective=result.get("current_objective", result.get("user_query", "")),
+                plan_text=result.get("plan", ""),
+                clarifications=result.get("plan_clarification_questions", []),
+                execution_note="Run completed.",
+            )
+            close_session_memory(result, status="completed", final_output=final_output)
+            append_privileged_audit_event(
+                result,
+                actor="runtime",
+                action="run_completed",
+                status="ok",
+                detail={"run_id": run_id, "final_output_excerpt": self._truncate(final_output, 400)},
+            )
             return result
         except Exception:
             update_run(run_id, status="failed", completed_at=datetime.now(UTC).isoformat(), final_output="workflow failed")
+            if not initial_state.get("failure_checkpoint"):
+                fallback_error = initial_state.get("last_error", "workflow failed")
+                initial_state["failure_checkpoint"] = self._build_failure_checkpoint(
+                    initial_state,
+                    agent_name=initial_state.get("last_agent", "runtime"),
+                    error_message=fallback_error,
+                    active_task=initial_state.get("active_task"),
+                )
+            append_daily_memory_note(initial_state, "system", "run_failed", initial_state.get("last_error", "workflow failed"))
+            self._write_session_record(initial_state, status="failed", completed_at=datetime.now(UTC).isoformat())
+            update_planning_file(
+                initial_state,
+                status="failed",
+                objective=initial_state.get("current_objective", initial_state.get("user_query", "")),
+                plan_text=initial_state.get("plan", ""),
+                clarifications=initial_state.get("plan_clarification_questions", []),
+                execution_note=f"Run failed: {initial_state.get('last_error', 'workflow failed')}",
+            )
+            close_session_memory(initial_state, status="failed", final_output=initial_state.get("last_error", "workflow failed"))
+            append_privileged_audit_event(
+                initial_state,
+                actor="runtime",
+                action="run_failed",
+                status="error",
+                detail={"run_id": run_id, "error": initial_state.get("last_error", "workflow failed")},
+            )
             raise
         finally:
             if create_outputs:

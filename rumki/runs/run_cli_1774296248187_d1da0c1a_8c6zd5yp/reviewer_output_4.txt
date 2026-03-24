@@ -1,0 +1,58 @@
+{
+  "decision": "revise",
+  "reason": "Latest output is not fully source-verified and relies on prohibited or weak/non-direct sources for key factual claims, includes likely unsupported extreme price claims, omits the required source-to-claim mapping, and does not adequately analyze named gold stocks/ETFs with direct support.",
+  "is_output_correct": false,
+  "revised_objective": "Produce a fully source-verified analysis of the gold market and gold-related stocks/ETFs as of March 23, 2026 using only directly supporting, reputable sources. Mandatory requirements: (1) Spot gold trend: use exact price/date references only if directly supported by Reuters, AP, LBMA, CME, ICE, or equivalent primary market data; if exact March 23, 2026 spot pricing cannot be directly sourced, explicitly state that limitation and instead use the latest directly supported gold price points with dates and sources. Do not include any unsupported or extreme price claims. (2) Macro drivers: include U.S. real yields using FRED 10-year TIPS real yield (DFII10) or equivalent, inflation expectations using FRED 10-year breakeven inflation (T10YIE) or equivalent, USD using ICE DXY or Reuters, central-bank demand using World Gold Council and, where possible, IMF/official-sector data, ETF flows/holdings using World Gold Council and major ETF issuer data (SPDR Gold Shares, iShares Gold Trust), and geopolitics framed causally only with Reuters/AP. (3) Gold equities and ETFs: analyze representative tickers NEM, GOLD, AEM, GLD, IAU, GDX, and GDXJ. Discuss miners' operating leverage, AISC/cost risks, production/guidance, and jurisdiction/capital-allocation issues only where directly supported by company filings, earnings releases/presentations, or Reuters/AP. (4) Scenarios: provide explicit bullish, base, and bearish cases tied directly to the sourced drivers above. (5) Citations: provide a source list that maps every major factual claim to a direct supporting source. Exclude aggregator/opinion sources such as Investing.com, Kitco, Morningstar, MarketPulse, MarketScreener, Axios, and similar for factual support.",
+  "step_reviews": [
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "Initial output used questionable sourcing and likely inaccurate/extreme price claims; did not meet direct-source standard."
+    },
+    {
+      "agent": "reviewer_agent",
+      "status": "correct",
+      "notes": "Tightened objective appropriately toward direct-source verification."
+    },
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "Follow-up remained incomplete/truncated and still cited weak/non-primary sources for key market facts."
+    },
+    {
+      "agent": "reviewer_agent",
+      "status": "correct",
+      "notes": "Refined requirements appropriately, emphasizing direct support and source quality."
+    },
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "Still incomplete and not reliably source-verified; insufficient miner/ETF analysis and scenarios."
+    },
+    {
+      "agent": "reviewer_agent",
+      "status": "correct",
+      "notes": "Further tightened objective with explicit preferred source classes and exclusions."
+    },
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "Latest output still uses prohibited/weak sources (Axios, Investing.com, MarketPulse, MarketScreener, Straits Times) for factual claims, includes unsupported extreme price claims, and lacks claim-to-source mapping."
+    }
+  ],
+  "next_agent": "deep_research_agent",
+  "corrected_values": {
+    "deliverable_format": "Return a structured report with sections: (1) Spot gold trend and latest directly supported price points; (2) Macro drivers; (3) Gold miners analysis; (4) Gold ETFs analysis; (5) Bull/base/bear scenarios; (6) Claim-to-source mapping table.",
+    "source_rules": "Use only Reuters, AP, LBMA, CME, ICE, FRED, World Gold Council, IMF/official-sector data, SPDR, iShares, company filings, and company earnings materials for factual support. Reuters/AP may also support miner news and geopolitical framing. Do not use Investing.com, Kitco, Morningstar, Axios, MarketPulse, MarketScreener, or similar for factual claims.",
+    "price_rule": "If no direct source for exact March 23, 2026 spot gold price is found, explicitly say so and cite the latest directly supported price/date instead. Remove all unsupported claims such as gold above $5,000 or $5,595 unless directly evidenced by Reuters/AP/LBMA/CME/ICE.",
+    "required_tickers": "NEM, GOLD, AEM, GLD, IAU, GDX, GDXJ",
+    "required_data_points": "FRED DFII10 for 10-year real yield; FRED T10YIE for 10-year breakeven inflation; Reuters or ICE-supported DXY reference; WGC 2025 demand and official-sector demand figures; SPDR Gold Shares holdings/AUM or tonnage; iShares Gold Trust holdings/AUM; miner AISC/guidance from company reports.",
+    "citation_requirement": "Every major claim must have an inline citation and be included in a final mapping table with columns: claim, source, date, why it directly supports the claim.",
+    "analysis_constraints": "Do not infer exact current market levels without direct support. Where evidence is incomplete, state the limitation rather than speculate."
+  }
+}
+Parsed Decision: revise
+Reason: Latest output is not fully source-verified and relies on prohibited or weak/non-direct sources for key factual claims, includes likely unsupported extreme price claims, omits the required source-to-claim mapping, and does not adequately analyze named gold stocks/ETFs with direct support.
+Revised Objective: Produce a fully source-verified analysis of the gold market and gold-related stocks/ETFs as of March 23, 2026 using only directly supporting, reputable sources. Mandatory requirements: (1) Spot gold trend: use exact price/date references only if directly supported by Reuters, AP, LBMA, CME, ICE, or equivalent primary market data; if exact March 23, 2026 spot pricing cannot be directly sourced, explicitly state that limitation and instead use the latest directly supported gold price points with dates and sources. Do not include any unsupported or extreme price claims. (2) Macro drivers: include U.S. real yields using FRED 10-year TIPS real yield (DFII10) or equivalent, inflation expectations using FRED 10-year breakeven inflation (T10YIE) or equivalent, USD using ICE DXY or Reuters, central-bank demand using World Gold Council and, where possible, IMF/official-sector data, ETF flows/holdings using World Gold Council and major ETF issuer data (SPDR Gold Shares, iShares Gold Trust), and geopolitics framed causally only with Reuters/AP. (3) Gold equities and ETFs: analyze representative tickers NEM, GOLD, AEM, GLD, IAU, GDX, and GDXJ. Discuss miners' operating leverage, AISC/cost risks, production/guidance, and jurisdiction/capital-allocation issues only where directly supported by company filings, earnings releases/presentations, or Reuters/AP. (4) Scenarios: provide explicit bullish, base, and bearish cases tied directly to the sourced drivers above. (5) Citations: provide a source list that maps every major factual claim to a direct supporting source. Exclude aggregator/opinion sources such as Investing.com, Kitco, Morningstar, MarketPulse, MarketScreener, Axios, and similar for factual support.
+Next Agent: deep_research_agent
+Corrected Values: {"deliverable_format": "Return a structured report with sections: (1) Spot gold trend and latest directly supported price points; (2) Macro drivers; (3) Gold miners analysis; (4) Gold ETFs analysis; (5) Bull/base/bear scenarios; (6) Claim-to-source mapping table.", "source_rules": "Use only Reuters, AP, LBMA, CME, ICE, FRED, World Gold Council, IMF/official-sector data, SPDR, iShares, company filings, and company earnings materials for factual support. Reuters/AP may also support miner news and geopolitical framing. Do not use Investing.com, Kitco, Morningstar, Axios, MarketPulse, MarketScreener, or similar for factual claims.", "price_rule": "If no direct source for exact March 23, 2026 spot gold price is found, explicitly say so and cite the latest directly supported price/date instead. Remove all unsupported claims such as gold above $5,000 or $5,595 unless directly evidenced by Reuters/AP/LBMA/CME/ICE.", "required_tickers": "NEM, GOLD, AEM, GLD, IAU, GDX, GDXJ", "required_data_points": "FRED DFII10 for 10-year real yield; FRED T10YIE for 10-year breakeven inflation; Reuters or ICE-supported DXY reference; WGC 2025 demand and official-sector demand figures; SPDR Gold Shares holdings/AUM or tonnage; iShares Gold Trust holdings/AUM; miner AISC/guidance from company reports.", "citation_requirement": "Every major claim must have an inline citation and be included in a final mapping table with columns: claim, source, date, why it directly supports the claim.", "analysis_constraints": "Do not infer exact current market levels without direct support. Where evidence is incomplete, state the limitation rather than speculate."}

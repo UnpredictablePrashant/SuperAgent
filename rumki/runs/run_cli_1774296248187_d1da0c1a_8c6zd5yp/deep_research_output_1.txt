@@ -1,0 +1,16 @@
+Here’s a concise, source‑aware read on gold as of March 23, 2026.
+
+1) Trend and recent catalysts
+- Spot gold surged to fresh records in late January 2026 (briefly above $5,500/oz) on safe‑haven demand, a weaker USD and elevated investment flows; since then, prices have been volatile but remain near historically high levels. Reuters reports on the Jan 26 move above $5,100, and Morningstar notes the late‑January spike above $5,500. ([aljazeera.com](https://www.aljazeera.com/news/2026/1/26/gold-prices-cross-5100-for-the-first-time-amid-geopolitical-uncertainties?utm_source=openai))
+- 2025 set the stage: the World Gold Council (WGC) says total demand (incl. OTC) topped 5,000 tonnes for the first time; ETFs added 801t and central banks bought 863t. That breadth of demand has underpinned the 2026 rally. ([gold.org](https://www.gold.org/download/file/20432/GDT-Full-Year-2025-Exec-Summary.pdf))
+- Early‑March swings reflected geopolitical risk and headline‑driven safe‑haven flows; markets have been watching Middle East developments and macro data for the next leg. ([investing.com](https://www.investing.com/analysis/gold-rallies-hard-as-markets-price-escalation-and-lower-real-yields-200675908?utm_source=openai))
+
+2) Macro drivers: rates, inflation, USD, geopolitics, central banks
+- Real yields: Gold’s inverse linkage to US real yields remains key. The 10‑year TIPS yield sat around 1.7% in early March; further declines (e.g., on softer growth/inflation) would be supportive, while a rise would be a headwind. ([tradingeconomics.com](https://tradingeconomics.com/united-states/30-year-tips-yield?utm_source=openai))
+- USD: The January breakout coincided with a softer dollar; WGC’s Feb 2026 commentary highlights ongoing USD weakness as a structural tailwind (with intermittent bounces). Reuters coverage of the rally also cited dollar softness. ([gold.org](https://www.gold.org/goldhub/research/gold-market-commentary-february-2026?utm_source=openai))
+- Policy path: Markets largely expect the Fed to hold in March, with cuts more likely later in 2026; easing would lower real yields and typically support gold, while a “higher‑for‑longer” stance would do the opposite. ([kiplinger.com](https://www.kiplinger.com/investing/when-is-the-next-fed-meeting?utm_source=openai))
+- Geopolitics: Ongoing tensions (Ukraine, Middle East, US‑China trade frictions) continue to channel safe‑haven flows into bullion. ([aljazeera.com](https://www.aljazeera.com/news/2026/1/26/gold-prices-cross-5100-for-the-first-time-amid-geopolitical-uncertainties?utm_source=openai))
+- Central bank demand: After exceptional 2022–2024 buying, WGC reports 2025 official‑sector purchases of 863t—still historically elevated and geographically broad—helping to provide a “floor” to demand. ([gold.org](https://www.gold.org/download/file/20432/GDT-Full-Year-2025-Exec-Summary.pdf))
+
+3) Implications for gold miners and major ETFs
+- Miners: Cost inflation persists but margins have expanded sharply at current prices. WGC shows average industry AISC pushing higher (Q3 2025 ~$1,605/oz), while large caps like Barrick and Newmont have 2025 A

@@ -11,6 +11,27 @@ from tasks.utils import OUTPUT_DIR, log_task_update, write_text_file
 
 DEFAULT_DEEP_RESEARCH_MODEL = os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research")
 
+AGENT_METADATA = {
+    "deep_research_agent": {
+        "description": "Runs OpenAI Deep Research for web-grounded, source-aware, in-depth research tasks.",
+        "skills": ["deep", "research", "web", "citations", "analysis"],
+        "input_keys": [
+            "research_query",
+            "research_model",
+            "research_instructions",
+            "research_max_tool_calls",
+            "research_max_output_tokens",
+        ],
+        "output_keys": [
+            "research_result",
+            "research_status",
+            "research_response_id",
+            "research_raw",
+        ],
+        "requirements": ["openai"],
+    }
+}
+
 
 def _serialize_response(response) -> dict:
     if hasattr(response, "model_dump"):

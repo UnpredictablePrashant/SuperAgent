@@ -40,6 +40,44 @@ services:
       - .:/app
     command: python -m superagent.cli daemon --poll-interval 30 --heartbeat-interval 300
 
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: super-agent-gateway
+    env_file:
+      - .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: 8790
+    depends_on:
+      - qdrant
+    volumes:
+      - .:/app
+    ports:
+      - "8790:8790"
+    command: python -m superagent.cli gateway
+
+  setup-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: super-agent-setup-ui
+    env_file:
+      - .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      SETUP_UI_HOST: 0.0.0.0
+      SETUP_UI_PORT: 8787
+    depends_on:
+      - qdrant
+    volumes:
+      - .:/app
+    ports:
+      - "8787:8787"
+    command: python -m superagent.cli setup ui
+
   research-mcp:
     build:
       context: .

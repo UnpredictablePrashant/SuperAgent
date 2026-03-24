@@ -20,6 +20,9 @@ echo "[install] upgrading pip"
 echo "[install] installing package"
 .venv/bin/python -m pip install -e .
 
+echo "[install] bootstrapping local runtime state"
+.venv/bin/python scripts/bootstrap_local_state.py
+
 SCRIPT_DIR="$ROOT_DIR/.venv/bin"
 
 SHELL_NAME="$(basename "${SHELL:-}")"

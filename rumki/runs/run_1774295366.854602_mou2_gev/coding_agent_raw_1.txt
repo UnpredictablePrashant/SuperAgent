@@ -1,0 +1,857 @@
+SUMMARY: Python CLI that inspects a repository and generates a prioritized production-readiness assessment with remediation and delegation plan.
+LANGUAGE: Python
+CODE:
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+try:
+    import tomllib  # Python 3.11+
+except Exception:  # pragma: no cover
+    tomllib = None
+
+
+EXCLUDED_DIRS = {
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "target",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".tox",
+    ".idea",
+    ".vscode",
+    ".next",
+    ".nuxt",
+    ".cache",
+    ".terraform",
+    ".serverless",
+}
+
+TEXT_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".java",
+    ".go",
+    ".rs",
+    ".rb",
+    ".php",
+    ".cs",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".yml",
+    ".yaml",
+    ".json",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".env",
+    ".md",
+    ".txt",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".xml",
+    ".properties",
+    ".sql",
+    ".dockerfile",
+}
+
+LANGUAGE_BY_EXTENSION = {
+    ".py": "Python",
+    ".js": "JavaScript",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".jsx": "JavaScript",
+    ".java": "Java",
+    ".go": "Go",
+    ".rs": "Rust",
+    ".rb": "Ruby",
+    ".php": "PHP",
+    ".cs": "C#",
+    ".c": "C/C++",
+    ".h": "C/C++",
+    ".cpp": "C/C++",
+    ".hpp": "C/C++",
+    ".kt": "Kotlin",
+    ".swift": "Swift",
+    ".scala": "Scala",
+}
+
+SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+SECRET_PATTERNS = [
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"-----BEGIN (?:RSA|EC|OPENSSH|DSA|PRIVATE) PRIVATE KEY-----"),
+    re.compile(
+        r"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*['\"][A-Za-z0-9_\-\/+=]{16,}['\"]"
+    ),
+]
+
+
+@dataclass
+class Finding:
+    id: str
+    title: str
+    priority: str
+    category: str
+    evidence: str
+    recommendation: str
+    implementation_needed: bool
+    delegate_to: str
+    effort: str
+    impact: str
+
+
+@dataclass
+class RepoSummary:
+    path: str
+    total_files: int
+    top_level_dirs: List[str]
+    top_level_files: List[str]
+    detected_languages: List[Tuple[str, int]]
+    key_files_present: Dict[str, bool]
+
+
+class RepositoryScanner:
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+        self.files: List[Path] = []
+        self._scan()
+
+    def _scan(self) -> None:
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS and not d.startswith(".eggs")]
+            base = Path(dirpath)
+            for filename in filenames:
+                p = base / filename
+                self.files.append(p)
+
+    def rel(self, p: Path) -> str:
+        return str(p.relative_to(self.root)).replace("\\", "/")
+
+    def exists(self, rel_path: str) -> bool:
+        return (self.root / rel_path).exists()
+
+    def find(self, name: str) -> List[Path]:
+        n = name.lower()
+        return [p for p in self.files if p.name.lower() == n]
+
+    def glob_rel(self, pattern: str) -> List[Path]:
+        return list(self.root.glob(pattern))
+
+    def list_relpaths(self) -> List[str]:
+        return [self.rel(p) for p in self.files]
+
+    def top_level(self) -> Tuple[List[str], List[str]]:
+        dirs, files = [], []
+        for p in self.root.iterdir():
+            if p.name in EXCLUDED_DIRS:
+                continue
+            if p.is_dir():
+                dirs.append(p.name)
+            elif p.is_file():
+                files.append(p.name)
+        return sorted(dirs), sorted(files)
+
+    def language_stats(self) -> List[Tuple[str, int]]:
+        c: Counter[str] = Counter()
+        for p in self.files:
+            ext = p.suffix.lower()
+            lang = LANGUAGE_BY_EXTENSION.get(ext)
+            if lang:
+                c[lang] += 1
+            elif p.name == "Dockerfile":
+                c["Dockerfile"] += 1
+        return sorted(c.items(), key=lambda x: x[1], reverse=True)
+
+    def read_text(self, p: Path, max_bytes: int = 1_000_000) -> Optional[str]:
+        try:
+            if p.stat().st_size > max_bytes:
+                return None
+            return p.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return None
+
+    def is_text_file(self, p: Path) -> bool:
+        if p.name in {"Dockerfile", "Jenkinsfile", "Makefile"}:
+            return True
+        return p.suffix.lower() in TEXT_EXTENSIONS
+
+
+class ProductionReadinessAssessor:
+    def __init__(self, scanner: RepositoryScanner) -> None:
+        self.scanner = scanner
+        self.findings: List[Finding] = []
+        self._file_set = set(self.scanner.list_relpaths())
+        self._lower_file_set = {f.lower() for f in self._file_set}
+
+    def assess(self) -> Dict[str, Any]:
+        summary = self._build_summary()
+        self._check_project_basics()
+        self._check_ci_cd()
+        self._check_tests()
+        self._check_dependencies()
+        self._check_code_quality()
+        self._check_security()
+        self._check_operations()
+        self._check_release_governance()
+
+        self.findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.priority, 99), f.category, f.id))
+        report = {
+            "summary": asdict(summary),
+            "findings": [asdict(f) for f in self.findings],
+            "prioritized_plan": self._build_prioritized_plan(),
+            "delegated_followups": self._build_delegation_tasks(),
+        }
+        return report
+
+    def _build_summary(self) -> RepoSummary:
+        dirs, files = self.scanner.top_level()
+        key_files = {
+            "README": self._exists_any(["README.md", "README", "readme.md"]),
+            "LICENSE": self._exists_any(["LICENSE", "LICENSE.md", "COPYING"]),
+            "CONTRIBUTING": self._exists_any(["CONTRIBUTING.md", "CONTRIBUTING"]),
+            "CODEOWNERS": self._exists_any(["CODEOWNERS", ".github/CODEOWNERS"]),
+            "CHANGELOG": self._exists_any(["CHANGELOG.md", "CHANGELOG", "changelog.md"]),
+            "CI_CONFIG": self._has_ci_config(),
+            "DOCKERFILE": self._exists_any(["Dockerfile"]),
+            "TESTS": self._has_tests(),
+            "LINT_CONFIG": self._has_lint_config(),
+            "DEPENDENCY_LOCKFILE": self._has_lockfile(),
+            "SECURITY_POLICY": self._exists_any(["SECURITY.md", ".github/SECURITY.md"]),
+            "DEPENDABOT_OR_RENOVATE": self._exists_any(
+                [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", "renovate.json5"]
+            ),
+        }
+        return RepoSummary(
+            path=str(self.scanner.root),
+            total_files=len(self.scanner.files),
+            top_level_dirs=dirs,
+            top_level_files=files,
+            detected_languages=self.scanner.language_stats(),
+            key_files_present=key_files,
+        )
+
+    def _exists_any(self, rel_paths: Sequence[str]) -> bool:
+        s = self._lower_file_set
+        return any(p.lower() in s for p in rel_paths)
+
+    def _has_ci_config(self) -> bool:
+        if self._exists_any([".gitlab-ci.yml", "Jenkinsfile", "azure-pipelines.yml", "bitbucket-pipelines.yml"]):
+            return True
+        if any(str(p).endswith((".yml", ".yaml")) for p in self.scanner.glob_rel(".github/workflows/*")):
+            return True
+        return False
+
+    def _has_tests(self) -> bool:
+        test_markers = ("test", "tests", "__tests__", "spec")
+        for rel in self._file_set:
+            low = rel.lower()
+            if any(part in low.split("/") for part in test_markers):
+                return True
+            if re.search(r"(test|spec)\.(py|js|ts|tsx|jsx|go|rb|java)$", low):
+                return True
+        return False
+
+    def _has_lockfile(self) -> bool:
+        lockfiles = [
+            "poetry.lock",
+            "Pipfile.lock",
+            "requirements.lock",
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "Cargo.lock",
+            "go.sum",
+            "Gemfile.lock",
+            "composer.lock",
+        ]
+        return self._exists_any(lockfiles)
+
+    def _has_lint_config(self) -> bool:
+        lint_files = [
+            ".flake8",
+            "setup.cfg",
+            "pyproject.toml",
+            ".eslintrc",
+            ".eslintrc.js",
+            ".eslintrc.json",
+            "eslint.config.js",
+            ".pylintrc",
+            "ruff.toml",
+            ".editorconfig",
+        ]
+        return self._exists_any(lint_files)
+
+    def _add(
+        self,
+        id: str,
+        title: str,
+        priority: str,
+        category: str,
+        evidence: str,
+        recommendation: str,
+        implementation_needed: bool,
+        delegate_to: str,
+        effort: str,
+        impact: str,
+    ) -> None:
+        self.findings.append(
+            Finding(
+                id=id,
+                title=title,
+                priority=priority,
+                category=category,
+                evidence=evidence,
+                recommendation=recommendation,
+                implementation_needed=implementation_needed,
+                delegate_to=delegate_to,
+                effort=effort,
+                impact=impact,
+            )
+        )
+
+    def _check_project_basics(self) -> None:
+        if not self._exists_any(["README.md", "README", "readme.md"]):
+            self._add(
+                "DOC-001",
+                "Missing README",
+                "P1",
+                "Documentation",
+                "No README file found at repository root.",
+                "Add a README with project purpose, architecture, local setup, run/test/lint commands, and deployment notes.",
+                True,
+                "Tech Writer / Maintainer",
+                "S",
+                "H",
+            )
+
+        if not self._exists_any(["LICENSE", "LICENSE.md", "COPYING"]):
+            self._add(
+                "GOV-001",
+                "Missing license file",
+                "P1",
+                "Governance",
+                "No open-source/commercial license file found.",
+                "Add an explicit LICENSE to clarify legal usage rights and reduce compliance risk.",
+                True,
+                "Maintainer / Legal",
+                "S",
+                "H",
+            )
+
+    def _check_ci_cd(self) -> None:
+        if not self._has_ci_config():
+            self._add(
+                "CICD-001",
+                "No CI pipeline configuration found",
+                "P0",
+                "CI/CD",
+                "No GitHub Actions, GitLab CI, Jenkins, or equivalent pipeline files detected.",
+                "Add CI pipeline with mandatory checks: build, tests, lint, security scan, artifact creation.",
+                True,
+                "DevOps",
+                "M",
+                "H",
+            )
+
+    def _check_tests(self) -> None:
+        has_tests = self._has_tests()
+        if not has_tests:
+            self._add(
+                "QA-001",
+                "Automated tests appear missing",
+                "P0",
+                "Quality",
+                "No test directories/files detected by naming conventions.",
+                "Create baseline unit tests for critical paths and configure CI to run them on every PR.",
+                True,
+                "QA / Backend",
+                "M",
+                "H",
+            )
+
+        coverage_markers = self._exists_any(
+            [".coveragerc", "coverage.xml", "jest.config.js", "jest.config.ts", "nyc.config.js"]
+        )
+        if has_tests and not coverage_markers:
+            self._add(
+                "QA-002",
+                "Coverage tooling not detected",
+                "P2",
+                "Quality",
+                "Tests detected, but no coverage config/artifact markers found.",
+                "Add coverage tooling and enforce minimum threshold in CI (e.g., 70%+ initially).",
+                True,
+                "QA / Backend",
+                "S",
+                "M",
+            )
+
+    def _check_dependencies(self) -> None:
+        if not self._has_lockfile():
+            self._add(
+                "DEP-001",
+                "No dependency lockfile detected",
+                "P1",
+                "Dependencies",
+                "No lockfile found for common package managers.",
+                "Commit lockfile to ensure reproducible builds and deterministic deployments.",
+                True,
+                "Backend / Frontend",
+                "S",
+                "H",
+            )
+
+        req = self.scanner.root / "requirements.txt"
+        if req.exists():
+            txt = self.scanner.read_text(req) or ""
+            unpinned: List[str] = []
+            for line in txt.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("-"):
+                    continue
+                if "==" not in line and "@ " not in line and " @ " not in line:
+                    unpinned.append(line)
+            if unpinned:
+                sample = ", ".join(unpinned[:5])
+                self._add(
+                    "DEP-002",
+                    "Unpinned Python dependencies",
+                    "P1",
+                    "Dependencies",
+                    f"requirements.txt contains unpinned entries (sample: {sample}).",
+                    "Pin dependencies (exact versions) and review with periodic updates via Dependabot/Renovate.",
+                    True,
+                    "Backend",
+                    "S",
+                    "H",
+                )
+
+        if self._exists_any(["package.json"]):
+            if not self._exists_any(["package-lock.json", "yarn.lock", "pnpm-lock.yaml"]):
+                self._add(
+                    "DEP-003",
+                    "Node manifest without lockfile",
+                    "P1",
+                    "Dependencies",
+                    "package.json found but no npm/yarn/pnpm lockfile detected.",
+                    "Generate and commit a lockfile; enforce clean install in CI.",
+                    True,
+                    "Frontend / Backend",
+                    "S",
+                    "H",
+                )
+            package_json_path = self.scanner.root / "package.json"
+            pj_txt = self.scanner.read_text(package_json_path)
+            if pj_txt:
+                try:
+                    pkg = json.loads(pj_txt)
+                    scripts = pkg.get("scripts", {})
+                    for needed in ("test", "lint", "build"):
+                        if needed not in scripts:
+                            self._add(
+                                f"DEP-00{4 if needed=='test' else 5 if needed=='lint' else 6}",
+                                f"package.json missing '{needed}' script",
+                                "P2",
+                                "Developer Experience",
+                                f"package.json scripts keys: {', '.join(sorted(scripts.keys())) or '(none)'}",
+                                f"Add '{needed}' script and wire into CI gates.",
+                                True,
+                                "Frontend / Backend",
+                                "S",
+                                "M",
+                            )
+                except json.JSONDecodeError:
+                    self._add(
+                        "DEP-007",
+                        "Invalid package.json",
+                        "P1",
+                        "Dependencies",
+                        "package.json could not be parsed as valid JSON.",
+                        "Fix JSON syntax and validate via CI.",
+                        True,
+                        "Frontend / Backend",
+                        "S",
+                        "H",
+                    )
+
+    def _check_code_quality(self) -> None:
+        if not self._has_lint_config():
+            self._add(
+                "QLT-001",
+                "Linting configuration not detected",
+                "P1",
+                "Code Quality",
+                "No common lint configuration files were found.",
+                "Add linter/formatter config (e.g., Ruff/Black for Python, ESLint/Prettier for JS/TS) and enforce in CI.",
+                True,
+                "Backend / Frontend",
+                "S",
+                "H",
+            )
+
+        if not self._exists_any([".pre-commit-config.yaml", ".pre-commit-config.yml"]):
+            self._add(
+                "QLT-002",
+                "Pre-commit hooks not configured",
+                "P2",
+                "Code Quality",
+                "No pre-commit configuration found.",
+                "Add pre-commit hooks for formatting, lint, secret scanning, and basic static analysis.",
+                True,
+                "Developer Experience",
+                "S",
+                "M",
+            )
+
+        has_type_checker = self._exists_any(["mypy.ini", "pyrightconfig.json", "tsconfig.json"])
+        if not has_type_checker:
+            self._add(
+                "QLT-003",
+                "Static type checking not detected",
+                "P2",
+                "Code Quality",
+                "No mypy/pyright/tsconfig signals found.",
+                "Introduce type checking incrementally on critical modules and enforce in CI.",
+                True,
+                "Backend / Frontend",
+                "M",
+                "M",
+            )
+
+    def _check_security(self) -> None:
+        if not self._exists_any(["SECURITY.md", ".github/SECURITY.md"]):
+            self._add(
+                "SEC-001",
+                "Security policy missing",
+                "P2",
+                "Security",
+                "No SECURITY.md disclosure policy found.",
+                "Add SECURITY.md with vulnerability reporting process, SLA, and contact method.",
+                True,
+                "Security / Maintainer",
+                "S",
+                "M",
+            )
+
+        if not self._exists_any(
+            [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", "renovate.json5"]
+        ):
+            self._add(
+                "SEC-002",
+                "Automated dependency update scanning not configured",
+                "P2",
+                "Security",
+                "No Dependabot or Renovate config detected.",
+                "Enable automated dependency update PRs and vulnerability alerts.",
+                True,
+                "DevOps / Security",
+                "S",
+                "M",
+            )
+
+        env_files = [p for p in self.scanner.files if p.name == ".env"]
+        if env_files and not self._exists_any([".env.example", ".env.sample", ".env.template"]):
+            self._add(
+                "SEC-003",
+                "Environment template missing",
+                "P1",
+                "Security",
+                ".env file exists but no example/template found.",
+                "Provide .env.example with non-secret placeholders and document required variables.",
+                True,
+                "Backend / DevOps",
+                "S",
+                "H",
+            )
+
+        secret_hits = self._scan_for_secrets()
+        if secret_hits:
+            sample = "; ".join(secret_hits[:3])
+            self._add(
+                "SEC-004",
+                "Potential hardcoded secrets detected",
+                "P0",
+                "Security",
+                f"Potential secret patterns found (sample): {sample}",
+                "Immediately rotate exposed credentials, purge history if needed, and add secret scanning in CI/pre-commit.",
+                True,
+                "Security / Backend",
+                "M",
+                "H",
+            )
+
+    def _scan_for_secrets(self) -> List[str]:
+        hits: List[str] = []
+        for p in self.scanner.files:
+            if not self.scanner.is_text_file(p):
+                continue
+            text = self.scanner.read_text(p, max_bytes=500_000)
+            if not text:
+                continue
+            lines = text.splitlines()
+            for i, line in enumerate(lines, start=1):
+                if len(line) > 5000:
+                    continue
+                for pattern in SECRET_PATTERNS:
+                    if pattern.search(line):
+                        hits.append(f"{self.scanner.rel(p)}:{i}")
+                        if len(hits) >= 20:
+                            return hits
+                        break
+        return hits
+
+    def _check_operations(self) -> None:
+        has_dockerfile = self._exists_any(["Dockerfile"])
+        if has_dockerfile and not self._exists_any([".dockerignore"]):
+            self._add(
+                "OPS-001",
+                ".dockerignore missing",
+                "P1",
+                "Operations",
+                "Dockerfile found without .dockerignore.",
+                "Add .dockerignore to reduce image context size and avoid leaking sensitive/local files.",
+                True,
+                "DevOps",
+                "S",
+                "H",
+            )
+
+        dockerfiles = [p for p in self.scanner.files if p.name == "Dockerfile"]
+        for dfile in dockerfiles:
+            txt = self.scanner.read_text(dfile) or ""
+            if "HEALTHCHECK" not in txt.upper():
+                self._add(
+                    "OPS-002",
+                    "Dockerfile missing HEALTHCHECK",
+                    "P2",
+                    "Operations",
+                    f"{self.scanner.rel(dfile)} has no HEALTHCHECK instruction.",
+                    "Add container health checks and ensure orchestrator uses readiness/liveness probes.",
+                    True,
+                    "DevOps / Backend",
+                    "S",
+                    "M",
+                )
+                break
+
+        has_iac = any(
+            p.suffix.lower() in {".tf", ".bicep"} or p.name in {"Pulumi.yaml", "serverless.yml", "serverless.yaml"}
+            for p in self.scanner.files
+        )
+        if not has_iac:
+            self._add(
+                "OPS-003",
+                "Infrastructure as Code not detected",
+                "P3",
+                "Operations",
+                "No Terraform/Pulumi/Bicep/Serverless manifests detected.",
+                "If applicable, codify infra/deployment resources for reproducibility and auditability.",
+                False,
+                "DevOps",
+                "M",
+                "L",
+            )
+
+    def _check_release_governance(self) -> None:
+        if not self._exists_any(["CHANGELOG.md", "CHANGELOG", "changelog.md"]):
+            self._add(
+                "REL-001",
+                "Changelog missing",
+                "P3",
+                "Release Management",
+                "No changelog file detected.",
+                "Adopt keep-a-changelog format and update during release process.",
+                True,
+                "Maintainer",
+                "S",
+                "L",
+            )
+
+        if not self._exists_any(["CODEOWNERS", ".github/CODEOWNERS"]):
+            self._add(
+                "GOV-002",
+                "CODEOWNERS missing",
+                "P3",
+                "Governance",
+                "No CODEOWNERS file found.",
+                "Define ownership for critical paths to enforce reviewer accountability.",
+                True,
+                "Maintainer",
+                "S",
+                "M",
+            )
+
+    def _build_prioritized_plan(self) -> List[Dict[str, Any]]:
+        buckets: Dict[str, List[Finding]] = defaultdict(list)
+        for f in self.findings:
+            buckets[f.priority].append(f)
+
+        phases = [("P0", "Immediate (0-2 days)"), ("P1", "Short-term (this sprint)"), ("P2", "Near-term (next sprint)"), ("P3", "Backlog")]
+        plan: List[Dict[str, Any]] = []
+        for priority, window in phases:
+            items = buckets.get(priority, [])
+            if not items:
+                continue
+            plan.append(
+                {
+                    "priority": priority,
+                    "timeline": window,
+                    "count": len(items),
+                    "actions": [
+                        {
+                            "id": i.id,
+                            "title": i.title,
+                            "category": i.category,
+                            "delegate_to": i.delegate_to,
+                            "implementation_needed": i.implementation_needed,
+                        }
+                        for i in items
+                    ],
+                }
+            )
+        return plan
+
+    def _build_delegation_tasks(self) -> List[Dict[str, Any]]:
+        tasks = []
+        for f in self.findings:
+            if not f.implementation_needed:
+                continue
+            tasks.append(
+                {
+                    "task_id": f.id,
+                    "owner": f.delegate_to,
+                    "task": f.title,
+                    "acceptance_criteria": f.recommendation,
+                    "priority": f.priority,
+                }
+            )
+        return tasks
+
+
+def render_markdown(report: Dict[str, Any]) -> str:
+    s = report["summary"]
+    findings = report["findings"]
+    plan = report["prioritized_plan"]
+    delegated = report["delegated_followups"]
+
+    lines: List[str] = []
+    lines.append("# Production Readiness Assessment")
+    lines.append("")
+    lines.append("## Repository Inspection")
+    lines.append(f"- Path: `{s['path']}`")
+    lines.append(f"- Total files scanned: **{s['total_files']}**")
+    lines.append(f"- Top-level dirs: {', '.join(s['top_level_dirs']) if s['top_level_dirs'] else '(none)'}")
+    lines.append(f"- Top-level files: {', '.join(s['top_level_files']) if s['top_level_files'] else '(none)'}")
+    lang_desc = ", ".join([f"{name} ({count})" for name, count in s["detected_languages"]]) or "Unknown"
+    lines.append(f"- Detected languages: {lang_desc}")
+    lines.append("")
+    lines.append("## Key File Presence")
+    for k, v in s["key_files_present"].items():
+        lines.append(f"- {k}: {'✅' if v else '❌'}")
+
+    lines.append("")
+    lines.append("## Prioritized Remediation Plan")
+    if not plan:
+        lines.append("- No critical gaps detected by heuristic checks.")
+    else:
+        for phase in plan:
+            lines.append(f"### {phase['priority']} — {phase['timeline']}")
+            for action in phase["actions"]:
+                impl = "implementation required" if action["implementation_needed"] else "policy/process check"
+                lines.append(
+                    f"- [{action['id']}] {action['title']} ({action['category']}) — Owner: {action['delegate_to']} ({impl})"
+                )
+
+    lines.append("")
+    lines.append("## Detailed Findings")
+    if not findings:
+        lines.append("- No findings.")
+    else:
+        for f in findings:
+            lines.append(f"### {f['id']} — {f['title']} ({f['priority']})")
+            lines.append(f"- Category: {f['category']}")
+            lines.append(f"- Evidence: {f['evidence']}")
+            lines.append(f"- Recommended fix: {f['recommendation']}")
+            lines.append(f"- Delegate to: {f['delegate_to']}")
+            lines.append(f"- Effort/Impact: {f['effort']}/{f['impact']}")
+            lines.append(f"- Implementation needed: {'Yes' if f['implementation_needed'] else 'No'}")
+            lines.append("")
+
+    lines.append("## Delegated Follow-up Tasks")
+    if not delegated:
+        lines.append("- None.")
+    else:
+        for d in delegated:
+            lines.append(
+                f"- [{d['priority']}] {d['task_id']} -> {d['owner']}: {d['task']} | Acceptance: {d['acceptance_criteria']}"
+            )
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Assess repository production-readiness and generate a prioritized remediation plan."
+    )
+    parser.add_argument("path", nargs="?", default=".", help="Repository path (default: current directory)")
+    parser.add_argument(
+        "--format",
+        choices=["markdown", "json"],
+        default="markdown",
+        help="Output format",
+    )
+    parser.add_argument("--out", default="", help="Optional output file path; prints to stdout if omitted")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
+    root = Path(args.path).resolve()
+    if not root.exists() or not root.is_dir():
+        print(f"Error: path does not exist or is not a directory: {root}", file=sys.stderr)
+        return 2
+
+    scanner = RepositoryScanner(root)
+    assessor = ProductionReadinessAssessor(scanner)
+    report = assessor.assess()
+
+    if args.format == "json":
+        output = json.dumps(report, indent=2)
+    else:
+        output = render_markdown(report)
+
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(output, encoding="utf-8")
+    else:
+        sys.stdout.write(output)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

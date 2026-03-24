@@ -22,12 +22,54 @@ htmlcov/
 
 # Local environment and secrets
 .env
-.env.local
-.env.*.local
+.env.*
+*.env
+*.env.local
+!.env.example
+!.env.template
+!.env.sample
+
+# Certificates, keys, and credential material
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.kdbx
+*.der
+*.crt
+*.csr
+*.ovpn
+*.age
+*.secret
+*.secrets
+token.json
+tokens.json
+oauth_token*
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Local credential directories
+secrets/
+secret/
+credentials/
+.secrets/
+.aws/
+.azure/
+.gcp/
 
 # Runtime outputs and generated artifacts
 output/
 logs/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Generated agents and plugin state
 tasks/generated_agents/manifest.json

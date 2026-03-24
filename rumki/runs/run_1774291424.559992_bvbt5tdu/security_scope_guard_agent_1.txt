@@ -1,0 +1,5 @@
+Decision: allow
+Scan Profile: deep
+Allowed Actions: passive_web_checks, api_surface_mapping, unauthenticated_endpoint_review, idor_review, prompt_integrity_review, ai_asset_exposure_review, dependency_audit, sast_review, tls_review
+Disallowed Actions: exploit, credential_attack, service_disruption
+Reason: Assessment is explicitly framed as authorized defensive work: authorized flag is true, owner approval is noted as SEC-123, and the requested mode is defensive. Allow listed non-disruptive review activities only.

@@ -60,9 +60,11 @@ Agents are now discovered dynamically from built-in task modules and external pl
 
 - `os_agent`
 - `coding_agent`
+- `master_coding_agent`
 - `excel_agent`
 - `google_search_agent`
 - `deep_research_agent`
+- `long_document_agent`
 - `reddit_agent`
 - `location_agent`
 
@@ -578,6 +580,8 @@ The recommended defensive flow is:
 
 - `security_authorized=True`
 - `security_target_url`
+- `security_authorization_note` (ticket/contract/approval reference)
+- optional `security_scan_profile` (`baseline|standard|deep|extensive`, default `deep`)
 - optional `scanner_ports`
 - optional `scanner_top_ports`
 - `sast_paths`
@@ -613,10 +617,31 @@ Optional local tools for deeper authorized assessments:
   Required once after installing the Playwright Python package if you want screenshot/browser capture support.
 - `NVD_API_KEY`
   Optional. Enables higher-rate access for the CVE/NVD MCP server. The implementation can still use public unauthenticated access with lower quotas.
+- `SECURITY_AUTO_INSTALL_TOOLS`
+  Optional. If `true` (default), `superagent run` attempts best-effort auto-install of missing security tools (`nmap`, `zap`, `dependency-check`) before authorized security runs.
+  Use `--no-auto-install-security-tools` to disable for a specific run.
 
 ### Important Safety Constraint
 
 These agents are for defensive assessment of assets you own or are explicitly permitted to assess.
+
+Security authorization process before scanning:
+
+1. Confirm ownership or explicit written permission from the system owner.
+2. Define scope boundaries and testing window.
+3. Record an authorization reference (ticket ID, contract ID, or signed approval).
+4. Pass authorization explicitly in CLI before scan execution.
+
+CLI example:
+
+```bash
+superagent run \
+  --security-authorized \
+  --security-target-url https://example.com \
+  --security-authorization-note "SEC-123 approved by security owner" \
+  --security-scan-profile deep \
+  "perform defensive security assessment and produce remediation report"
+```
 
 The system should only run security workflows when:
 
@@ -907,6 +932,53 @@ If you want, the next step would be adding:
 - Gmail send/draft support with explicit user confirmation
 - Drive file download/export workflows
 - Slack thread-level summarization
+
+### Privileged Execution Controls
+
+The runtime now includes explicit privileged-mode guardrails for root-level or broad filesystem automation.
+
+Key controls:
+
+- explicit approvals before privileged actions
+- path scope allowlists for command/file operations
+- read-only enforcement mode
+- root and destructive command toggles (off by default)
+- pre-mutation snapshots for rollback support
+- kill-switch file check before each agent step
+- append-only hash-chained privileged audit log and SQLite event records
+
+Run-time flags:
+
+```bash
+superagent run "..." \
+  --privileged-mode \
+  --privileged-approved \
+  --privileged-approval-note "CHG-123 approved by ops" \
+  --privileged-allowed-path "/srv/project" \
+  --privileged-allowed-path "/var/data" \
+  --privileged-read-only
+```
+
+Optional escalation flags:
+
+- `--privileged-allow-root`
+- `--privileged-allow-destructive`
+- `--privileged-enable-backup`
+- `--kill-switch-file /path/to/SUPERAGENT_STOP`
+
+Audit endpoints and artifacts:
+
+- HTTP: `/audit/privileged`
+- Files: `privileged_audit.log` (inside each run output dir), snapshots in `output/privileged_snapshots/`
+
+Rollback helpers:
+
+- `superagent rollback list`
+- `superagent rollback apply --snapshot <path> --target-dir <dir> --yes`
+
+Setup component:
+
+- `privileged_control` in Setup UI/CLI (`superagent setup show privileged_control`)
 - Teams chat/channel message review
 
 ## AWS Workflow
@@ -1142,6 +1214,7 @@ This script:
 
 - creates `.venv` (if missing)
 - installs the package in editable mode
+- bootstraps local runtime state (`.env` from `.env.example` when missing, plus local output/memory folders)
 - adds `.venv/bin` to your shell PATH (`~/.bashrc` or `~/.zshrc`)
 
 Then reload shell config:
@@ -1155,6 +1228,18 @@ or:
 ```bash
 source ~/.zshrc
 ```
+
+### Easy Uninstall (Linux / macOS)
+
+```bash
+./scripts/uninstall.sh
+```
+
+This script:
+
+- uninstalls `superagent-runtime` from the local `.venv` (if present)
+- removes `.venv/bin` PATH entry from `~/.bashrc` or `~/.zshrc`
+- removes the local `.venv`
 
 ### Easy Install (Windows with Chocolatey)
 
@@ -1176,6 +1261,18 @@ Important:
 - for a proper `choco install superagent` experience, publish a Chocolatey package (`.nupkg`) that points to versioned GitHub Release assets
 - this repo now builds Python distribution artifacts into `dist/` in GitHub Actions and publishes them as Release assets on tag pushes (`v*`)
 
+Uninstall SuperAgent from this repo install:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
+```
+
+Optional: if Python was installed only for this setup and is not needed elsewhere:
+
+```powershell
+choco uninstall python -y
+```
+
 ### Easy Install (Windows PowerShell)
 
 ```powershell
@@ -1186,15 +1283,50 @@ This script:
 
 - creates `.venv` (if missing)
 - installs the package in editable mode
+- bootstraps local runtime state (`.env` from `.env.example` when missing, plus local output/memory folders)
 - adds `.venv\Scripts` to your user PATH
 - recreates `.venv` automatically if it detects a non-Windows venv layout
 
 Open a new terminal after install.
 
+### Easy Uninstall (Windows PowerShell)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
+```
+
+This script:
+
+- uninstalls `superagent-runtime` from the local `.venv` (if present)
+- removes `.venv\Scripts` from your user PATH
+- removes the local `.venv`
+
+Open a new terminal after uninstall.
+
 ### Manual Install (any OS)
 
 ```bash
 python -m pip install -e .
+```
+
+### Manual Uninstall (any OS)
+
+If installed in your active Python environment:
+
+```bash
+python -m pip uninstall -y superagent-runtime
+```
+
+If installed in this repo's local virtualenv:
+
+```bash
+.venv/bin/python -m pip uninstall -y superagent-runtime
+```
+
+Optional cleanup:
+
+```bash
+rm -rf .venv
 ```
 
 Verify command is available:
@@ -1208,6 +1340,11 @@ Run a single CLI query:
 ```bash
 superagent run "analyze this company and build a report"
 ```
+
+`superagent run` now uses the gateway flow by default:
+
+- ensures the gateway is running at `http://127.0.0.1:8790` (or `GATEWAY_HOST` / `GATEWAY_PORT`)
+- submits the query through `POST /ingest`
 
 List discovered agents:
 

@@ -1,0 +1,11 @@
+Below is a concise, source‑aware snapshot of gold as an investment theme as of March 23, 2026.
+
+1) Price trend and recent catalysts
+- Spot gold set a fresh all‑time high in late January 2026 and has been volatile since; into mid‑March it was still up strongly year‑to‑date but pulled back roughly 5% from Feb 27 to Mar 13 as traders took profits despite elevated geopolitical risk. Key near‑term drivers have been the Iran/Middle East escalation, shifting Fed expectations, and position/tracking dynamics around record levels. ([moneyweek.com](https://moneyweek.com/investments/commodities/gold/gold-price?utm_source=openai))
+- Underpinning the move is exceptionally strong 2025 investment demand (total demand a record 5,002t; ETFs and bar/coin buying were major contributors), with momentum expected to persist into 2026. January 2026 ETF flow data show continued strength, especially in Asia. ([gold.org](https://www.gold.org/news-and-events/press-releases/gold-investment-rockets-2025-setting-new-high-uncertainty-bites?utm_source=openai))
+
+2) Macro drivers: rates, inflation expectations, USD, geopolitics
+- Yields: The 10‑year U.S. Treasury yield pushed higher in early March as markets priced potential inflation spillovers from the Middle East conflict; consensus expects any further drift up in yields to be modest. Higher real/nominal yields are usually a headwind for bullion, though acute risk episodes can see gold rise alongside yields. ([axios.com](https://www.axios.com/2026/03/06/iran-bonds-inflation-treasuries?utm_source=openai))
+- Fed path: The CBO baseline points to rate cuts over 2026 (versus 2025’s tightening endgame), a medium‑term tailwind if realized. ([apnews.com](https://apnews.com/article/eb0864a2d9237daa95208bda56876af1?utm_source=openai))
+- USD: After a sharp drop in 2025, the dollar started 2026 firmer; a stronger DXY typically leans bearish for gold on a currency‑translation basis. ([investing.com](https://www.investing.com/news/economy-news/dollar-makes-a-soft-start-to-2026-after-sharpest-drop-in-8-years-4427272?utm_source=openai))
+- Geopolitics: The Iran/Middle East war has intermittently boosted safe‑haven demand but has

@@ -1,0 +1,42 @@
+Host OS: windows
+Target OS: windows
+Shell: powershell.exe
+Working directory: D:\Personal Data\projects\multi-agents\sample-agents
+Timeout seconds: 120
+Command: $ErrorActionPreference='SilentlyContinue'; $root='D:\'; $tmp=Join-Path $env:TEMP ('dup_scan_'+[guid]::NewGuid().ToString()); New-Item -ItemType Directory -Path $tmp | Out-Null; $errFile=Join-Path $tmp 'errors.txt'; $outFile=Join-Path $tmp 'summary.txt'; $files=Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue; $sizeGroups=$files | Group-Object Length | Where-Object { $_.Count -gt 1 }; $dupGroups=@(); foreach($sg in $sizeGroups){ $hashBuckets=@{}; foreach($f in $sg.Group){ try { $h=(Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction Stop).Hash } catch { Add-Content -LiteralPath $errFile -Value ('HASH/ACCESS ERROR: '+$f.FullName+' :: '+$_.Exception.Message); continue } if(-not $hashBuckets.ContainsKey($h)){ $hashBuckets[$h]=New-Object System.Collections.ArrayList }; [void]$hashBuckets[$h].Add($f) } foreach($k in $hashBuckets.Keys){ $g=$hashBuckets[$k]; if($g.Count -gt 1){ $dupGroups += [pscustomobject]@{ Size=[int64]$g[0].Length; Hash=$k; Count=[int]$g.Count; Wasted=[int64]($g[0].Length*($g.Count-1)); Files=($g | ForEach-Object FullName) } } } $totalGroups=@($dupGroups).Count; $totalFiles=(@($dupGroups | ForEach-Object Count) | Measure-Object -Sum).Sum; if(-not $totalFiles){ $totalFiles=0 }; $totalWasted=(@($dupGroups | ForEach-Object Wasted) | Measure-Object -Sum).Sum; if(-not $totalWasted){ $totalWasted=0 }; function Fmt([int64]$n){ if($n -ge 1TB){ '{0:N2} TB' -f ($n/1TB) } elseif($n -ge 1GB){ '{0:N2} GB' -f ($n/1GB) } elseif($n -ge 1MB){ '{0:N2} MB' -f ($n/1MB) } elseif($n -ge 1KB){ '{0:N2} KB' -f ($n/1KB) } else { "$n B" } }; $lines=New-Object System.Collections.Generic.List[string]; $lines.Add('Duplicate scan summary for D:\'); $lines.Add(('Groups: {0}; Duplicate files in groups: {1}; Estimated reclaimable space: {2}' -f $totalGroups,$totalFiles,Fmt $totalWasted)); $lines.Add(''); $lines.Add('Top duplicate groups by reclaimable space:'); $top=$dupGroups | Sort-Object Wasted -Descending | Select-Object -First 15; if($top){ $i=1; foreach($g in $top){ $lines.Add(('{0}. copies={1}; fileSize={2}; reclaimable={3}; sample={4}' -f $i,$g.Count,(Fmt $g.Size),(Fmt $g.Wasted),$g.Files[0])); $i++ } } else { $lines.Add('None found.') }; $lines.Add(''); $lines.Add('Notable large duplicates (file size >= 100 MB):'); $large=$dupGroups | Where-Object { $_.Size -ge 100MB } | Sort-Object Size -Descending | Select-Object -First 15; if($large){ $i=1; foreach($g in $large){ $lines.Add(('{0}. copies={1}; fileSize={2}; reclaimable={3}; sample={4}' -f $i,$g.Count,(Fmt $g.Size),(Fmt $g.Wasted),$g.Files[0])); $i++ } } else { $lines.Add('None found.') }; $lines.Add(''); $errCount=0; if(Test-Path -LiteralPath $errFile){ $errCount=(Get-Content -LiteralPath $errFile | Measure-Object -Line).Lines }; $lines.Add(('Scan limitations/errors: {0} file(s) could not be accessed or hashed.' -f $errCount)); if($errCount -gt 0){ $lines.Add('Examples:'); Get-Content -LiteralPath $errFile -TotalCount 10 | ForEach-Object { $lines.Add($_) } }; Set-Content -LiteralPath $outFile -Value $lines; Get-Content -LiteralPath $outFile
+Return code: 1
+
+STDOUT:
+<empty>
+
+STDERR:
+At line:1 char:1833
++ ... stimated reclaimable space: {2}' -f $totalGroups,$totalFiles,Fmt $tot ...
++                                                                  ~
+Missing expression after ','.
+At line:1 char:1833
++ ... mated reclaimable space: {2}' -f $totalGroups,$totalFiles,Fmt $totalW ...
++                                                               ~~~
+Unexpected token 'Fmt' in expression or statement.
+At line:1 char:1833
++ ... stimated reclaimable space: {2}' -f $totalGroups,$totalFiles,Fmt $tot ...
++                                                                  ~
+Missing closing ')' in expression.
+At line:1 char:1833
++ ... stimated reclaimable space: {2}' -f $totalGroups,$totalFiles,Fmt $tot ...
++                                                                  ~
+Missing ')' in method call.
+At line:1 char:467
++ ... _.Count -gt 1 }; $dupGroups=@(); foreach($sg in $sizeGroups){ $hashBu ...
++                                                                 ~
+Missing closing '}' in statement block or type definition.
+At line:1 char:1849
++ ... ble space: {2}' -f $totalGroups,$totalFiles,Fmt $totalWasted)); $line ...
++                                                                 ~
+Unexpected token ')' in expression or statement.
+At line:1 char:1850
++ ... le space: {2}' -f $totalGroups,$totalFiles,Fmt $totalWasted)); $lines ...
++                                                                 ~
+Unexpected token ')' in expression or statement.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : MissingExpressionAfterToken

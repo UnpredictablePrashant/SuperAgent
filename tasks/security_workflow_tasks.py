@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.report_tasks import report_agent
 from tasks.research_infra import llm_json, llm_text
+from tasks.security_policy import apply_security_profile_defaults
 from tasks.security_tasks import (
     _require_authorized_security_scope,
     _target_base_url,
@@ -131,6 +132,7 @@ def _parse_nmap_xml(path: str) -> dict:
 
 
 def _run_nmap_scan(target: str, state: dict, call_number: int) -> dict:
+    apply_security_profile_defaults(state)
     binary = shutil.which("nmap")
     if not binary:
         return {"available": False, "reason": "nmap is not installed."}
@@ -138,12 +140,20 @@ def _run_nmap_scan(target: str, state: dict, call_number: int) -> dict:
     if not host:
         return {"available": False, "reason": "No scan host was resolved from the target."}
 
-    timeout = int(state.get("scanner_timeout_seconds", 600))
-    top_ports = int(state.get("scanner_top_ports", 200))
+    timeout = int(state.get("scanner_timeout_seconds", 900))
+    top_ports = int(state.get("scanner_top_ports", 2000))
     ports = str(state.get("scanner_ports", "")).strip()
+    version_intensity = str(state.get("scanner_nmap_version_intensity", "all")).strip().lower()
+    default_scripts = bool(state.get("scanner_nmap_default_scripts", True))
     xml_name = f"scanner_nmap_{call_number}_{uuid.uuid4().hex}.xml"
     xml_path = resolve_output_path(xml_name)
-    cmd = [binary, "-Pn", "-sT", "-sV", "--version-light"]
+    cmd = [binary, "-Pn", "-sT", "-sV"]
+    if version_intensity == "light":
+        cmd.append("--version-light")
+    else:
+        cmd.append("--version-all")
+    if default_scripts:
+        cmd.append("-sC")
     if ports:
         cmd.extend(["-p", ports])
     else:
@@ -160,14 +170,15 @@ def _run_nmap_scan(target: str, state: dict, call_number: int) -> dict:
 
 
 def _run_zap_baseline(target: str, state: dict, call_number: int) -> dict:
+    apply_security_profile_defaults(state)
     binary = shutil.which("zap-baseline.py")
     if not binary:
         return {"available": False, "reason": "zap-baseline.py is not installed."}
     if not _is_http_target(target):
         return {"available": False, "reason": "ZAP baseline requires a full http(s) target URL."}
 
-    timeout = int(state.get("scanner_timeout_seconds", 600))
-    max_minutes = int(state.get("zap_max_minutes", 3))
+    timeout = int(state.get("scanner_timeout_seconds", 900))
+    max_minutes = int(state.get("zap_max_minutes", 20))
     json_name = f"scanner_zap_{call_number}_{uuid.uuid4().hex}.json"
     html_name = f"scanner_zap_{call_number}_{uuid.uuid4().hex}.html"
     json_path = resolve_output_path(json_name)

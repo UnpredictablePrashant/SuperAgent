@@ -1,0 +1,20 @@
+{
+  "decision": "deny",
+  "allowed_actions": [
+    "passive_web_checks",
+    "api_surface_mapping",
+    "unauthenticated_endpoint_review",
+    "idor_review",
+    "prompt_integrity_review",
+    "ai_asset_exposure_review",
+    "dependency_audit",
+    "sast_review",
+    "tls_review"
+  ],
+  "disallowed_actions": [
+    "exploit",
+    "credential_attack",
+    "service_disruption"
+  ],
+  "reason": "Authorization flag not present."
+}

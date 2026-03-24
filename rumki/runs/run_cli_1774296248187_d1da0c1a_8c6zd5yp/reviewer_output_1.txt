@@ -1,0 +1,41 @@
+{
+  "decision": "revise",
+  "reason": "The output is incomplete/truncated and contains questionable sourcing and likely inaccurate price levels, so it does not reliably satisfy the objective.",
+  "is_output_correct": false,
+  "revised_objective": "Produce a current, source-verified analysis of the gold market and gold-related stocks/ETFs as of March 23, 2026, including spot gold trend, key macro drivers, major gold miners and ETFs, bullish/bearish scenarios, and clearly cited reputable sources with no unsupported price claims.",
+  "step_reviews": [
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "Response is truncated, mixes source labels inconsistently, includes suspect extreme gold price claims, and does not fully analyze gold stocks/ETFs despite the stock-market framing."
+    }
+  ],
+  "next_agent": "deep_research_agent",
+  "corrected_values": {
+    "objective": "Produce a current, source-verified analysis of the gold market and gold-related stocks/ETFs as of March 23, 2026, including spot gold trend, key macro drivers, major gold miners and ETFs, bullish/bearish scenarios, and clearly cited reputable sources with no unsupported price claims.",
+    "requirements": [
+      "Verify current spot gold price range using reputable financial sources",
+      "Focus on gold as an investable market: bullion, major ETFs (e.g. GLD, IAU, GDX, GDXJ), and leading miners (e.g. Newmont, Barrick, Agnico Eagle)",
+      "Use high-quality sources such as Reuters, World Gold Council, major exchanges/fund issuers, company filings, and other reputable financial media",
+      "Remove or explicitly verify any extraordinary price claim before stating it",
+      "Provide a concise but complete analysis with sections: market snapshot, drivers, equities/ETFs, risks, outlook",
+      "Include a balanced bull/base/bear scenario"
+    ],
+    "deliverable_format": {
+      "style": "concise analytical brief",
+      "sections": [
+        "Market snapshot",
+        "Key drivers",
+        "Gold stocks and ETFs",
+        "Risks",
+        "3-scenario outlook",
+        "Sources"
+      ]
+    }
+  }
+}
+Parsed Decision: revise
+Reason: The output is incomplete/truncated and contains questionable sourcing and likely inaccurate price levels, so it does not reliably satisfy the objective.
+Revised Objective: Produce a current, source-verified analysis of the gold market and gold-related stocks/ETFs as of March 23, 2026, including spot gold trend, key macro drivers, major gold miners and ETFs, bullish/bearish scenarios, and clearly cited reputable sources with no unsupported price claims.
+Next Agent: deep_research_agent
+Corrected Values: {"objective": "Produce a current, source-verified analysis of the gold market and gold-related stocks/ETFs as of March 23, 2026, including spot gold trend, key macro drivers, major gold miners and ETFs, bullish/bearish scenarios, and clearly cited reputable sources with no unsupported price claims.", "requirements": ["Verify current spot gold price range using reputable financial sources", "Focus on gold as an investable market: bullion, major ETFs (e.g. GLD, IAU, GDX, GDXJ), and leading miners (e.g. Newmont, Barrick, Agnico Eagle)", "Use high-quality sources such as Reuters, World Gold Council, major exchanges/fund issuers, company filings, and other reputable financial media", "Remove or explicitly verify any extraordinary price claim before stating it", "Provide a concise but complete analysis with sections: market snapshot, drivers, equities/ETFs, risks, outlook", "Include a balanced bull/base/bear scenario"], "deliverable_format": {"style": "concise analytical brief", "sections": ["Market snapshot", "Key drivers", "Gold stocks and ETFs", "Risks", "3-scenario outlook", "Sources"]}}

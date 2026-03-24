@@ -1,0 +1,2 @@
+2026-03-24 00:05:14,962 - INFO - [Orchestrator] Decision: security_scope_guard_agent. Reason: Need to enforce defensive-only scope and verify authorization before any security assessment or reporting.
+2026-03-24 00:05:18,722 - INFO - [System] Dispatching to security_scope_guard_agent.

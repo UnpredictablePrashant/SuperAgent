@@ -7,6 +7,7 @@ def worker_agent(state):
     feedback=state.get('review_reason',"")
     user_query = task_content or state.get("current_objective") or state["user_query"]
     a2a_context = recent_messages_for_agent(state, "worker_agent")
+    repo_scan_summary = state.get("repo_scan_summary", "")
     log_task_update("Worker", f"Draft pass #{state['worker_calls']} started.")
     if feedback:
         logger.info(f"[Worker] Applying reviewer feedback: {feedback}")
@@ -32,9 +33,13 @@ def worker_agent(state):
     Recent A2A messages for the worker:
     {a2a_context}
 
+    Repository scan summary (if available):
+    {repo_scan_summary or "No repository scan summary was attached to this run."}
+
     Write the best possible improved response.
     If reviewer feedback exists, explicitly fix those issues.
     If the user asks for an integration or capability that is not configured, explain exactly what is missing and point to the available setup actions instead of pretending it is available.
+    Do not claim you lack filesystem access when repository scan summary is provided above; use that evidence directly.
 
     """
     response=llm.invoke(prompt)

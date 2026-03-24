@@ -16,6 +16,12 @@ Run one query:
 superagent run "analyze this company and build a report"
 ```
 
+Run in current terminal folder:
+
+```bash
+superagent run --current-folder "analyze this company and build a report"
+```
+
 Run with stricter step limit:
 
 ```bash
@@ -85,7 +91,12 @@ Expected behavior:
 Goal: Generate a defensive security findings summary.
 
 ```bash
-superagent run "For authorized target https://example.com, perform passive recon and provide top security findings with remediation priorities."
+superagent run \
+  --security-authorized \
+  --security-target-url https://example.com \
+  --security-authorization-note "SEC-123 approved by owner" \
+  --security-scan-profile deep \
+  "Perform defensive recon and extensive security findings with remediation priorities."
 ```
 
 Expected behavior:
@@ -105,6 +116,68 @@ Expected behavior:
 - Travel agents are used only if required setup (including `SERP_API_KEY`) is configured.
 - If unavailable, runtime will fall back to other eligible agents.
 
+## Case Study 7: Authorized Deep Security Assessment
+
+Goal: Run an explicit, authorized, defensive security assessment with deeper scan coverage.
+
+```bash
+superagent run \
+  --security-authorized \
+  --security-target-url https://example.com \
+  --security-authorization-note "SEC-123 approved by owner" \
+  --security-scan-profile extensive \
+  "Perform a defensive security assessment with deep coverage and provide prioritized remediation guidance."
+```
+
+Expected behavior:
+- CLI requires explicit authorization details before security scanning starts.
+- CLI auto-checks security tooling and attempts to install missing tools (`nmap`, `zap`, `dependency-check`) unless disabled.
+- Security workflow remains defensive-only and blocks unauthorized/offensive operation.
+- Extensive profile applies deeper default scan posture (broader Nmap coverage and longer ZAP baseline window).
+- Outputs include evidence and findings artifacts under `output/runs/<run_id>/`.
+
+Optional: disable auto-install for this run
+
+```bash
+superagent run --no-auto-install-security-tools --security-authorized --security-target-url https://example.com --security-authorization-note "SEC-123 approved by owner" --security-scan-profile deep "Perform authorized defensive assessment."
+```
+
+## Case Study 8: Master Coding Agent (Detailed Long-Running Build)
+
+Goal: Deliver a complete project blueprint and route implementation/setup work to the right specialist agents.
+
+```bash
+superagent run --max-steps 30 "Use master_coding_agent to design and deliver a complete production-ready SaaS starter: API, auth, database migrations, CI, tests, docs, and deployment instructions."
+```
+
+Expected behavior:
+- `master_coding_agent` creates a detailed architecture + phased implementation plan.
+- If dependencies/components are required, it delegates setup/install work to supporting agents (for example `os_agent`).
+- It then delegates concrete coding execution to `coding_agent` and keeps the workflow detailed and end-to-end.
+
+## Case Study 9: Very Long Exhaustive Document (50+ Pages)
+
+Goal: Build a deeply researched, coherent long-form report through staged chapter generation and final merge.
+
+```bash
+superagent run \
+  --max-steps 180 \
+  --long-document \
+  --long-document-pages 50 \
+  --long-document-sections 10 \
+  --long-document-section-pages 5 \
+  --long-document-title "Global Gold Market Intelligence Dossier" \
+  --research-max-wait-seconds 7200 \
+  --research-max-tool-calls 16 \
+  "Produce an exhaustive investment-grade global gold market report with coherent chapter-by-chapter analysis and final merged output."
+```
+
+Expected behavior:
+- Routes to `long_document_agent` for staged section planning, deep research, chapter drafting, and continuity alignment.
+- Writes per-section research artifacts plus merged output into `output/runs/<run_id>/`.
+- Coherence is anchored through markdown memory files (`Agent.md`, `soul.md`, `memory.md`, `session.md`, `planning.md`) plus live bridge files (`long_document_coherence_*.md`).
+- Supports very long-running execution windows with explicit research wait configuration.
+
 ## Useful Companion Commands
 
 Inspect one agent:
@@ -119,10 +192,66 @@ Run daemon once (monitor pass):
 superagent daemon --once
 ```
 
+Set current terminal folder as default working directory:
+
+```bash
+superagent workdir here
+```
+
 Run gateway mode:
 
 ```bash
 superagent gateway
+```
+
+## Full Setup Configuration (Web + CLI)
+
+Start setup UI:
+
+```bash
+superagent setup ui
+```
+
+List every configurable component:
+
+```bash
+superagent setup components
+```
+
+Set a config value in local setup DB:
+
+```bash
+superagent setup set openai OPENAI_API_KEY sk-...
+superagent setup set openai OPENAI_MODEL_GENERAL gpt-4.1-mini
+superagent setup set openai OPENAI_MODEL_CODING gpt-5.3-codex
+```
+
+Inspect one component:
+
+```bash
+superagent setup show openai --json
+```
+
+Disable or enable a component:
+
+```bash
+superagent setup disable serpapi
+superagent setup enable serpapi
+```
+
+Export DB settings as dotenv lines:
+
+```bash
+superagent setup export-env
+superagent setup export-env --include-secrets
+```
+
+Install auto-installable local components/tools:
+
+```bash
+superagent setup install
+superagent setup install --yes
+superagent setup install --yes --only nmap zap dependency-check playwright
 ```
 
 ## Notes

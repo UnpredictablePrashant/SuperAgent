@@ -1,0 +1,462 @@
+{
+  "id": "resp_0f6c27e4a516b6240069c1a1f5b8608190a4bf1193071d777c",
+  "created_at": 1774297589.0,
+  "error": null,
+  "incomplete_details": {
+    "reason": "max_output_tokens"
+  },
+  "instructions": "Provide a concise but source-aware market analysis focused on gold as an investment theme. Cover: 1) current gold price trend and major recent catalysts, 2) impact of interest rates, inflation expectations, USD, and geopolitics, 3) implications for gold mining stocks and major gold ETFs, 4) bull and bear cases over near term and medium term, 5) key indicators to watch. Include citations and note uncertainty where applicable.",
+  "metadata": {},
+  "model": "gpt-5-2025-08-07",
+  "object": "response",
+  "output": [
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a1f766748190945506c91aa79e42",
+      "summary": [
+        {
+          "text": "**Gathering market analysis**\n\nI need to provide a concise and source-aware market analysis, specifically focusing on the gold market. It’s important to use the web.run tool because the data might change frequently. I’m looking into the current gold price trend and key recent influencers as of March 23, 2026. My sources should include reputable outlets like Bloomberg and Reuters. I want to gather information on factors like interest rates, geopolitical issues, and implications for gold-related investments.",
+          "type": "summary_text"
+        },
+        {
+          "text": "**Evaluating market indicators**\n\nI need to provide both bull and bear cases for the near term (1-3 months) and medium term (6-18 months). Key indicators include real yields, Fed policies, dollar index (DXY), ETF flows, central bank purchases, and mining costs. I must manage citations carefully to stay within word limits, usually under 200 words per source. I plan to search for recent articles on gold prices from Reuters and updates from the World Gold Council. Additionally, I want to confirm current gold prices, which might be around $2,300-$2,500 as of March 2026.",
+          "type": "summary_text"
+        },
+        {
+          "text": "**Collecting economic indicators**\n\nI need to gather Treasury data for the 10-year TIPS real yield using the FRED DFII10 series, citing the last value or an estimate. I want to check the USD DXY trend from ICE and reference pieces from the WSJ or Bloomberg. For ETF flows, I’ll look at the World Gold Council’s monthly updates for February/March 2026. Additionally, I'll review the performance of gold mining stocks, using GDX performance data and possibly citing reports that mention issues with miners. It’s crucial to also consider macroeconomic factors and geopolitical tensions.",
+          "type": "summary_text"
+        },
+        {
+          "text": "**Identifying risks and opportunities**\n\nI need to focus on identifying general risks and opportunities, while making sure to cite sources accurately where applicable. To do this, I plan to use Reuters or the Financial Times as trusted outlets for reliable information. I’ll conduct web.run searches to find relevant articles that can support my analysis. This way, I can provide a well-rounded view on the subject based on reputable data. Let's get started on those searches!",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "ws_0f6c27e4a516b6240069c1a2031fa08190ab6ba65ce3c31606",
+      "action": {
+        "query": "gold price hits record March 2026 Reuters",
+        "type": "search",
+        "queries": [
+          "gold price hits record March 2026 Reuters",
+          "World Gold Council central bank gold demand 2025 2026 report",
+          "GLD holdings March 2026 SPDR Gold Shares holdings data",
+          "10-year TIPS yield March 2026 FRED DFII10"
+        ],
+        "sources": null
+      },
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a210b92c81908f63c01cdf8d601a",
+      "summary": [
+        {
+          "text": "**Evaluating search results**\n\nI’m noticing that the web search results seem suspicious. For instance, APNews claims a gold price of $4,822 in January 2026, which feels unlikely, and MoneyWeek's $5,000 by that same date seems off too. It's possible these are fake sites or just noise. I see that the domains are \"apnews.org\" instead of \"apnews.com,\" while \"investing.com\" links to a Reuters article, which seems more credible. I’ll focus on searching for reliable sources like Reuters or Bloomberg regarding the 2026 gold price.",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "ws_0f6c27e4a516b6240069c1a21381208190bbaec2a72dc2c1bc",
+      "action": {
+        "query": "Reuters gold price March 2026 spot gold record high 2026 Reuters",
+        "type": "search",
+        "queries": [
+          "Reuters gold price March 2026 spot gold record high 2026 Reuters",
+          "World Gold Council 2025 Gold Demand Trends report central bank purchases tonnes",
+          "SPDR Gold Shares GLD assets under management March 2026 site:ssga.com"
+        ],
+        "sources": null
+      },
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a2259f708190ac357ee2acfe815e",
+      "summary": [
+        {
+          "text": "**Searching for reliable sources**\n\nI’m noticing that the search results are messy with a lot of potentially unreliable sources. It seems like the tool might end up producing random noise, which is not helpful. I want to concentrate on reputable sites like Reuters, Bloomberg, Financial Times, and others for gold price information. So, I’ll search specifically for \"Reuters gold March 2026\" to get the most trustworthy data.",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "ws_0f6c27e4a516b6240069c1a227561c8190b2cd7c9163852408",
+      "action": {
+        "query": "Reuters March 2026 gold price hits record March 2026 Reuters gold",
+        "type": "search",
+        "queries": [
+          "Reuters March 2026 gold price hits record March 2026 Reuters gold",
+          "Reuters gold price March 2026 dollar yields impact Reuters"
+        ],
+        "sources": null
+      },
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a232b0dc819097efcc835b2029a3",
+      "summary": [
+        {
+          "text": "**Assessing gold price sources**\n\nI’m noticing that the web results have questionable sources presenting unrealistic gold prices, like $5,300 and $4,800. I need to ensure trustworthiness in citations while being aware that I should express any uncertainties. Relying on reputable sources like the World Gold Council, FRED, SSGA, and Reuters is essential, although I can't pull clean Reuters pages directly. If the spot prices can’t be trusted, I should focus on discussing trends and market drivers instead. Let's fetch the dollar index or DXY for better context.",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "ws_0f6c27e4a516b6240069c1a234bff881909c7d41c732d8d088",
+      "action": {
+        "query": "Trade Weighted U.S. Dollar Index Broad FRED DTWEXBGS March 2026",
+        "type": "search",
+        "queries": [
+          "Trade Weighted U.S. Dollar Index Broad FRED DTWEXBGS March 2026",
+          "Dollar index DXY March 2026 level Reuters"
+        ],
+        "sources": null
+      },
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a23f05188190ada95baa57ea049c",
+      "summary": [
+        {
+          "text": "**Searching for reliable sources**\n\nI see that the tool’s returning a lot of unreliable content, which is messy. It might be because the browsing environment is synthetic, but I need to follow the instructions and use web.run. I should prioritize high-quality sources. For this, I plan to fetch the Fed funds rate decision from March 2026. Maybe the FOMC statement could be useful, so I’ll search for \"FOMC March 2026 statement\" to find that information.",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "ws_0f6c27e4a516b6240069c1a24195fc81909af747b41551275c",
+      "action": {
+        "query": "Federal Reserve FOMC statement March 2026 PDF",
+        "type": "search",
+        "queries": [
+          "Federal Reserve FOMC statement March 2026 PDF",
+          "CME FedWatch March 2026 rate cuts expectations gold"
+        ],
+        "sources": null
+      },
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a25130388190aff0756c8beb8f54",
+      "summary": [
+        {
+          "text": "**Compiling gold analysis**\n\nThis situation isn't ideal, but I can still analyze without fixing on exact prices. I could say gold reached record highs in early 2026 before a pullback, with elevated volatility. I can reference pieces from the WGC, Guardian, or Reuters that discuss these records. For instance, the Guardian mentions gold above $4,000 and near $5,600 in early February 2026. I’ll also use reputable sources for data on real yields and breakeven inflation. Let's look into miners and ETFs as well!",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "ws_0f6c27e4a516b6240069c1a252e78881908e8210aa99d7513b",
+      "action": {
+        "query": "VanEck GDX fact sheet March 2026 pdf",
+        "type": "search",
+        "queries": [
+          "VanEck GDX fact sheet March 2026 pdf",
+          "GDX performance 2026 YTD Reuters",
+          "GDXJ performance 2026 YTD Reuters"
+        ],
+        "sources": null
+      },
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a25dfff881908dadf3458ea8a5d4",
+      "summary": [
+        {
+          "text": "**Evaluating browsing sources**\n\nI'm facing some challenges with the browsing tool environment since many sources seem unreliable, like Reddit or random blogs. But I think I can still find reliable citations from WGC official PDFs and FRED for real yields. For ETFs GLD and IAU, I can refer to their official fund pages, such as the SSGA GLD page and the iShares IAU page. Plus, for GDX, I can use the fact sheet. I'll also look into the WSJ Market Data page for DXY, as that could be helpful!",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "ws_0f6c27e4a516b6240069c1a26100848190a647a959ce5a1aca",
+      "action": {
+        "query": "WSJ Dollar Index DXY March 2026 WSJ Markets data",
+        "type": "search",
+        "queries": [
+          "WSJ Dollar Index DXY March 2026 WSJ Markets data",
+          "iShares IAU fact sheet March 2026 site:ishares.com",
+          "LBMA gold price PM March 2026 press release"
+        ],
+        "sources": null
+      },
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a26de4408190a11e70b3ee551404",
+      "summary": [
+        {
+          "text": "**Considering data sources**\n\nI realize this source isn’t usable as it stands. An alternative could be citing the World Gold Council for ETF flows since they publish monthly reports on Gold ETF flows. I think it would be better to fetch the data specifically for February 2026. That way, I can provide the most recent and relevant information on the topic. This will enhance the accuracy and credibility of the response!",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "ws_0f6c27e4a516b6240069c1a26fc7608190959c8b42bbcbd206",
+      "action": {
+        "query": "World Gold Council ETF flows February 2026 gold ETFs holdings report site:gold.org",
+        "type": "search",
+        "queries": [
+          "World Gold Council ETF flows February 2026 gold ETFs holdings report site:gold.org",
+          "SPDR GLD total ounces of gold held March 2026 site:ssga.com"
+        ],
+        "sources": null
+      },
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a2813e288190ad034e6e0dd471eb",
+      "summary": [
+        {
+          "text": "**Gathering financial data**\n\nI've got solid WGC ETF flow pages for February 2026, so that's good. Now, I need inflation expectations and interest rates, using FRED DFII10 and YCharts breakeven data. For central bank demand, there are 863t purchases for the full year 2025, and I'll reference the WGC central banks page and the executive summary. I also need a reputable source on geopolitical tensions affecting gold in early 2026, looking at articles from Reuters and possibly the Financial Times or AP. Citing Reuters would probably be best.",
+          "type": "summary_text"
+        },
+        {
+          "text": "**Searching for mining costs**\n\nI need to look into gold miners' margins and costs. I can use company commentary or sector analysis, such as the VanEck or World Gold Council (WGC) reports on \"Gold Miner Margins.\" The WGC sometimes publishes data on \"Gold Mining Costs Q3 2025,\" including all-in sustaining costs (AISC). So, it would be a good idea to search for the WGC AISC figures from 2025 to gather that information. Let's see what I can find there!",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "ws_0f6c27e4a516b6240069c1a286ce84819086dd4d8fd2e6e2f6",
+      "action": {
+        "query": "World Gold Council AISC 2025 gold mining all-in sustaining costs 2025 report",
+        "type": "search",
+        "queries": [
+          "World Gold Council AISC 2025 gold mining all-in sustaining costs 2025 report",
+          "S&P Global Market Intelligence gold miners AISC 2025 report"
+        ],
+        "sources": null
+      },
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a296d9f881908e8759018fd6deb4",
+      "summary": [],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "ws_0f6c27e4a516b6240069c1a2976f1081908e9bd0d7df1c388c",
+      "action": {
+        "query": "iShares Gold Trust IAU official site fact sheet March 2026",
+        "type": "search",
+        "queries": [
+          "iShares Gold Trust IAU official site fact sheet March 2026",
+          "VanEck Junior Gold Miners ETF GDXJ performance 2026 site:vaneck.com"
+        ],
+        "sources": null
+      },
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "id": "rs_0f6c27e4a516b6240069c1a2a350c08190bf2ae038eb5efe5d",
+      "summary": [
+        {
+          "text": "**Gathering financial data**\n\nI've got the IAU official page for ETF mentions, and I need to look at how the USD impacts things and note central bank demand. The WGC reports a central bank demand of 863 tons for 2025, which is useful. For geopolitics, I can cite sources like Reuters or the Guardian, and I want to get data on COMEX net speculative positioning from the CFTC. \n\nIt might also be helpful to consider the 10-year TIPS yield and breakeven from March 10, 2026, with citations from FRED and YCharts!",
+          "type": "summary_text"
+        },
+        {
+          "text": "**Analyzing gold market trends**\n\nI'm looking to incorporate FXStreet information while mentioning that LBMA gold prices have hit records. It might be good to cite the WGC's record gold price, even though their ETF flows don’t discuss records. I definitely want to include GLD holdings or AUM, and the SSGA GLD page offers general info on those deep-liquidity vehicles.\n\nNow for organizing this analysis: first, I’ll cover the current trends and catalysts. Gold set new highs in early 2026 and has shown volatility, with a pullback due to a stronger USD. I need to cite specific sources, like the Guardian and FXStreet for accurate numbers!",
+          "type": "summary_text"
+        },
+        {
+          "text": "**Outlining macroeconomic drivers**\n\nTo provide context, I need to consider macro drivers like interest rates, real yields, and inflation expectations, with breakeven around 2.33% from YCharts. The USD is firming per FXStreet, and geopolitics plays a role as seen in a Reuters piece on safe-haven demand due to conflict in the Middle East.\n\nI want to highlight central bank demand projected at 863 tons for 2025 from the WGC, ongoing buying from the PBoC, and ETF inflows.\n\nNext, I’ll talk about how these factors impact miners and ETFs, especially miners’ earnings, margins, and specific ETFs like GDX, GDXJ, GLD, and IAU.",
+          "type": "summary_text"
+        },
+        {
+          "text": "**Assessing near-term and medium-term trends**\n\nI want to make sure to cite FRED for TIPS and WGC for ETF flows. For the near-term bear case, I’m considering factors like a stronger USD, persistent inflation lifting real yields, and profit-taking after a record run. The CME Fedwatch shows expectations for holding rates, and I can reference a CME Group video for insights on falling rate cut odds.\n\nIn the medium-term, central bank demand remains strong per the WGC, and JPMorgan suggests potential rate cuts in H2 2026. However, I recognize that a major geopolitical de-escalation or stronger growth might raise real yields, which could impact mining supply as well. I'll cite the WGC supply page for that!",
+          "type": "summary_text"
+        },
+        {
+          "text": "**Identifying key indicators**\n\nI need to outline key indicators to watch, like the 10-year TIPS yield and breakevens, the DXY, Fed timelines, ETF flows, central bank purchases from the WGC, and COMEX net positioning from the CFTC. While I won't cite the CFTC directly, I can mention it as an indicator.\n\nAdditionally, I’ll monitor GLD and IAU flows, real rates, the LBMA AM price fix, and changes in China's PBoC reserves. It's essential to note uncertainties where relevant! I’ll be careful with formatting and summarizing various sources, aiming for a concise final answer of 500-700 words with appropriate citations.",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning",
+      "content": null,
+      "encrypted_content": null,
+      "status": null
+    },
+    {
+      "id": "msg_0f6c27e4a516b6240069c1a2b02c188190b98ad82a5d1a3de2",
+      "content": [
+        {
+          "annotations": [
+            {
+              "end_index": 539,
+              "start_index": 297,
+              "title": "FTSE 100 hits fresh record high as gold heads for best day since 2008; SpaceX buys xAI in $1.25tn deal – business live | Business | The Guardian",
+              "type": "url_citation",
+              "url": "https://www.theguardian.com/business/live/2026/feb/03/gold-silver-prices-markets-stabilise-spacex-buys-xai-uk-inflation-stock-markets-business-live-news-updates?page=with%3Ablock-6981eebf8f08a424206b2e0b&utm_source=openai"
+            },
+            {
+              "end_index": 824,
+              "start_index": 718,
+              "title": "Inflows supported by opposite shores | World Gold Council",
+              "type": "url_citation",
+              "url": "https://www.gold.org/goldhub/research/gold-etfs-holdings-and-flows/2026/03?utm_source=openai"
+            },
+            {
+              "end_index": 1091,
+              "start_index": 1007,
+              "title": "Market Yield on U.S. Treasury Securities at 10-Year Constant Maturity, Quoted on an Investment Basis, Inflation-Indexed (DFII10) | FRED | St. Louis Fed",
+              "type": "url_citation",
+              "url": "https://fred.stlouisfed.org/series/DFII10?utm_source=openai"
+            },
+            {
+              "end_index": 1455,
+              "start_index": 1354,
+              "title": "10 Year TIPS/Treasury Breakeven Rate (Market Daily) - Unite…",
+              "type": "url_citation",
+              "url": "https://ycharts.com/indicators/10_year_tipstreasury_breakeven_rate?utm_source=openai"
+            },
+            {
+              "end_index": 1753,
+              "start_index": 1631,
+              "title": "Fed Leaves Rates Unchanged to Start 2026: Is a Cut Coming in March? | J.P. Morgan",
+              "type": "url_citation",
+              "url": "https://www.jpmorgan.com/insights/markets-and-economy/economy/fed-meeting-january-2026?utm_source=openai"
+            },
+            {
+              "end_index": 2052,
+              "start_index": 1907,
+              "title": "DXY touches 15-week high before fading into the close",
+              "type": "url_citation",
+              "url": "https://www.fxstreet.com/news/us-dollar-index-touches-15-week-high-before-fading-into-the-close-202603091932/?utm_source=openai"
+            },
+            {
+              "end_index": 2362,
+              "start_index": 2214,
+              "title": "Gold hits record high, on track for best quarter since 1986 on tariff worries",
+              "type": "url_citation",
+              "url": "https://www.tbsnews.net/world/global-economy/gold-hits-record-high-track-best-quarter-1986-tariff-worries-1105661?utm_source=openai"
+            },
+            {
+              "end_index": 2628,
+              "start_index": 2520,
+              "title": "gold.org\n \n  \nGold Demand Trends \nQ4 and Full Year",
+              "type": "url_citation",
+              "url": "https://www.gold.org/download/file/20432/GDT-Full-Year-2025-Exec-Summary.pdf?utm_source=openai"
+            }
+          ],
+          "text": "Below is a concise, source‑aware take on gold’s market setup as of March 23, 2026.\n\n1) Price trend and recent catalysts\n- Trend: After setting fresh record highs in late January/early February 2026, gold has been volatile, with a pullback into mid‑March as the USD firmed and rate‑cut odds faded. ([theguardian.com](https://www.theguardian.com/business/live/2026/feb/03/gold-silver-prices-markets-stabilise-spacex-buys-xai-uk-inflation-stock-markets-business-live-news-updates?page=with%3Ablock-6981eebf8f08a424206b2e0b&utm_source=openai))\n- Near‑term flow support: Physically backed gold ETFs saw another strong month in February, lifting global holdings to a new all‑time high (4,171t) and AUM to a record US$701bn. ([gold.org](https://www.gold.org/goldhub/research/gold-etfs-holdings-and-flows/2026/03?utm_source=openai))\n- Recent headwinds: Real yields and the dollar ticked higher into mid‑March (10‑yr TIPS ~1.82% on Mar 10; DXY tested a 15‑week high near 99.7), both near‑term negatives for bullion. ([fred.stlouisfed.org](https://fred.stlouisfed.org/series/DFII10?utm_source=openai))\n\n2) Macro drivers: rates, inflation, USD, geopolitics, central banks\n- Rates/real yields: Gold’s inverse link to real rates remains intact; with 10‑yr breakevens around 2.3% and TIPS yields elevated vs 2023–24 levels, the carry headwind has re‑emerged at times. ([ycharts.com](https://ycharts.com/indicators/10_year_tipstreasury_breakeven_rate?utm_source=openai))\n- The Fed: The FOMC left rates unchanged in January and strategist consensus (e.g., J.P. Morgan) expects only limited easing in 2026, keeping the path of real yields pivotal. ([jpmorgan.com](https://www.jpmorgan.com/insights/markets-and-economy/economy/fed-meeting-january-2026?utm_source=openai))\n- USD: A firmer dollar in early March weighed on gold; DXY approached a multi‑month high before easing, underscoring gold’s short‑run sensitivity to FX. ([fxstreet.com](https://www.fxstreet.com/news/us-dollar-index-touches-15-week-high-before-fading-into-the-close-202603091932/?utm_source=openai))\n- Geopolitics: Episodes of risk aversion (tariff headlines, Middle East tensions) have repeatedly sparked safe‑haven demand; these remain live upside catalysts. ([tbsnews.net](https://www.tbsnews.net/world/global-economy/gold-hits-record-high-track-best-quarter-1986-tariff-worries-1105661?utm_source=openai))\n- Central bank demand: Official‑sector buying stayed historically elevated in 2025 (net +863t) and is expected by the WGC to remain a firm pillar into 2026. ([gold.org](https://www.gold.org/download/file/20432/GDT-Full-Year-2025-Exec-Summary.pdf?utm_source=openai))\n\n3) Implications for miners and ETFs\n- Miners’ margins: Despite rising costs, industry AISC averaged about US",
+          "type": "output_text",
+          "logprobs": []
+        }
+      ],
+      "role": "assistant",
+      "status": "incomplete",
+      "type": "message",
+      "phase": null
+    }
+  ],
+  "parallel_tool_calls": true,
+  "temperature": 1.0,
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "type": "web_search_preview",
+      "search_content_types": null,
+      "search_context_size": "medium",
+      "user_location": {
+        "type": "approximate",
+        "city": null,
+        "country": "US",
+        "region": null,
+        "timezone": null
+      }
+    }
+  ],
+  "top_p": 1.0,
+  "background": true,
+  "completed_at": null,
+  "conversation": null,
+  "max_output_tokens": 5000,
+  "max_tool_calls": 10,
+  "previous_response_id": null,
+  "prompt": null,
+  "prompt_cache_key": null,
+  "prompt_cache_retention": null,
+  "reasoning": {
+    "effort": "medium",
+    "generate_summary": null,
+    "summary": "detailed"
+  },
+  "safety_identifier": null,
+  "service_tier": "default",
+  "status": "incomplete",
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "top_logprobs": 0,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 46590,
+    "input_tokens_details": {
+      "cached_tokens": 4480
+    },
+    "output_tokens": 4749,
+    "output_tokens_details": {
+      "reasoning_tokens": 3904
+    },
+    "total_tokens": 51339
+  },
+  "user": null,
+  "billing": {
+    "payer": "developer"
+  },
+  "frequency_penalty": 0.0,
+  "presence_penalty": 0.0,
+  "store": true
+}

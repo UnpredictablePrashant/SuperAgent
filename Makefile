@@ -1,10 +1,14 @@
 PYTHON ?= python3
 
-.PHONY: install test compile ci docker-build
+.PHONY: install uninstall test compile ci docker-build
 
 install:
 	$(PYTHON) -m pip install --upgrade pip
 	$(PYTHON) -m pip install -e .
+	$(PYTHON) scripts/bootstrap_local_state.py
+
+uninstall:
+	$(PYTHON) -m pip uninstall -y superagent-runtime
 
 compile:
 	$(PYTHON) -m compileall app.py gateway_server.py setup_ui.py superagent tasks mcp_servers

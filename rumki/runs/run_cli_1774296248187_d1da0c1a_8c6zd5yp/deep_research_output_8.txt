@@ -1,0 +1,16 @@
+Below is a concise, source‑aware read on gold as an investment theme (data and events through March 23, 2026).
+
+1) Price trend and recent catalysts
+- Spot gold set successive record highs above $5,000/oz in late January 2026 amid a sharp USD slide and safe‑haven demand; miners surged alongside bullion. Volatility then spiked into early February before prices stabilized at elevated levels. ([investing.com](https://www.investing.com/news/economy-news/gold-rushes-to-record-high-above-5000oz-4464124?utm_source=openai))
+- Drivers behind the January spike included a multi‑week drop in the dollar to multi‑year lows, strong inflows into gold‑backed ETFs, and escalating geopolitical risks in the Middle East. ([bloomberg.com](https://www.bloomberg.com/news/articles/2026-01-27/dollar-sinks-to-lowest-level-in-four-years-as-headwinds-multiply?utm_source=openai))
+
+2) Macro channels: rates, inflation, USD, geopolitics
+- Policy rates/real yields: The Fed is holding the federal funds rate at 3.5%–3.75% (since Jan 28, 2026). Nominal 10‑year Treasury yields have hovered near the low‑4%s in late January. Gold’s inverse sensitivity to real yields remains the key financial linkage. ([federalreserve.gov](https://www.federalreserve.gov/newsevents/pressreleases/monetary20260128a1.htm?utm_source=openai))
+- Inflation expectations: Headline CPI cooled to 2.4% y/y in January; PCE inflation printed 2.8% y/y (core PCE firmed m/m), complicating the pace of any easing. ([axios.com](https://www.axios.com/2026/02/13/cpi-inflation-january-trump-tariffs?utm_source=openai))
+- US dollar: The dollar fell to its weakest levels in roughly four years in late January, historically a tailwind for gold; some stabilization followed. ([bloomberg.com](https://www.bloomberg.com/news/articles/2026-01-27/dollar-sinks-to-lowest-level-in-four-years-as-headwinds-multiply?utm_source=openai))
+- Geopolitics: Israel‑Iran hostilities intensified in March (missile exchanges and energy‑infrastructure strikes), sustaining safe‑haven flows and headline risk. ([apnews.com](https://apnews.com/article/35d15d7cbcfa65fd7d180c28d38e7f31?utm_source=openai))
+- Central‑bank demand: The World Gold Council (WGC) reports total 2025 gold demand hit a record 5,002t, with official‑sector (central bank) purchases of 863t—still historically elevated and expected to persist into 2026. ([gold.org](https://www.gold.org/news-and-events/press-releases/gold-investment-rockets-2025-setting-new-high-uncertainty-bites?utm_source=openai))
+
+3) Implications for gold miners and ETFs
+- Bullion ETFs: WGC shows record‑setting momentum into year‑end and January; global gold ETF assets and holdings hit new highs, with broad inflows outside Europe even on late‑Jan dips. For low‑cost, liquid exposure, the largest US funds remain GLD, IAU, and GLDM. ([gold.org](https://www.gold.org/goldhub/research/gold-etfs-holdings-and-flows/2026/01?utm_source=openai))
+- Miners: Shares jumped as bullion broke records, and Q4 prints from majors benefited from higher realized prices. Newmont beat estimates on price tailwinds; guidance from large producers suggests strong margins at current prices despite cost inflation. (Example: Barrick’s 2026 AISC guidance $1

@@ -109,6 +109,21 @@ def initialize_db(db_path: str = DB_PATH):
                 updated_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS task_sessions (
+                session_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                channel TEXT,
+                session_key TEXT,
+                started_at TEXT,
+                updated_at TEXT,
+                completed_at TEXT,
+                status TEXT,
+                active_agent TEXT,
+                step_count INTEGER,
+                summary_json TEXT,
+                FOREIGN KEY(run_id) REFERENCES runs(run_id)
+            );
+
             CREATE TABLE IF NOT EXISTS scheduled_jobs (
                 job_id TEXT PRIMARY KEY,
                 run_id TEXT,
@@ -171,6 +186,40 @@ def initialize_db(db_path: str = DB_PATH):
                 status TEXT,
                 message TEXT,
                 metadata_json TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS setup_components (
+                component_id TEXT PRIMARY KEY,
+                enabled INTEGER,
+                notes TEXT,
+                updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS setup_config_values (
+                component_id TEXT,
+                config_key TEXT,
+                config_value TEXT,
+                is_secret INTEGER,
+                updated_at TEXT,
+                PRIMARY KEY (component_id, config_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS setup_provider_tokens (
+                provider TEXT PRIMARY KEY,
+                token_json TEXT,
+                updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS privileged_audit_events (
+                event_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                timestamp TEXT,
+                actor TEXT,
+                action TEXT,
+                status TEXT,
+                detail_json TEXT,
+                prev_hash TEXT,
+                event_hash TEXT
             );
             """
         )
@@ -374,6 +423,43 @@ def upsert_channel_session(session_key: str, payload: dict, db_path: str = DB_PA
         )
 
 
+def upsert_task_session(session: dict, db_path: str = DB_PATH):
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO task_sessions (
+                session_id, run_id, channel, session_key, started_at, updated_at,
+                completed_at, status, active_agent, step_count, summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                run_id=excluded.run_id,
+                channel=excluded.channel,
+                session_key=excluded.session_key,
+                started_at=excluded.started_at,
+                updated_at=excluded.updated_at,
+                completed_at=excluded.completed_at,
+                status=excluded.status,
+                active_agent=excluded.active_agent,
+                step_count=excluded.step_count,
+                summary_json=excluded.summary_json
+            """,
+            (
+                session.get("session_id", ""),
+                session.get("run_id", ""),
+                session.get("channel", ""),
+                session.get("session_key", ""),
+                session.get("started_at", ""),
+                session.get("updated_at", ""),
+                session.get("completed_at", ""),
+                session.get("status", ""),
+                session.get("active_agent", ""),
+                int(session.get("step_count", 0) or 0),
+                json.dumps(session.get("summary", {}), ensure_ascii=False),
+            ),
+        )
+
+
 def insert_scheduled_job(job: dict, db_path: str = DB_PATH):
     initialize_db(db_path)
     with _connect(db_path) as conn:
@@ -530,6 +616,54 @@ def list_channel_sessions(limit: int = 50, db_path: str = DB_PATH) -> list[dict]
             """,
             (limit,),
         ).fetchall()
+    payload: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        raw_state = item.get("state_json", "")
+        try:
+            item["state"] = json.loads(raw_state) if raw_state else {}
+        except Exception:
+            item["state"] = {}
+        payload.append(item)
+    return payload
+
+
+def get_channel_session(session_key: str, db_path: str = DB_PATH) -> dict | None:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT session_key, channel, chat_id, sender_id, workspace_id, is_group, state_json, updated_at
+            FROM channel_sessions
+            WHERE session_key = ?
+            LIMIT 1
+            """,
+            (session_key,),
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    raw_state = item.get("state_json", "")
+    try:
+        item["state"] = json.loads(raw_state) if raw_state else {}
+    except Exception:
+        item["state"] = {}
+    return item
+
+
+def list_task_sessions(limit: int = 50, db_path: str = DB_PATH) -> list[dict]:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT session_id, run_id, channel, session_key, started_at, updated_at,
+                   completed_at, status, active_agent, step_count, summary_json
+            FROM task_sessions
+            ORDER BY updated_at DESC, started_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -592,3 +726,236 @@ def list_heartbeat_events(limit: int = 50, db_path: str = DB_PATH) -> list[dict]
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def upsert_setup_component(
+    component_id: str,
+    *,
+    enabled: bool = True,
+    notes: str = "",
+    updated_at: str = "",
+    db_path: str = DB_PATH,
+):
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO setup_components (component_id, enabled, notes, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(component_id) DO UPDATE SET
+                enabled=excluded.enabled,
+                notes=excluded.notes,
+                updated_at=excluded.updated_at
+            """,
+            (component_id, 1 if enabled else 0, notes, updated_at),
+        )
+
+
+def get_setup_component(component_id: str, db_path: str = DB_PATH) -> dict:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT component_id, enabled, notes, updated_at
+            FROM setup_components
+            WHERE component_id = ?
+            """,
+            (component_id,),
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def list_setup_components(db_path: str = DB_PATH) -> list[dict]:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT component_id, enabled, notes, updated_at
+            FROM setup_components
+            ORDER BY component_id ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def upsert_setup_config_value(
+    component_id: str,
+    config_key: str,
+    config_value: str,
+    *,
+    is_secret: bool = False,
+    updated_at: str = "",
+    db_path: str = DB_PATH,
+):
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO setup_config_values (component_id, config_key, config_value, is_secret, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(component_id, config_key) DO UPDATE SET
+                config_value=excluded.config_value,
+                is_secret=excluded.is_secret,
+                updated_at=excluded.updated_at
+            """,
+            (component_id, config_key, config_value, 1 if is_secret else 0, updated_at),
+        )
+
+
+def delete_setup_config_value(component_id: str, config_key: str, db_path: str = DB_PATH):
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            DELETE FROM setup_config_values
+            WHERE component_id = ? AND config_key = ?
+            """,
+            (component_id, config_key),
+        )
+
+
+def list_setup_config_values(*, include_secrets: bool = True, db_path: str = DB_PATH) -> list[dict]:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT component_id, config_key, config_value, is_secret, updated_at
+            FROM setup_config_values
+            ORDER BY component_id ASC, config_key ASC
+            """
+        ).fetchall()
+    payload = []
+    for row in rows:
+        item = dict(row)
+        if not include_secrets and int(item.get("is_secret", 0)) == 1:
+            item["config_value"] = "********"
+        payload.append(item)
+    return payload
+
+
+def get_setup_config_value(component_id: str, config_key: str, db_path: str = DB_PATH) -> dict:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT component_id, config_key, config_value, is_secret, updated_at
+            FROM setup_config_values
+            WHERE component_id = ? AND config_key = ?
+            """,
+            (component_id, config_key),
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def set_setup_provider_tokens(provider: str, token_payload: dict, updated_at: str = "", db_path: str = DB_PATH):
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO setup_provider_tokens (provider, token_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(provider) DO UPDATE SET
+                token_json=excluded.token_json,
+                updated_at=excluded.updated_at
+            """,
+            (provider, json.dumps(token_payload, ensure_ascii=False), updated_at),
+        )
+
+
+def get_setup_provider_tokens(provider: str, db_path: str = DB_PATH) -> dict:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT token_json
+            FROM setup_provider_tokens
+            WHERE provider = ?
+            """,
+            (provider,),
+        ).fetchone()
+    if not row:
+        return {}
+    raw = row["token_json"]
+    try:
+        payload = json.loads(raw) if raw else {}
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def list_setup_provider_tokens(*, include_secrets: bool = False, db_path: str = DB_PATH) -> dict:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT provider, token_json, updated_at
+            FROM setup_provider_tokens
+            ORDER BY provider ASC
+            """
+        ).fetchall()
+    payload: dict[str, dict] = {}
+    for row in rows:
+        provider = row["provider"]
+        try:
+            value = json.loads(row["token_json"] or "{}")
+        except Exception:
+            value = {}
+        if not include_secrets and isinstance(value, dict):
+            scrubbed = {}
+            for key, token_value in value.items():
+                if "token" in key or "secret" in key:
+                    scrubbed[key] = "********"
+                else:
+                    scrubbed[key] = token_value
+            value = scrubbed
+        payload[provider] = {
+            "token_payload": value,
+            "updated_at": row["updated_at"],
+        }
+    return payload
+
+
+def insert_privileged_audit_event(event: dict, db_path: str = DB_PATH):
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO privileged_audit_events (
+                event_id, run_id, timestamp, actor, action, status, detail_json, prev_hash, event_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.get("event_id", ""),
+                event.get("run_id", ""),
+                event.get("timestamp", ""),
+                event.get("actor", ""),
+                event.get("action", ""),
+                event.get("status", ""),
+                json.dumps(event.get("detail", {}), ensure_ascii=False),
+                event.get("prev_hash", ""),
+                event.get("event_hash", ""),
+            ),
+        )
+
+
+def list_privileged_audit_events(limit: int = 100, db_path: str = DB_PATH) -> list[dict]:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT event_id, run_id, timestamp, actor, action, status, detail_json, prev_hash, event_hash
+            FROM privileged_audit_events
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    payload: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["detail"] = json.loads(item.get("detail_json") or "{}")
+        except Exception:
+            item["detail"] = {}
+        payload.append(item)
+    return payload

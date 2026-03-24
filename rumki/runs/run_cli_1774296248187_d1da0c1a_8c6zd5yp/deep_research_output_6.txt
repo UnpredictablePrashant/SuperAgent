@@ -1,0 +1,16 @@
+Below is a concise, source‑aware take on gold’s market setup as of March 23, 2026.
+
+1) Price trend and recent catalysts
+- Trend: After setting fresh record highs in late January/early February 2026, gold has been volatile, with a pullback into mid‑March as the USD firmed and rate‑cut odds faded. ([theguardian.com](https://www.theguardian.com/business/live/2026/feb/03/gold-silver-prices-markets-stabilise-spacex-buys-xai-uk-inflation-stock-markets-business-live-news-updates?page=with%3Ablock-6981eebf8f08a424206b2e0b&utm_source=openai))
+- Near‑term flow support: Physically backed gold ETFs saw another strong month in February, lifting global holdings to a new all‑time high (4,171t) and AUM to a record US$701bn. ([gold.org](https://www.gold.org/goldhub/research/gold-etfs-holdings-and-flows/2026/03?utm_source=openai))
+- Recent headwinds: Real yields and the dollar ticked higher into mid‑March (10‑yr TIPS ~1.82% on Mar 10; DXY tested a 15‑week high near 99.7), both near‑term negatives for bullion. ([fred.stlouisfed.org](https://fred.stlouisfed.org/series/DFII10?utm_source=openai))
+
+2) Macro drivers: rates, inflation, USD, geopolitics, central banks
+- Rates/real yields: Gold’s inverse link to real rates remains intact; with 10‑yr breakevens around 2.3% and TIPS yields elevated vs 2023–24 levels, the carry headwind has re‑emerged at times. ([ycharts.com](https://ycharts.com/indicators/10_year_tipstreasury_breakeven_rate?utm_source=openai))
+- The Fed: The FOMC left rates unchanged in January and strategist consensus (e.g., J.P. Morgan) expects only limited easing in 2026, keeping the path of real yields pivotal. ([jpmorgan.com](https://www.jpmorgan.com/insights/markets-and-economy/economy/fed-meeting-january-2026?utm_source=openai))
+- USD: A firmer dollar in early March weighed on gold; DXY approached a multi‑month high before easing, underscoring gold’s short‑run sensitivity to FX. ([fxstreet.com](https://www.fxstreet.com/news/us-dollar-index-touches-15-week-high-before-fading-into-the-close-202603091932/?utm_source=openai))
+- Geopolitics: Episodes of risk aversion (tariff headlines, Middle East tensions) have repeatedly sparked safe‑haven demand; these remain live upside catalysts. ([tbsnews.net](https://www.tbsnews.net/world/global-economy/gold-hits-record-high-track-best-quarter-1986-tariff-worries-1105661?utm_source=openai))
+- Central bank demand: Official‑sector buying stayed historically elevated in 2025 (net +863t) and is expected by the WGC to remain a firm pillar into 2026. ([gold.org](https://www.gold.org/download/file/20432/GDT-Full-Year-2025-Exec-Summary.pdf?utm_source=openai))
+
+3) Implications for miners and ETFs
+- Miners’ margins: Despite rising costs, industry AISC averaged about US

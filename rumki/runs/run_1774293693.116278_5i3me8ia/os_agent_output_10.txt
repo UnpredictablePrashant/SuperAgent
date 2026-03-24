@@ -1,0 +1,55 @@
+Host OS: windows
+Target OS: windows
+Shell: powershell.exe
+Working directory: D:\Personal Data\projects\multi-agents\sample-agents
+Timeout seconds: 120
+Command: powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $root='D:\'; $files=Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue; $hashed=foreach($f in $files){ try{ $h=Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction Stop; [pscustomobject]@{Path=$f.FullName; Length=$f.Length; Hash=$h.Hash} } catch{} }; $dups=$hashed | Group-Object Hash,Length | Where-Object { $_.Count -gt 1 } | Sort-Object { ($_.Group[0].Length*($_.Count-1)) } -Descending; $totalGroups=$dups.Count; $totalExtra=[int64](($dups | ForEach-Object { $_.Group[0].Length*($_.Count-1) } | Measure-Object -Sum).Sum); Write-Output ('Duplicate groups: {0}' -f $totalGroups); Write-Output ('Potential reclaimable bytes: {0}' -f $totalExtra); Write-Output ''; $i=0; foreach($g in $dups){ $i++; $len=$g.Group[0].Length; $cnt=$g.Count; $extra=[int64]($len*($cnt-1)); Write-Output ('[{0}] copies={1} size={2} reclaimable={3} hash={4}' -f $i,$cnt,$len,$extra,$g.Group[0].Hash); $g.Group | Select-Object -ExpandProperty Path | ForEach-Object { Write-Output ('  ' + $_) }; if($i -ge 50){ Write-Output '... output truncated to top 50 groups by reclaimable space'; break } }; Write-Output ''; Write-Output 'Caveats: content-based duplicate detection used SHA256+size; inaccessible/locked files may be skipped; hardlinks and alternate data streams are not distinguished; reclaimable space is approximate.'"
+Return code: 1
+
+STDOUT:
+<empty>
+
+STDERR:
+At line:1 char:413
++ ... up[0].Length*(.Count-1)) } -Descending; =.Count; =[int64](( | ForEach ...
++                                                                 ~
+An empty pipe element is not allowed.
+At line:1 char:531
++ ... e-Object -Sum).Sum); Write-Output ('Duplicate groups: {0}' -f ); Writ ...
++                                                                  ~
+You must provide a value expression following the '-f' operator.
+At line:1 char:586
++ ... 0}' -f ); Write-Output ('Potential reclaimable bytes: {0}' -f ); Writ ...
++                                                                  ~
+You must provide a value expression following the '-f' operator.
+At line:1 char:619
++ ... l reclaimable bytes: {0}' -f ); Write-Output ''; =0; foreach( in ){ + ...
++                                                                  ~
+Missing variable name after foreach.
+At line:1 char:623
++ ... laimable bytes: {0}' -f ); Write-Output ''; =0; foreach( in ){ ++; =. ...
++                                                                 ~
+Unexpected token ')' in expression or statement.
+At line:1 char:628
++ ... able bytes: {0}' -f ); Write-Output ''; =0; foreach( in ){ ++; =.Grou ...
++                                                                  ~
+Missing expression after unary operator '++'.
+At line:1 char:749
++ ... ('[{0}] copies={1} size={2} reclaimable={3} hash={4}' -f ,,,,.Group[0 ...
++                                                                  ~
+Missing expression after unary operator ','.
+At line:1 char:749
++ ... ={1} size={2} reclaimable={3} hash={4}' -f ,,,,.Group[0].Hash); .Grou ...
++                                                    ~~~~~~~~~~~~~~
+Unexpected token '.Group[0].Hash' in expression or statement.
+At line:1 char:749
++ ... ('[{0}] copies={1} size={2} reclaimable={3} hash={4}' -f ,,,,.Group[0 ...
++                                                                  ~
+Missing closing ')' in expression.
+At line:1 char:624
++ ... aimable bytes: {0}' -f ); Write-Output ''; =0; foreach( in ){ ++; =.G ...
++                                                                 ~
+Missing closing '}' in statement block or type definition.
+Not all parse errors were reported.  Correct the reported errors and try again.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : EmptyPipeElement

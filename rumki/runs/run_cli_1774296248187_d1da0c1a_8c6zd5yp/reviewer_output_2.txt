@@ -1,0 +1,65 @@
+{
+  "decision": "revise",
+  "reason": "Latest output is incomplete and not reliably source-verified: it relies on weak/non-primary sources for major price claims, includes likely unsupported/extreme price levels, lacks a clear gold-stocks analysis section, and does not provide the required bullish/bearish scenarios with tightly evidenced claims.",
+  "is_output_correct": false,
+  "revised_objective": "Produce a source-verified analysis of the gold market and gold-related stocks/ETFs as of March 23, 2026 using only reputable, directly supporting sources for factual claims. Include: (1) spot gold trend with only source-backed price references and dates; (2) key macro drivers such as real yields, USD, central-bank demand, ETF flows, inflation expectations, and geopolitics; (3) analysis of major gold miners and gold ETFs, naming representative tickers and discussing operating leverage/cost risks only where company filings or reputable financial media support it; (4) explicit bullish, base, and bearish scenarios; and (5) a clearly cited source list. Do not use unsupported price claims, do not cite a source that does not directly support the statement, and prefer Reuters, AP, World Gold Council, company filings, CME/LBMA/ICE/FRED, and major ETF issuers over aggregator/opinion sources.",
+  "step_reviews": [
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "First attempt contained questionable sourcing and likely inaccurate price levels; not sufficient for source-verified financial analysis."
+    },
+    {
+      "agent": "reviewer_agent",
+      "status": "correct",
+      "notes": "Prior review appropriately restated the objective and highlighted the need for source-verified analysis."
+    },
+    {
+      "agent": "deep_research_agent",
+      "status": "needs_revision",
+      "notes": "Second attempt improved structure but still uses weak/indirect sources (e.g. Investing.com, YCharts, Macrotrends) for key claims, includes unsupported price assertions, and remains incomplete on miners/stocks and scenario analysis."
+    }
+  ],
+  "next_agent": "deep_research_agent",
+  "corrected_values": {
+    "date_of_analysis": "2026-03-23",
+    "required_sections": [
+      "Bottom line",
+      "Spot gold trend with source-backed price/date references",
+      "Macro drivers",
+      "Gold ETFs",
+      "Gold mining stocks",
+      "Bullish/base/bearish scenarios",
+      "Risks and watch items",
+      "Source list"
+    ],
+    "source_requirements": [
+      "Use Reuters/AP for current market moves and event-driven price references",
+      "Use World Gold Council for demand, ETF flow, and central-bank context",
+      "Use FRED/U.S. Treasury/CME/LBMA/ICE for yields, dollar, and benchmark market data where available",
+      "Use company filings/earnings releases for miner cost structure and production guidance",
+      "Use ETF issuer pages or major fund sponsors for ETF descriptions and expense ratios if mentioned",
+      "Avoid unsupported or indirectly supported claims from aggregator/opinion sites"
+    ],
+    "must_cover_tickers": {
+      "etfs": ["GLD", "IAU", "GLDM", "SGOL", "BAR", "GDX", "GDXJ"],
+      "miners": ["NEM", "GOLD", "AEM", "FNV", "WPM", "KGC"]
+    },
+    "forbidden_issues": [
+      "No price level unless directly supported by cited source",
+      "No citing one source while attributing facts to another unpublished source",
+      "No vague statements like 'record month-end level' without a directly supporting source",
+      "No incomplete miner section"
+    ],
+    "output_format": {
+      "style": "concise but complete",
+      "citations": "inline by bullet/paragraph",
+      "tables": "optional; include only if source-backed"
+    }
+  }
+}
+Parsed Decision: revise
+Reason: Latest output is incomplete and not reliably source-verified: it relies on weak/non-primary sources for major price claims, includes likely unsupported/extreme price levels, lacks a clear gold-stocks analysis section, and does not provide the required bullish/bearish scenarios with tightly evidenced claims.
+Revised Objective: Produce a source-verified analysis of the gold market and gold-related stocks/ETFs as of March 23, 2026 using only reputable, directly supporting sources for factual claims. Include: (1) spot gold trend with only source-backed price references and dates; (2) key macro drivers such as real yields, USD, central-bank demand, ETF flows, inflation expectations, and geopolitics; (3) analysis of major gold miners and gold ETFs, naming representative tickers and discussing operating leverage/cost risks only where company filings or reputable financial media support it; (4) explicit bullish, base, and bearish scenarios; and (5) a clearly cited source list. Do not use unsupported price claims, do not cite a source that does not directly support the statement, and prefer Reuters, AP, World Gold Council, company filings, CME/LBMA/ICE/FRED, and major ETF issuers over aggregator/opinion sources.
+Next Agent: deep_research_agent
+Corrected Values: {"date_of_analysis": "2026-03-23", "required_sections": ["Bottom line", "Spot gold trend with source-backed price/date references", "Macro drivers", "Gold ETFs", "Gold mining stocks", "Bullish/base/bearish scenarios", "Risks and watch items", "Source list"], "source_requirements": ["Use Reuters/AP for current market moves and event-driven price references", "Use World Gold Council for demand, ETF flow, and central-bank context", "Use FRED/U.S. Treasury/CME/LBMA/ICE for yields, dollar, and benchmark market data where available", "Use company filings/earnings releases for miner cost structure and production guidance", "Use ETF issuer pages or major fund sponsors for ETF descriptions and expense ratios if mentioned", "Avoid unsupported or indirectly supported claims from aggregator/opinion sites"], "must_cover_tickers": {"etfs": ["GLD", "IAU", "GLDM", "SGOL", "BAR", "GDX", "GDXJ"], "miners": ["NEM", "GOLD", "AEM", "FNV", "WPM", "KGC"]}, "forbidden_issues": ["No price level unless directly supported by cited source", "No citing one source while attributing facts to another unpublished source", "No vague statements like 'record month-end level' without a directly supporting source", "No incomplete miner section"], "output_format": {"style": "concise but complete", "citations": "inline by bullet/paragraph", "tables": "optional; include only if source-backed"}}

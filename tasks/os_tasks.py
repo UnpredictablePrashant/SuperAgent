@@ -1,9 +1,18 @@
 import os
 import platform
+import re
 import shutil
 import subprocess
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
+from tasks.privileged_control import (
+    append_privileged_audit_event,
+    build_privileged_policy,
+    classify_command,
+    create_backup_snapshot,
+    ensure_command_allowed,
+    redact_sensitive_text,
+)
 from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
 
 
@@ -35,7 +44,7 @@ def _resolve_shell(target_os: str, requested_shell: str | None = None) -> tuple[
         if shell_path:
             shell_name = os.path.basename(shell_path).lower()
             if shell_name in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
-                return shell_path, ["-Command"], shell_name
+                return shell_path, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"], shell_name
             if shell_name in {"cmd", "cmd.exe"}:
                 return shell_path, ["/C"], shell_name
             return shell_path, ["-lc"], shell_name
@@ -47,8 +56,11 @@ def _build_command_from_request(user_query: str, target_os: str) -> tuple[str, s
     prompt = f"""
     You are the OS execution agent in a multi-agent system.
 
-    Convert the user's request into exactly one command for the target operating system.
+    Convert the user's request into exactly one command body for the target operating system.
     Keep the reasoning short and operational. Do not add markdown fences.
+    IMPORTANT:
+    - Do NOT include the shell executable prefix (no "powershell", "pwsh", "cmd", "bash", "sh").
+    - Return only the command content that should run inside the selected shell.
 
     Target OS: {target_os}
     User request: {user_query}
@@ -83,6 +95,28 @@ def _build_command_from_request(user_query: str, target_os: str) -> tuple[str, s
         raise ValueError("OS agent could not derive a command from the model output.")
 
     return thought, command, working_directory, timeout_seconds
+
+
+def _unwrap_nested_shell_command(command: str, shell_name: str) -> str:
+    cleaned = (command or "").strip()
+    lower = cleaned.lower()
+
+    if shell_name in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+        if lower.startswith("powershell ") or lower.startswith("powershell.exe ") or lower.startswith("pwsh ") or lower.startswith("pwsh.exe "):
+            # Extract inner script after -Command "<script>" or -Command '<script>'
+            match = re.search(r"-command\s+(?P<quote>['\"])(?P<script>.*)(?P=quote)\s*$", cleaned, flags=re.IGNORECASE)
+            if match:
+                return match.group("script")
+            # Fallback: strip the leading executable and keep remaining command body
+            parts = cleaned.split(maxsplit=1)
+            if len(parts) == 2:
+                return parts[1]
+
+    if shell_name in {"cmd", "cmd.exe"}:
+        if lower.startswith("cmd /c "):
+            return cleaned[7:].strip()
+
+    return cleaned
 
 
 def _format_execution_report(
@@ -136,6 +170,7 @@ def os_agent(state):
     explicit_command = state.get("os_command")
     timeout_seconds = int(state.get("os_timeout", 120))
     working_directory = state.get("os_working_directory", ".")
+    privileged_policy = build_privileged_policy(state)
 
     log_task_update(
         "OS Agent",
@@ -170,7 +205,66 @@ def os_agent(state):
         log_task_update("OS Agent", error_message, report)
         return state
 
+    command = _unwrap_nested_shell_command(command, shell_name)
+
     resolved_working_directory = os.path.abspath(working_directory)
+    try:
+        ensure_command_allowed(command, resolved_working_directory, privileged_policy)
+    except Exception as exc:
+        report = _format_execution_report(
+            host_os,
+            target_os,
+            shell_name,
+            command,
+            resolved_working_directory,
+            timeout_seconds,
+            error_message=f"policy_blocked: {exc}",
+        )
+        state["os_result"] = report
+        state["os_success"] = False
+        state["os_return_code"] = None
+        write_text_file(f"os_agent_output_{state['os_agent_calls']}.txt", report)
+        append_privileged_audit_event(
+            state,
+            actor="os_agent",
+            action="command",
+            status="blocked",
+            detail={
+                "command": redact_sensitive_text(command),
+                "working_directory": resolved_working_directory,
+                "reason": str(exc),
+            },
+        )
+        log_task_update("OS Agent", "Command blocked by privileged policy.", report)
+        return state
+
+    backup_path = ""
+    classification = classify_command(command)
+    if privileged_policy.get("enable_backup", True) and classification.get("mutating", False):
+        try:
+            backup_path = create_backup_snapshot(
+                state,
+                source_dir=resolved_working_directory,
+                reason=f"os_command:{command}",
+            )
+        except Exception as exc:
+            backup_path = ""
+            log_task_update("OS Agent", f"Backup snapshot failed before mutating command: {exc}")
+
+    append_privileged_audit_event(
+        state,
+        actor="os_agent",
+        action="command",
+        status="started",
+        detail={
+            "command": redact_sensitive_text(command),
+            "working_directory": resolved_working_directory,
+            "shell": shell_name,
+            "classification": classification,
+            "backup_path": backup_path,
+        },
+    )
+
     log_task_update("OS Agent", thought)
     log_task_update(
         "OS Agent",
@@ -198,6 +292,20 @@ def os_agent(state):
         )
         state["os_success"] = completed.returncode == 0
         state["os_return_code"] = completed.returncode
+        append_privileged_audit_event(
+            state,
+            actor="os_agent",
+            action="command",
+            status="completed" if completed.returncode == 0 else "failed",
+            detail={
+                "command": redact_sensitive_text(command),
+                "working_directory": resolved_working_directory,
+                "return_code": completed.returncode,
+                "stdout": redact_sensitive_text((completed.stdout or "")[:1200]),
+                "stderr": redact_sensitive_text((completed.stderr or "")[:1200]),
+                "backup_path": backup_path,
+            },
+        )
     except Exception as exc:
         completed = None
         report = _format_execution_report(
@@ -211,6 +319,18 @@ def os_agent(state):
         )
         state["os_success"] = False
         state["os_return_code"] = None
+        append_privileged_audit_event(
+            state,
+            actor="os_agent",
+            action="command",
+            status="error",
+            detail={
+                "command": redact_sensitive_text(command),
+                "working_directory": resolved_working_directory,
+                "error": str(exc),
+                "backup_path": backup_path,
+            },
+        )
 
     state["os_command"] = command
     state["os_shell"] = shell_name

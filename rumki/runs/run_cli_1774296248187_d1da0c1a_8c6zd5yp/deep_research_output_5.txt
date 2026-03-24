@@ -1,0 +1,31 @@
+Gold market snapshot (United States) — March 23, 2026
+
+1) Spot gold trend and recent catalysts
+- Trend: After a parabolic move to fresh all‑time highs in late January, gold has been volatile but elevated in March. Kitco reported record‑setting sessions in mid/late‑January as spot/futures surged above $5,400–$5,500; March price action has whipsawed around geopolitical headlines and a firmer USD. ([kitco.com](https://www.kitco.com/opinion/2026-01-28/gold-futures-shatter-records-largest-single-day-dollar-gain-history?utm_source=openai))
+- Key recent drivers:
+  - Geopolitics: The U.S.–Israel–Iran conflict lifted safe‑haven demand in early March; European and global outlets flagged gold’s rally alongside broader market stress, though sharp day‑to‑day reversals occurred. ([lemonde.fr](https://www.lemonde.fr/en/economy/article/2026/03/02/european-stock-markets-tumble-and-defense-stocks-soar-amid-middle-east-conflict_6751011_19.html?utm_source=openai))
+  - Policy/rates: Into the March FOMC, the Fed remains on hold and U.S. 10‑year yields hover around ~4.2%, keeping real‑rate dynamics and risk appetite in focus. ([kiplinger.com](https://www.kiplinger.com/investing/live/march-fed-meeting-2026-live-updates-and-commentary?utm_source=openai))
+  - Flows: WGC data show strong ETF inflows around the turn of the year, with January setting cycle‑highs in holdings/AUM and options activity building in GLD. ([gold.org](https://www.gold.org/goldhub/research/gold-etfs-holdings-and-flows/2026/02?utm_source=openai))
+  - Central banks: 2025 official‑sector net purchases remained historically high (c. 863t), reinforcing a structural bid into 2026. ([gold.org](https://www.gold.org/download/file/20432/GDT-Full-Year-2025-Exec-Summary.pdf?utm_source=openai))
+
+2) Macro transmission: rates, inflation, USD, geopolitics
+- Rates/real yields: Gold typically benefits from falling real yields; with the Fed steady in March and term yields near 4.2%, the path of policy easing and real yields remains the key macro “bridge” to bullion. WGC’s framework continues to highlight opportunity‑cost effects when policy expectations soften. ([kiplinger.com](https://www.kiplinger.com/investing/live/march-fed-meeting-2026-live-updates-and-commentary?utm_source=openai))
+- Inflation expectations: CPI data for February were released March 11; inflation remains near mid‑2% y/y, keeping debate alive over how quickly real rates can compress. ([bls.gov](https://www.bls.gov/news.release/archives/cpi_03112026.htm?utm_source=openai))
+- U.S. dollar: The DXY rebounded toward ~100–101 in mid‑March, tempering gold rallies on some days; USD direction remains a near‑term swing factor. ([bangkokbank.com](https://www.bangkokbank.com/-/media/files/personal/business-home/market-reports/weekly-reports/2026/mar/weekly-news-16-20-march-2026.pdf?utm_source=openai))
+- Geopolitics: The Iran theater (energy supply risks, shipping lanes) has injected a risk premium and bouts of volatility; gold’s reaction has depended on whether escalation (safe‑haven bid) or a firmer USD/oil‑driven inflation scare dominates on a given day. ([lemonde.fr](https://www.lemonde.fr/en/economy/article/2026/03/02/european-stock-markets-tumble-and-defense-stocks-soar-amid-middle-east-conflict_6751011_19.html?utm_source=openai))
+
+3) Implications for gold miners and gold ETFs
+- Miners: Operating leverage to price has driven outsized equity moves; the VanEck Gold Miners ETF (GDX) shows triple‑digit 12‑month gains, and majors’ AISC guidance implies wide margins at current gold prices (e.g., Newmont’s 2025 AISC around $1,680/oz). Watch cost inputs (diesel, labor), FX, and execution risk. ([marketbeat.com](https://www.marketbeat.com/stocks/NYSEARCA/GDX/chart/?utm_source=openai))
+- Physical‑backed ETFs:
+  - GLD (State Street): broad liquidity; expense ratio ~0.40%. ([ssga.com](https://www.ssga.com/library-content/products/factsheets/etfs/apac/factsheet-sg-en-o87.pdf?utm_source=openai))
+  - IAU (iShares): lower fee at ~0.25%. ([fool.com](https://www.fool.com/investing/how-to-invest/etfs/how-to-inest-in-iau-etf/?utm_source=openai))
+  - GLDM (SPDR MiniShares): ultra‑low fee ~0.10%. ([fundcompli.rightprospectus.com](https://fundcompli.rightprospectus.com/documents/SSgA/PRO_SPDRGoldMiniSharesTrust.pdf?utm_source=openai))
+  - Flows: WGC and S&P Global note robust January inflows and elevated AUM/holdings, making ETF demand a key near‑term amplifier (both directions). ([gold.org](https://www.gold.org/goldhub/research/gold-etfs-holdings-and-flows/2026/02?utm_source=openai))
+
+4) Bull and bear cases
+- Near term (weeks to 3 months):
+  - Bull: Further escalation or policy dovishness drives real yields lower and USD softer; ETF inflows persist; spot retests/extends January highs. ([lemonde.fr](https://www.lemonde.fr/en/economy/article/2026/03/02/european-stock-markets-tumble-and-defense-stocks-soar-amid-middle-east-conflict_6751011_19.html?utm_source=openai))
+  - Bear: Rapid de‑escalation and/or firmer USD with stickier real yields; profit‑taking triggers ETF outflows; volatility dents miners. ([bangkokbank.com](https://www.bangkokbank.com/-/media/files/personal/business-home/market-reports/weekly-reports/2026/mar/weekly-news-16-20-march-2026.pdf?utm_source=openai))
+- Medium term (6–18 months):
+  - Bull: Structural central‑bank accumulation and portfolio‑hedging demand remain strong; macro “softening but uncertain” backdrop sustains investment bid. WGC/J.P. Morgan outlooks envisage elevated averages into 2026–27. ([gold.org](https://www.gold.org/goldhub/research/gold-demand-trends/gold-demand-trends-full-year-2025/outlook?utm_source=openai))
+  - Bear: Growth and disinflation lift real yields meaningfully; USD uptrend persists; official‑

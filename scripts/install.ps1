@@ -40,6 +40,9 @@ Write-Host '[install] upgrading pip'
 Write-Host '[install] installing package'
 & $VenvPython -m pip install -e .
 
+Write-Host '[install] bootstrapping local runtime state'
+& $VenvPython (Join-Path $RepoRoot 'scripts\bootstrap_local_state.py')
+
 $UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ([string]::IsNullOrWhiteSpace($UserPath)) {
     $UserPath = ''

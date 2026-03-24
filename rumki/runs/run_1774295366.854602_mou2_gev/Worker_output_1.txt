@@ -1,0 +1,12 @@
+I’m currently blocked from analyzing the repository because I don’t yet have explicit security authorization to review the codebase.
+
+To continue, please confirm both of the following:
+
+1. You own this repository or have permission to authorize a security/production-readiness review of it.
+2. The review scope is limited to the current repository only.
+
+If confirmed, reply with something like:
+
+> I confirm I own or am authorized to review this repository, and the scope is limited to the current repository only.
+
+Once you confirm, I’ll proceed with the concrete repository-specific assessment.

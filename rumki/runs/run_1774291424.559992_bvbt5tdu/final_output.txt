@@ -1,0 +1,8 @@
+Authorized defensive security assessment approved within non-disruptive scope.
+
+Scan profile: deep
+Allowed actions: passive web checks, API surface mapping, unauthenticated endpoint review, IDOR/BOLA review, prompt integrity review, AI asset exposure review, dependency audit, SAST review, TLS review
+Disallowed actions: exploit, credential attacks, service disruption
+Authorization reference: SEC-123
+
+No further orchestration step is taken because the reviewer explicitly recommended finish.

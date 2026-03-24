@@ -11,7 +11,13 @@ from urllib.request import Request, urlopen
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.research_infra import html_to_text, llm_text
 from tasks.setup_registry import get_slack_bot_token
-from tasks.sqlite_store import initialize_db, insert_notification, insert_scheduled_job, upsert_channel_session
+from tasks.sqlite_store import (
+    get_channel_session,
+    initialize_db,
+    insert_notification,
+    insert_scheduled_job,
+    upsert_channel_session,
+)
 from tasks.utils import log_task_update, resolve_output_path, write_text_file
 
 
@@ -289,6 +295,22 @@ def session_router_agent(state):
     session_scope = "group" if is_group else "main"
     session_key = ":".join(part for part in [channel, workspace_id or "default", chat_id or sender_id or "unknown", session_scope] if part)
 
+    previous_session = get_channel_session(session_key) or {}
+    previous_state = previous_session.get("state", {}) if isinstance(previous_session, dict) else {}
+    if not isinstance(previous_state, dict):
+        previous_state = {}
+    history = previous_state.get("history", [])
+    if not isinstance(history, list):
+        history = []
+    history.append(
+        {
+            "timestamp": _now_iso(),
+            "text": message.get("text") or task_content or state.get("user_query", ""),
+            "run_id": state.get("run_id", ""),
+        }
+    )
+    history = history[-20:]
+
     session_payload = {
         "session_key": session_key,
         "channel": channel,
@@ -299,11 +321,17 @@ def session_router_agent(state):
         "state": {
             "last_text": message.get("text") or task_content or state.get("user_query", ""),
             "last_run_id": state.get("run_id", ""),
+            "history": history,
+            "last_objective": state.get("current_objective", state.get("user_query", "")),
+            "last_plan": state.get("plan", ""),
+            "awaiting_user_input": bool(state.get("plan_needs_clarification", False)),
+            "pending_user_question": state.get("pending_user_question", ""),
         },
         "updated_at": _now_iso(),
     }
     upsert_channel_session(session_key, session_payload)
     state["channel_session"] = session_payload
+    state["channel_session_key"] = session_key
     summary = (
         f"Channel: {channel}\n"
         f"Session Key: {session_key}\n"

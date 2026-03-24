@@ -73,6 +73,12 @@ def _collect_report_context(state: dict) -> dict:
         "security_findings_report": state.get("security_findings_report", {}),
         "evidence_report": state.get("evidence_report", {}),
         "report_appendix_entries": state.get("report_appendix_entries", []),
+        "long_document_mode": state.get("long_document_mode", False),
+        "long_document_title": state.get("long_document_title", ""),
+        "long_document_summary": state.get("long_document_summary", ""),
+        "long_document_compiled_path": state.get("long_document_compiled_path", ""),
+        "long_document_manifest_path": state.get("long_document_manifest_path", ""),
+        "long_document_sections_data": state.get("long_document_sections_data", []),
         "agent_history": state.get("agent_history", [])[-16:],
     }
 

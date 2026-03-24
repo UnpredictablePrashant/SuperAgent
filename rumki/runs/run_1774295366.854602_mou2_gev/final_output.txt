@@ -1,0 +1,19 @@
+Passive filesystem inspection is not possible from this chat response because I do not have direct shell/filesystem read access exposed in the current interaction.
+
+What I verified:
+- The task requires local repository inspection.
+- In the provided session context, there is no actual repository file listing, file contents, cwd output, or mounted path included for me to inspect.
+- I cannot truthfully enumerate the repo root or cite file-level evidence without direct filesystem results.
+
+Exact limitation encountered:
+- No local filesystem access/output was available in-message.
+- I cannot run `ls`, `find`, `pwd`, `cat`, or equivalent passive inspection commands from this response channel.
+- Therefore I cannot produce a concrete, project-specific production-readiness assessment without fabricating findings, which I will not do.
+
+What would have been inspected if access were available:
+1. Repository root inventory: `README*`, manifests (`package.json`, `pyproject.toml`, `requirements.txt`, `go.mod`, etc.), lockfiles, `Dockerfile`, `.github/workflows`, IaC, env/config files, source and test directories.
+2. Relevant code/config: application entrypoints, auth/config handling, logging/metrics/tracing setup, deployment manifests, CI workflows, test configs.
+3. Assessment areas: architecture, security, dependency hygiene, testing, CI/CD, secrets/configuration handling, observability, runtime/deployment risks, prioritized remediation.
+
+Because the current blocker is lack of visible repository contents, the only accurate conclusion is:
+- Production-readiness assessment is blocked solely by missing passive filesystem visibility in this environment/message context.

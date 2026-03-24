@@ -1,0 +1,10 @@
+{
+  "decision": "deny",
+  "allowed_actions": [],
+  "disallowed_actions": [
+    "exploit",
+    "credential_attack",
+    "service_disruption"
+  ],
+  "reason": "Authorization flag not present."
+}

@@ -1,0 +1,14 @@
+Smoke test acknowledged.
+
+CLI-capable fallback appears available via `codex_cli` in the current setup. If you want, I can help validate the fallback path with a minimal smoke test such as:
+
+- confirm CLI tool is reachable
+- run a basic no-op/help command
+- verify expected exit code
+- verify stdout/stderr handling
+- confirm fallback triggers when primary path is unavailable
+
+If by “smoke test after cli fallback” you mean a specific workflow, please specify:
+1. what command or feature should fall back to CLI,
+2. what “success” should look like,
+3. whether you want only availability checks or an end-to-end test.

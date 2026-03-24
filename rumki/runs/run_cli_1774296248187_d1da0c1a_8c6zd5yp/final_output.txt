@@ -1,0 +1,12 @@
+Here’s a concise, source‑aware read on gold’s market setup as of March 23, 2026.
+
+1) What’s the trend and what just moved it
+- Price action: Gold set successive all‑time highs in late January 2026, briefly pushing above $5,500/oz before turning volatile into March; the late‑February Middle East/Iran conflict added event risk and two‑way price swings. ([apnews.com](https://apnews.com/article/cfcf7fb103655bb78ead3f0078ac457f?utm_source=openai))
+- Demand backdrop: 2025 was a record year for total gold demand (5,002t) with central banks net‑buying 863t; WGC expects official‑sector interest to remain elevated into 2026. ([gold.org](https://www.gold.org/news-and-events/press-releases/gold-investment-rockets-2025-setting-new-high-uncertainty-bites?utm_source=openai))
+- ETF flows: Physically backed gold ETFs continued to see inflows into early 2026, lifting AUM to new month‑end peaks; WGC’s February update details regional flow patterns. ([gold.org](https://www.gold.org/goldhub/research/etf-flows?utm_source=openai))
+
+2) Macro drivers: rates, inflation expectations, USD, geopolitics
+- Rates/real yields: The Fed held policy steady at its January meeting and again around mid‑March; real yields remain a key (typically inverse) driver of gold. Recent Fed communications flagged a cautious stance amid uncertain inflation dynamics. ([jpmorgan.com](https://www.jpmorgan.com/insights/markets-and-economy/economy/fed-meeting-january-2026?utm_source=openai))
+- USD: A softer dollar in late January amplified gold’s breakout; continued dollar direction remains pivotal. ([apnews.com](https://apnews.com/article/cfcf7fb103655bb78ead3f0078ac457f?utm_source=openai))
+- Inflation expectations: With the Fed on hold and inflation progress uneven, shifts in breakevens/real yields can quickly reprice gold. (WGC/Rothschild discuss gold’s sensitivity to real yields.) ([gold.org](https://www.gold.org/goldhub/research/gold-market-commentary-december-2023?utm_source=openai))
+- Geopolitics: The Iran/Middle East war has injected a risk premium but also episodes of de‑risking; near‑term paths are uncertain and

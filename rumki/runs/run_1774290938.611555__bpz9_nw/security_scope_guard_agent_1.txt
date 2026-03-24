@@ -1,0 +1,5 @@
+Decision: deny
+Scan Profile: deep
+Allowed Actions: passive_web_checks, api_surface_mapping, unauthenticated_endpoint_review, idor_review, prompt_integrity_review, ai_asset_exposure_review, dependency_audit, sast_review, tls_review
+Disallowed Actions: exploit, credential_attack, service_disruption
+Reason: Authorization flag not present.
