@@ -24,10 +24,10 @@ SuperAgent is a setup-aware orchestration runtime that combines specialized agen
 2. Configure environment and choose a working directory.
 
 ```bash
-cp .env.example .env
 superagent setup set core_runtime SUPERAGENT_WORKING_DIR /absolute/path/to/workdir
 superagent setup set openai OPENAI_API_KEY sk-...
 superagent setup status
+python scripts/verify.py smoke
 ```
 
 3. Run your first intelligence brief.
@@ -64,6 +64,8 @@ The runtime may stop first on an approval-ready plan before executing the workfl
   First install, setup, and first run.
 - [Install](docs/install.md)
   Local installation, environment configuration, Docker, and verification.
+- [Verification](docs/verification.md)
+  Bootstrap path plus unit, smoke, docs, and Docker verification buckets.
 - [Architecture](docs/architecture.md)
   Runtime flow, discovery, setup-aware routing, persistence, and services.
 - [Agents](docs/agents.md)
@@ -112,22 +114,24 @@ Current gaps documented in the repo:
 - no dedicated social connector agents yet
 - no external graph database yet
 - no sanctions or corporate registry APIs yet
-- no end-to-end Docker Compose validation has been performed in this repo
+- no full `docker compose up` runtime validation has been performed in this repo
 
 ## Verification Status
 
 The repo documents these as verified today:
 
-- Python import safety
+- Python import safety and CLI module entrypoint
 - compileability
-- orchestrator registration
-- agent module structure
-- Docker asset presence
+- registry discovery and setup-aware routing
+- gateway HTTP smoke surface
+- basic `superRAG` build flow with stubbed indexing
+- docs-link integrity
+- Docker Compose config validity and Docker image build
 
 Not fully verified:
 
 - live end-to-end external API workflows
-- Docker runtime execution
+- full Docker runtime execution
 - MCP client interoperability
 - heavy-load vector indexing behavior
 

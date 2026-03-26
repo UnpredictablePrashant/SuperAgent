@@ -18,6 +18,7 @@ Use the beta and experimental workflows only after the core stack is configured 
 superagent --help
 superagent agents list
 superagent plugins list
+python scripts/verify.py smoke
 ```
 
 ### Research Brief (Stable)

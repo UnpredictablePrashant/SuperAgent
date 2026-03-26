@@ -143,6 +143,9 @@ superagent resume --output-folder ./output/runs/run_cli_123 --branch "Continue w
 For repository-level checks:
 
 ```bash
-python3 -m unittest discover -s tests -v
-./scripts/ci_check.sh
+python3 scripts/verify.py
+python3 scripts/verify.py smoke
+python3 scripts/verify.py docs
 ```
+
+Use [Verification](verification.md) when you need the full phase breakdown.

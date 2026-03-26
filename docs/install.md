@@ -74,7 +74,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_choco.ps1
 ### Manual Install
 
 ```bash
-python3 -m pip install -e .
+python3 -m pip install -e ".[dev]"
+python3 scripts/bootstrap_local_state.py
 ```
 
 ## Setup Commands
@@ -173,17 +174,23 @@ superagent setup status
 Repository verification entrypoints:
 
 ```bash
-python3 -m unittest discover -s tests -v
-./scripts/ci_check.sh
+python3 scripts/verify.py
+python3 scripts/verify.py smoke
+python3 scripts/verify.py docker
 ```
 
 If `make` is available on your machine, the repo also defines:
 
 ```bash
 make compile
-make test
+make unit
+make smoke
+make docs-check
+make verify
 make ci
 ```
+
+See [Verification](verification.md) for the exact phase definitions and CI-local parity.
 
 ## Uninstall
 

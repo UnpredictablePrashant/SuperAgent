@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_WORKDIR = ROOT / "output" / "workspace"
+DEFAULT_QDRANT_URL = "http://127.0.0.1:6333"
 
 
 def _ensure_dir(path: Path) -> None:
@@ -18,10 +19,13 @@ def _ensure_env_file() -> tuple[bool, Path]:
     if env_path.exists():
         return False, env_path
     if example_path.exists():
-        shutil.copyfile(example_path, env_path)
+        text = example_path.read_text(encoding="utf-8")
+        text = text.replace('SUPERAGENT_WORKING_DIR="C:/path/to/your/workdir"', f'SUPERAGENT_WORKING_DIR="{DEFAULT_WORKDIR.as_posix()}"')
+        text = text.replace('QDRANT_URL="http://qdrant:6333"', f'QDRANT_URL="{DEFAULT_QDRANT_URL}"')
+        env_path.write_text(text, encoding="utf-8")
         return True, env_path
     env_path.write_text(
-        "OPENAI_API_KEY=\nSERP_API_KEY=\n",
+        f'OPENAI_API_KEY=\nSUPERAGENT_WORKING_DIR="{DEFAULT_WORKDIR.as_posix()}"\nQDRANT_URL="{DEFAULT_QDRANT_URL}"\nSERP_API_KEY=\n',
         encoding="utf-8",
     )
     return True, env_path
@@ -30,6 +34,7 @@ def _ensure_env_file() -> tuple[bool, Path]:
 def main() -> int:
     _ensure_dir(ROOT / "output")
     _ensure_dir(ROOT / "logs")
+    _ensure_dir(DEFAULT_WORKDIR)
     _ensure_dir(ROOT / "output" / "workspace_memory")
     _ensure_dir(ROOT / ".secrets")
 
@@ -41,7 +46,7 @@ def main() -> int:
     else:
         print(f"[bootstrap] local env file already exists: {env_path}")
 
-    print("[bootstrap] ensured local runtime folders: output/, logs/, output/workspace_memory/, .secrets/")
+    print("[bootstrap] ensured local runtime folders: output/, output/workspace/, logs/, output/workspace_memory/, .secrets/")
     print("[bootstrap] reminder: local credential files are ignored by .gitignore/.dockerignore.")
     return 0
 

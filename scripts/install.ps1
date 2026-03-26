@@ -38,7 +38,7 @@ Write-Host '[install] upgrading pip'
 & $VenvPython -m pip install --upgrade pip
 
 Write-Host '[install] installing package'
-& $VenvPython -m pip install -e .
+& $VenvPython -m pip install -e ".[dev]"
 
 Write-Host '[install] bootstrapping local runtime state'
 & $VenvPython (Join-Path $RepoRoot 'scripts\bootstrap_local_state.py')
@@ -62,4 +62,4 @@ if (($env:Path -split ';') -notcontains $VenvScripts) {
 }
 
 Write-Host '[install] done'
-Write-Host '[install] open a new terminal, then verify: superagent --help'
+Write-Host '[install] open a new terminal, then verify: .venv\Scripts\python.exe scripts\verify.py smoke'

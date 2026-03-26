@@ -39,6 +39,11 @@ class RegistryDiscoveryTests(unittest.TestCase):
         self.assertEqual(openai.metadata.get("component_id"), "openai")
         self.assertIn("docs/integrations.md", openai.metadata.get("docs_path", ""))
 
+    def test_agent_cards_include_declared_requirements(self):
+        registry = build_registry()
+        cards = {card["agent_name"]: card for card in registry.agent_cards()}
+        self.assertEqual(cards["superrag_agent"]["requirements"], ["openai", "qdrant"])
+
 
 if __name__ == "__main__":
     unittest.main()

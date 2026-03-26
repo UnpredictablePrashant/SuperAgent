@@ -1,22 +1,40 @@
 PYTHON ?= python3
 
-.PHONY: install uninstall test compile ci docker-build
+.PHONY: bootstrap install uninstall compile unit smoke docs-check docker-smoke test verify ci docker-build
 
-install:
-	$(PYTHON) -m pip install --upgrade pip
-	$(PYTHON) -m pip install -e .
+bootstrap:
 	$(PYTHON) scripts/bootstrap_local_state.py
+
+install: bootstrap
+	$(PYTHON) -m pip install --upgrade pip
+	$(PYTHON) -m pip install -e ".[dev]"
 
 uninstall:
 	$(PYTHON) -m pip uninstall -y superagent-runtime
 
 compile:
-	$(PYTHON) -m compileall app.py gateway_server.py setup_ui.py superagent tasks mcp_servers
+	$(PYTHON) scripts/verify.py compile
+
+unit:
+	$(PYTHON) scripts/verify.py unit
+
+smoke:
+	$(PYTHON) scripts/verify.py smoke
+
+docs-check:
+	$(PYTHON) scripts/verify.py docs
+
+docker-smoke:
+	$(PYTHON) scripts/verify.py docker
 
 test:
-	OPENAI_API_KEY=$${OPENAI_API_KEY:-test-openai-key} $(PYTHON) -m unittest discover -s tests -v
+	$(PYTHON) scripts/verify.py unit
 
 docker-build:
-	docker build -t superagent-local .
+	$(PYTHON) scripts/verify.py docker
 
-ci: compile test docker-build
+verify:
+	$(PYTHON) scripts/verify.py compile unit smoke docs
+
+ci:
+	$(PYTHON) scripts/verify.py compile unit smoke docs docker --strict-docker

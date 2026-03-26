@@ -8,12 +8,6 @@ export OPENAI_API_KEY="${OPENAI_API_KEY:-test-openai-key}"
 export PYTHONPATH="${PYTHONPATH:-.}"
 
 echo "[ci] compileall"
-python3 -m compileall app.py gateway_server.py setup_ui.py superagent tasks mcp_servers
-
-echo "[ci] unit tests"
-python3 -m unittest discover -s tests -v
-
-echo "[ci] docker build"
-docker build -t superagent-ci-check .
+python3 scripts/verify.py compile unit smoke docs docker --strict-docker
 
 echo "[ci] ok"

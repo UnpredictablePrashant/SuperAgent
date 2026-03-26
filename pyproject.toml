@@ -25,6 +25,11 @@ dependencies = [
   "playwright",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
 [project.scripts]
 superagent = "superagent.cli:main"
 

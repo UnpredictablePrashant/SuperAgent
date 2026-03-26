@@ -10,6 +10,8 @@ Use this page as the starting point for the structured docs. The repository stil
   Fast path from install to first `superagent run`.
 - [Install](install.md)
   Local install, environment setup, Docker, and verification commands.
+- [Verification](verification.md)
+  Verification buckets, bootstrap path, and CI/local commands.
 - [Examples](examples.md)
   Stable, beta, and experimental example workflows.
 

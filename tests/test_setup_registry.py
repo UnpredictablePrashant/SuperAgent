@@ -71,6 +71,15 @@ class SetupRegistryTests(unittest.TestCase):
         snapshot = build_setup_snapshot(registry.agent_cards())
         self.assertTrue(any("local_drive_agent" in warning for warning in snapshot.get("contract_warnings", [])))
 
+    def test_superrag_agent_is_hidden_when_qdrant_is_unconfigured(self):
+        registry = build_registry()
+        with patch.dict("tasks.setup_registry.os.environ", {"OPENAI_API_KEY": "test-openai-key", "QDRANT_URL": ""}, clear=False):
+            snapshot = build_setup_snapshot(registry.agent_cards())
+
+        self.assertFalse(snapshot["services"]["qdrant"]["routing_eligible"])
+        self.assertFalse(snapshot["agents"]["superrag_agent"]["available"])
+        self.assertIn("qdrant", snapshot["agents"]["superrag_agent"]["missing_services"])
+
 
 if __name__ == "__main__":
     unittest.main()

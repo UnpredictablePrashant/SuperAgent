@@ -22,24 +22,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install system packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y nmap
-
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip build
+          pip install -e ".[dev]"
 
-      - name: Compile
-        run: make compile
+      - name: Bootstrap local state
+        run: python scripts/bootstrap_local_state.py
 
-      - name: Unit tests
-        run: make test
-
-      - name: Docker build
-        run: docker build -t superagent-ci .
+      - name: Verify repository
+        run: python scripts/verify.py compile unit smoke docs docker --strict-docker
 
   package:
     runs-on: ubuntu-latest

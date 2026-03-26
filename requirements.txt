@@ -1,3 +1,5 @@
+# Runtime dependencies for Docker/base installs.
+# For local development and verification use: pip install -e ".[dev]"
 langgraph 
 langchain 
 langchain-openai 

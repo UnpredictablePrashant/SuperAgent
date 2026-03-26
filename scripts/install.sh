@@ -18,7 +18,7 @@ echo "[install] upgrading pip"
 .venv/bin/python -m pip install --upgrade pip
 
 echo "[install] installing package"
-.venv/bin/python -m pip install -e .
+.venv/bin/python -m pip install -e ".[dev]"
 
 echo "[install] bootstrapping local runtime state"
 .venv/bin/python scripts/bootstrap_local_state.py
@@ -46,4 +46,4 @@ fi
 
 echo "[install] done"
 echo "[install] run: source $RC_FILE"
-echo "[install] then verify: superagent --help"
+echo "[install] then verify: .venv/bin/python scripts/verify.py smoke"
