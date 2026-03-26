@@ -230,6 +230,12 @@ def _planning_context(state: dict, objective: str) -> str:
         "setup_summary": state.get("setup_summary", ""),
         "previous_plan": state.get("plan", ""),
         "revision_feedback": state.get("plan_revision_feedback", ""),
+        # Project builder context
+        "project_build_mode": bool(state.get("project_build_mode", False)),
+        "project_name": state.get("project_name", ""),
+        "project_root": state.get("project_root", ""),
+        "project_stack": state.get("project_stack", ""),
+        "blueprint_json": state.get("blueprint_json", {}),
     }
     return json.dumps(context, indent=2, ensure_ascii=False)
 
@@ -256,6 +262,19 @@ Requirements:
 - If the request is ambiguous, ask clarification questions instead of guessing.
 - Do not assign planner_agent as a step agent in steps or substeps. Planning happens before execution.
 - Do not start execution. Only plan.
+
+PROJECT BUILD MODE:
+If the planning context contains "project_build_mode": true and a non-empty "blueprint_json",
+this is a full project build. Use the following agent sequence for the plan steps:
+  1. project_scaffold_agent -- Create directory structure, config files, entry points
+  2. database_architect_agent -- Generate ORM models, migrations, Docker DB, seed data
+  3. backend_builder_agent -- Implement API routes, services, middleware, auth
+  4. frontend_builder_agent -- Implement pages, components, API client, styling (skip if no frontend in blueprint)
+  5. dependency_manager_agent -- Install all packages and validate lockfiles
+  6. project_verifier_agent -- Run linters, type checks, build, and dev server health check
+  7. devops_agent -- Generate production Dockerfile, docker-compose, CI/CD, nginx config
+Each step's task field should reference the specific section of the blueprint it implements.
+The blueprint_json in the context contains the full technical architecture.
 
 Planning context:
 {_planning_context(state, user_query)}

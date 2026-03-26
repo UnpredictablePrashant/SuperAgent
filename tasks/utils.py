@@ -30,6 +30,13 @@ _CODING_AGENTS = {
     "agent_factory_agent",
     "dynamic_agent_runner",
     "reddit_agent",
+    # Project builder agents
+    "project_blueprint_agent",
+    "project_scaffold_agent",
+    "database_architect_agent",
+    "backend_builder_agent",
+    "frontend_builder_agent",
+    "devops_agent",
 }
 
 

@@ -46,6 +46,15 @@ class RuntimeState(TypedDict, total=False):
     channel_session_key: str
     parent_run_id: str
     last_error: str
+    # Project builder state
+    project_build_mode: bool
+    blueprint_json: dict[str, Any]
+    blueprint_status: str
+    blueprint_version: int
+    blueprint_waiting_for_approval: bool
+    project_name: str
+    project_root: str
+    project_stack: str
 
 
 class ResumeCandidate(TypedDict, total=False):
@@ -110,5 +119,6 @@ def state_awaiting_user_input(state: Mapping[str, Any]) -> bool:
         state.get("plan_needs_clarification", False)
         or state.get("plan_waiting_for_approval", False)
         or state.get("long_document_plan_waiting_for_approval", False)
+        or state.get("blueprint_waiting_for_approval", False)
         or str(state.get("pending_user_input_kind", "")).strip()
     )

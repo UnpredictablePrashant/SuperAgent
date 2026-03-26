@@ -320,6 +320,8 @@ Primary workflows:
 - deep research
 - local drive intelligence
 - superRAG
+- coding project master
+- local command execution
 
 Tasks:
 1. Audit the implementation and docs for those workflows.

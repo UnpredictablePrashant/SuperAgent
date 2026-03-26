@@ -180,6 +180,7 @@ class AgentRuntime:
             "deep-research-dispatch": "Run the deep research workflow and collect cited findings.",
             "long-document-dispatch": "Generate the long-form document section by section.",
             "master-coding-delegation": f"Continue the delegated coding workflow with {agent_name or 'the assigned agent'}.",
+            "project-blueprint": "Designing the complete technical architecture for the project.",
         }
         if intent in intent_map:
             return intent_map[intent]
@@ -233,6 +234,25 @@ class AgentRuntime:
         if user_query:
             return self._truncate(user_query, 240)
         return ""
+
+    def _is_project_build_request(self, state: dict) -> bool:
+        text = " ".join([
+            str(state.get("user_query", "")),
+            str(state.get("current_objective", "")),
+        ]).lower()
+        build_markers = (
+            "build me a", "build an app", "build a project", "create a project",
+            "create an app", "create a web app", "scaffold a", "generate a project",
+            "full-stack app", "fullstack app", "new project", "build a web",
+            "build a website", "build a saas", "build a platform", "create a platform",
+            "build a dashboard", "create a dashboard", "create a backend", "build a backend",
+            "create an api", "build an api", "build me an application",
+        )
+        if any(marker in text for marker in build_markers):
+            return True
+        framework_signals = ("react", "next.js", "nextjs", "fastapi", "express", "django", "flask", "vue", "angular", "svelte")
+        build_intents = ("build", "create", "scaffold", "generate", "set up", "setup", "bootstrap", "start")
+        return any(fw in text for fw in framework_signals) and any(i in text for i in build_intents)
 
     def _is_project_audit_request(self, state: dict) -> bool:
         text = " ".join(
@@ -952,6 +972,33 @@ class AgentRuntime:
             )
             return state
 
+        # --- Project builder: blueprint before planning ---
+        if (
+            not state.get("plan_steps")
+            and state.get("last_agent") != "project_blueprint_agent"
+            and not state.get("blueprint_json")
+            and self._is_agent_available(state, "project_blueprint_agent")
+            and self._is_project_build_request(state)
+        ):
+            state["project_build_mode"] = True
+            reason = "Build request detected. Route to project_blueprint_agent for technical architecture."
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "project_blueprint_agent"
+            state = append_task(state, make_task(
+                sender="orchestrator_agent", recipient="project_blueprint_agent",
+                intent="project-blueprint", content=current_objective,
+                state_updates={"blueprint_request": current_objective},
+            ))
+            return state
+
+        # --- Project builder: blueprint approval gate ---
+        if bool(state.get("blueprint_waiting_for_approval", False)):
+            msg = state.get("pending_user_question") or "Review and approve the project blueprint before planning."
+            state["next_agent"] = "__finish__"
+            state["final_output"] = msg
+            state = append_message(state, make_message("orchestrator_agent", "user", "blueprint-approval", msg))
+            return state
+
         if not state.get("plan_ready", False) and self._is_agent_available(state, "planner_agent"):
             if state.get("last_agent") != "planner_agent":
                 reason = "Create a detailed step-by-step plan before execution."
@@ -1557,7 +1604,11 @@ Return ONLY valid JSON in this exact schema:
             initial_state["pending_user_input_kind"] = ""
             initial_state["approval_pending_scope"] = ""
             initial_state["pending_user_question"] = ""
-            if scope == "root_plan":
+            if scope == "project_blueprint":
+                initial_state["blueprint_waiting_for_approval"] = False
+                initial_state["blueprint_status"] = "approved"
+                initial_state["plan_ready"] = False  # force planner to run next
+            elif scope == "root_plan":
                 initial_state["plan_waiting_for_approval"] = False
                 initial_state["plan_approval_status"] = "approved"
                 initial_state["plan_ready"] = bool(initial_state.get("plan_steps"))
@@ -1573,7 +1624,16 @@ Return ONLY valid JSON in this exact schema:
             initial_state["pending_user_input_kind"] = ""
             initial_state["approval_pending_scope"] = ""
             initial_state["pending_user_question"] = ""
-            if scope == "root_plan":
+            if scope == "project_blueprint":
+                initial_state["blueprint_waiting_for_approval"] = False
+                initial_state["blueprint_status"] = "revision_requested"
+                initial_state["blueprint_json"] = {}  # clear so blueprint agent reruns
+                initial_state["plan_ready"] = False
+                if previous_objective:
+                    initial_state["current_objective"] = (
+                        f"{previous_objective}\n\nBlueprint revision instructions from the user:\n{response['feedback']}"
+                    )
+            elif scope == "root_plan":
                 initial_state["plan_waiting_for_approval"] = False
                 initial_state["plan_approval_status"] = "revision_requested"
                 initial_state["plan_revision_feedback"] = response["feedback"]
@@ -1601,7 +1661,10 @@ Return ONLY valid JSON in this exact schema:
             initial_state["pending_user_question"] = prompt if explicit_instruction in prompt else f"{prompt}\n\n{explicit_instruction}"
         else:
             initial_state["pending_user_question"] = explicit_instruction
-        if scope == "root_plan":
+        if scope == "project_blueprint":
+            initial_state["blueprint_waiting_for_approval"] = True
+            initial_state["plan_ready"] = False
+        elif scope == "root_plan":
             initial_state["plan_waiting_for_approval"] = True
             initial_state["plan_ready"] = False
         elif scope == "long_document_plan":
@@ -1799,6 +1862,15 @@ Return ONLY valid JSON in this exact schema:
             "max_steps": overrides.get("max_steps", 20),
             "research_target": "",
             "use_vector_memory": True,
+            # Project builder defaults
+            "project_build_mode": False,
+            "blueprint_json": {},
+            "blueprint_status": "",
+            "blueprint_version": 0,
+            "blueprint_waiting_for_approval": False,
+            "project_name": "",
+            "project_root": "",
+            "project_stack": "",
         }
         initial_state.update(overrides)
         prior_channel_session = initial_state.get("channel_session", {})
