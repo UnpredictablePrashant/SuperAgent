@@ -110,6 +110,128 @@ class AgentRuntime:
             return cleaned
         return cleaned[: limit - 3] + "..."
 
+    def _awaiting_user_input(self, state: dict) -> bool:
+        return bool(
+            state.get("plan_needs_clarification", False)
+            or state.get("plan_waiting_for_approval", False)
+            or state.get("long_document_plan_waiting_for_approval", False)
+            or str(state.get("pending_user_input_kind", "")).strip()
+        )
+
+    def _interpret_user_input_response(self, text: str) -> dict[str, str]:
+        raw = str(text or "").strip()
+        lowered = raw.lower()
+        if not raw:
+            return {"action": "unclear", "feedback": ""}
+
+        revise_markers = (
+            "change",
+            "modify",
+            "revise",
+            "rework",
+            "recreate",
+            "adjust",
+            "update",
+            "replace",
+            "instead",
+            "add ",
+            "remove ",
+            "expand",
+            "reduce",
+            "rewrite",
+            "fix",
+            "not ",
+            "don't",
+            "do not",
+        )
+        approve_markers = (
+            "approve",
+            "approved",
+            "go ahead",
+            "proceed",
+            "continue",
+            "start",
+            "execute",
+            "looks good",
+            "lgtm",
+        )
+        cleaned = lowered.strip(" \n\t.!?")
+        if cleaned in {"no", "n"} or any(marker in lowered for marker in revise_markers):
+            return {"action": "revise", "feedback": raw}
+        if cleaned in {"approve", "approved", "yes", "y"} or any(cleaned.startswith(marker) for marker in approve_markers):
+            return {"action": "approve", "feedback": raw}
+        return {"action": "unclear", "feedback": raw}
+
+    def _task_activity_label(self, agent_name: str, intent: str) -> str:
+        intent_map = {
+            "channel-ingest-normalization": "Normalize the incoming channel payload for orchestration.",
+            "session-routing": "Resolve or create the session context for this run.",
+            "local-drive-ingestion": "Scan the configured drive files and extract the most relevant evidence.",
+            "drive-informed-long-document": "Draft the long-form report from the ingested drive evidence.",
+            "planning": "Build the execution plan for this request.",
+            "step-review": "Review the latest agent output and decide whether it should continue.",
+            "correction": "Revise the previous step based on reviewer feedback.",
+            "planned-step": f"Execute the next planned step with {agent_name or 'the assigned agent'}.",
+            "run-generated-agent": "Run the generated agent task.",
+            "project-audit-dispatch": "Run the structured codebase audit workflow.",
+            "superrag-dispatch": "Build or query the superRAG knowledge session.",
+            "deep-research-dispatch": "Run the deep research workflow and collect cited findings.",
+            "long-document-dispatch": "Generate the long-form document section by section.",
+            "master-coding-delegation": f"Continue the delegated coding workflow with {agent_name or 'the assigned agent'}.",
+        }
+        if intent in intent_map:
+            return intent_map[intent]
+        agent_map = {
+            "channel_gateway_agent": "Normalizing the incoming request payload.",
+            "session_router_agent": "Resolving the session context.",
+            "local_drive_agent": "Scanning drive files and extracting relevant evidence.",
+            "long_document_agent": "Generating long-form report sections and merging the draft.",
+            "planner_agent": "Planning the execution steps.",
+            "reviewer_agent": "Reviewing the latest step output.",
+            "deep_research_agent": "Running deep research and collecting cited sources.",
+            "superrag_agent": "Working on the superRAG knowledge session.",
+            "worker_agent": "Executing the assigned work item.",
+        }
+        return agent_map.get(agent_name, "")
+
+    def _active_task_summary(self, state: dict, active_task: dict | None = None) -> str:
+        task = active_task if isinstance(active_task, dict) else state.get("active_task", {})
+        if not isinstance(task, dict):
+            task = {}
+        if self._awaiting_user_input(state):
+            pending = " ".join(str(state.get("pending_user_question", "") or "").split())
+            if pending:
+                return self._truncate(pending, 240)
+        content = " ".join(str(task.get("content", "") or "").split())
+        objective = " ".join(str(state.get("current_objective", "") or "").split())
+        user_query = " ".join(str(state.get("user_query", "") or "").split())
+        agent_name = " ".join(str(task.get("recipient", "") or state.get("last_agent", "") or "").split())
+        intent = " ".join(str(task.get("intent", "") or "").split())
+        label = self._task_activity_label(agent_name, intent)
+
+        if not task:
+            if label:
+                return self._truncate(label, 240)
+            if objective or user_query:
+                return "Preparing the run request and waiting for the first agent dispatch."
+            return ""
+
+        generic_content = not content or content in {objective, user_query}
+        if label and generic_content:
+            return self._truncate(label, 240)
+        if content:
+            return self._truncate(content, 240)
+        if label:
+            return self._truncate(label, 240)
+        fallback = " ".join(str(state.get("active_agent_task", "") or "").split())
+        if fallback:
+            return self._truncate(fallback, 240)
+        if objective:
+            return self._truncate(objective, 240)
+        if user_query:
+            return self._truncate(user_query, 240)
+        return ""
+
     def _is_project_audit_request(self, state: dict) -> bool:
         text = " ".join(
             [
@@ -231,6 +353,12 @@ class AgentRuntime:
                 "last_agent": state.get("last_agent", ""),
                 "last_status": state.get("last_agent_status", ""),
                 "last_error": state.get("last_error", ""),
+                "active_task": self._active_task_summary(state),
+                "awaiting_user_input": self._awaiting_user_input(state),
+                "pending_user_input_kind": state.get("pending_user_input_kind", ""),
+                "approval_pending_scope": state.get("approval_pending_scope", ""),
+                "pending_user_question": state.get("pending_user_question", ""),
+                "plan_approval_status": state.get("plan_approval_status", ""),
             },
         }
 
@@ -238,7 +366,14 @@ class AgentRuntime:
         if not state.get("session_id"):
             return
         upsert_task_session(self._session_payload(state, status=status, active_agent=active_agent, completed_at=completed_at))
-        note = f"status={status}\nactive_agent={active_agent or state.get('last_agent', '')}"
+        note_parts = [
+            f"status={status}",
+            f"active_agent={active_agent or state.get('last_agent', '')}",
+        ]
+        active_task = self._active_task_summary(state)
+        if active_task:
+            note_parts.append(f"active_task={active_task}")
+        note = "\n".join(note_parts)
         update_session_file(state, status=status, active_agent=active_agent, note=note)
         append_session_event(state, "runtime", "session_status", note)
         self._write_channel_session_progress(state, status=status, active_agent=active_agent, completed_at=completed_at)
@@ -292,13 +427,30 @@ class AgentRuntime:
                 "last_plan_data": state.get("plan_data", {}),
                 "last_plan_steps": state.get("plan_steps", []),
                 "last_plan_step_index": int(state.get("plan_step_index", 0) or 0),
+                "plan_waiting_for_approval": bool(state.get("plan_waiting_for_approval", False)),
+                "plan_approval_status": state.get("plan_approval_status", ""),
+                "plan_revision_feedback": state.get("plan_revision_feedback", ""),
+                "plan_revision_count": int(state.get("plan_revision_count", 0) or 0),
+                "plan_version": int(state.get("plan_version", 0) or 0),
+                "planning_notes": state.get("planning_notes", []),
                 "last_status": status,
                 "last_active_agent": active_agent or state.get("last_agent", ""),
                 "last_error": state.get("last_error", ""),
                 "failure_checkpoint": state.get("failure_checkpoint", {}),
                 "completed_at": completed_at,
-                "awaiting_user_input": bool(state.get("plan_needs_clarification", False)),
+                "awaiting_user_input": self._awaiting_user_input(state),
+                "pending_user_input_kind": state.get("pending_user_input_kind", ""),
+                "approval_pending_scope": state.get("approval_pending_scope", ""),
                 "pending_user_question": state.get("pending_user_question", ""),
+                "long_document_plan_waiting_for_approval": bool(state.get("long_document_plan_waiting_for_approval", False)),
+                "long_document_plan_status": state.get("long_document_plan_status", ""),
+                "long_document_plan_feedback": state.get("long_document_plan_feedback", ""),
+                "long_document_plan_revision_count": int(state.get("long_document_plan_revision_count", 0) or 0),
+                "long_document_plan_markdown": state.get("long_document_plan_markdown", ""),
+                "long_document_plan_data": state.get("long_document_plan_data", {}),
+                "long_document_plan_version": int(state.get("long_document_plan_version", 0) or 0),
+                "long_document_outline": state.get("long_document_outline", {}),
+                "superrag_active_session_id": state.get("superrag_active_session_id", ""),
                 "history": history,
             },
         }
@@ -382,6 +534,45 @@ class AgentRuntime:
         research_markers = ("research", "investigate", "investigation", "literature review", "prior art")
         return any(marker in text for marker in citation_markers) and any(marker in text for marker in research_markers)
 
+    def _is_superrag_request(self, state: dict) -> bool:
+        superrag_keys = (
+            "superrag_mode",
+            "superrag_action",
+            "superrag_session_id",
+            "superrag_urls",
+            "superrag_local_paths",
+            "superrag_db_url",
+            "superrag_chat_query",
+            "superrag_onedrive_enabled",
+            "superrag_onedrive_path",
+        )
+        if any(state.get(key) for key in superrag_keys):
+            return True
+
+        text = " ".join(
+            [
+                str(state.get("user_query", "")),
+                str(state.get("current_objective", "")),
+            ]
+        ).lower()
+        if not text.strip():
+            return False
+
+        markers = (
+            "superrag",
+            "rag session",
+            "session based rag",
+            "index my data",
+            "index my documents",
+            "knowledge base from",
+            "chat with my data",
+            "vector db",
+            "embeddings",
+            "onedrive",
+            "database url",
+        )
+        return any(marker in text for marker in markers)
+
     def _is_long_document_request(self, state: dict) -> bool:
         if bool(state.get("long_document_mode", False)):
             return True
@@ -417,6 +608,20 @@ class AgentRuntime:
         has_page_signal = "page" in text or "pages" in text
         has_length_signal = any(token in text for token in ("very long", "exhaustive", "chapter by chapter", "multi-part"))
         return has_page_signal and has_length_signal
+
+    def _has_local_drive_request(self, state: dict) -> bool:
+        raw = (
+            state.get("local_drive_paths")
+            or state.get("knowledge_drive_paths")
+            or state.get("drive_paths")
+            or state.get("document_root_paths")
+            or []
+        )
+        if isinstance(raw, str):
+            return bool(raw.strip())
+        if isinstance(raw, list):
+            return any(str(item or "").strip() for item in raw)
+        return False
 
     def _kill_switch_triggered(self, state: dict) -> bool:
         policy = build_privileged_policy(state)
@@ -534,6 +739,7 @@ class AgentRuntime:
             state = append_task(state, active_task)
 
         state["active_task"] = active_task
+        state["active_agent_task"] = self._active_task_summary(state, active_task)
         append_daily_memory_note(
             state,
             "orchestrator_agent",
@@ -561,6 +767,7 @@ class AgentRuntime:
         task_updates = active_task.get("state_updates", {})
         if isinstance(task_updates, dict):
             state.update(task_updates)
+        self._write_session_record(state, status="running", active_agent=agent_name)
 
         before_state = {k: v for k, v in state.items() if k != "a2a"}
         try:
@@ -569,12 +776,15 @@ class AgentRuntime:
             output_text = self._infer_agent_output(before_state, state)
             if active_task.get("status") == "pending":
                 state = complete_task(state, active_task["task_id"], "completed")
-            state["review_pending"] = agent_name != "reviewer_agent"
+            skip_review = bool(state.pop("_skip_review_once", False))
+            hold_step_completion = bool(state.pop("_hold_planned_step_completion_once", False))
+            state["review_pending"] = agent_name != "reviewer_agent" and not skip_review and not self._awaiting_user_input(state)
             state = self._append_history(state, agent_name, "success", state.get("orchestrator_reason", ""), output_text)
             append_daily_memory_note(state, agent_name, "completed", self._truncate(output_text, 1000))
             append_session_event(state, agent_name, "completed", self._truncate(output_text, 600))
             if agent_name == str(state.get("planned_active_agent", "")).strip():
-                self._mark_planned_step_complete(state)
+                if not hold_step_completion:
+                    self._mark_planned_step_complete(state)
                 state["planned_active_agent"] = ""
         except Exception as exc:
             error_message = str(exc)
@@ -683,14 +893,92 @@ class AgentRuntime:
                 return state
 
         if bool(state.get("plan_needs_clarification", False)):
-            questions = state.get("plan_clarification_questions", [])
-            clarification = (
-                "I need clarification before executing the plan:\n"
-                + "\n".join(f"- {item}" for item in questions)
-            ) if questions else "I need more detail before executing the plan."
+            clarification = state.get("pending_user_question") or "I need more detail before executing the plan."
             state["next_agent"] = "__finish__"
             state["final_output"] = clarification
             state = append_message(state, make_message("orchestrator_agent", "user", "clarification", clarification))
+            return state
+
+        if bool(state.get("plan_waiting_for_approval", False)):
+            approval_message = state.get("pending_user_question") or "Review and approve the plan before execution."
+            state["next_agent"] = "__finish__"
+            state["final_output"] = approval_message
+            state = append_message(state, make_message("orchestrator_agent", "user", "plan-approval", approval_message))
+            return state
+
+        if bool(state.get("long_document_plan_waiting_for_approval", False)):
+            approval_message = state.get("pending_user_question") or "Review and approve the long-document section plan before execution."
+            state["next_agent"] = "__finish__"
+            state["final_output"] = approval_message
+            state = append_message(state, make_message("orchestrator_agent", "user", "subplan-approval", approval_message))
+            return state
+
+        if (
+            not state.get("plan_steps")
+            and
+            self._has_local_drive_request(state)
+            and self._is_agent_available(state, "local_drive_agent")
+            and state.get("last_agent") != "local_drive_agent"
+            and int(state.get("local_drive_calls", 0) or 0) == 0
+        ):
+            reason = "Ingest and summarize configured local-drive files before broader orchestration."
+            objective = state.get("current_objective") or state.get("user_query", "")
+            updates = {"current_objective": objective}
+            if not str(state.get("local_drive_working_directory", "")).strip():
+                updates["local_drive_working_directory"] = state.get("working_directory", "")
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "local_drive_agent"
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="local_drive_agent",
+                    intent="local-drive-ingestion",
+                    content=objective,
+                    state_updates=updates,
+                ),
+            )
+            return state
+
+        if (
+            not state.get("plan_steps")
+            and
+            bool(state.get("local_drive_force_long_document", False))
+            and self._is_long_document_request(state)
+            and self._is_agent_available(state, "long_document_agent")
+            and state.get("last_agent") != "long_document_agent"
+            and int(state.get("local_drive_calls", 0) or 0) > 0
+        ):
+            reason = (
+                "Local-drive ingestion is complete and a long-form output was requested. "
+                "Route to long_document_agent for staged long-running synthesis."
+            )
+            objective = str(state.get("current_objective") or state.get("user_query", "")).strip()
+            drive_summary = str(state.get("local_drive_summary") or state.get("document_summary") or "").strip()
+            long_doc_objective = objective
+            if drive_summary:
+                long_doc_objective = (
+                    f"{objective}\n\nUse this local-drive evidence summary as primary context:\n"
+                    f"{self._truncate(drive_summary, 5000)}"
+                )
+            updates = {
+                "current_objective": long_doc_objective,
+                "long_document_mode": True,
+            }
+            if int(state.get("long_document_pages", 0) or 0) <= 0:
+                updates["long_document_pages"] = 50
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "long_document_agent"
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="long_document_agent",
+                    intent="drive-informed-long-document",
+                    content=long_doc_objective,
+                    state_updates=updates,
+                ),
+            )
             return state
 
         if state.get("last_agent") and state.get("last_agent") != "reviewer_agent" and state.get("review_pending") and self._is_agent_available(state, "reviewer_agent"):
@@ -725,19 +1013,24 @@ class AgentRuntime:
             return state
 
         if state.get("last_agent") == "reviewer_agent" and state.get("review_decision") == "approve":
-            final_text = state.get("draft_response") or state.get("last_agent_output") or "Completed."
-            state["next_agent"] = "__finish__"
-            state["final_output"] = final_text
-            state = append_message(state, make_message("orchestrator_agent", "user", "final", final_text))
             update_planning_file(
                 state,
-                status="completed",
+                status="executing" if self._next_planned_agents(state) else "completed",
                 objective=current_objective,
                 plan_text=state.get("plan", ""),
                 clarifications=state.get("plan_clarification_questions", []),
-                execution_note="Reviewer approved final output against the original objective.",
+                execution_note=(
+                    f"Reviewer approved the latest step from {state.get('review_target_agent') or state.get('last_agent', '')}."
+                ),
             )
-            return state
+            if self._next_planned_agents(state):
+                state["review_pending"] = False
+            else:
+                final_text = state.get("draft_response") or state.get("last_agent_output") or "Completed."
+                state["next_agent"] = "__finish__"
+                state["final_output"] = final_text
+                state = append_message(state, make_message("orchestrator_agent", "user", "final", final_text))
+                return state
 
         planned_batch = self._next_planned_agents(state)
         if planned_batch:
@@ -832,6 +1125,8 @@ class AgentRuntime:
                 return state
 
         if (
+            not state.get("plan_steps")
+            and
             state.get("last_agent") != "master_coding_agent"
             and self._is_agent_available(state, "master_coding_agent")
             and self._is_project_audit_request(state)
@@ -853,6 +1148,40 @@ class AgentRuntime:
             return state
 
         if (
+            not state.get("plan_steps")
+            and
+            state.get("last_agent") != "superrag_agent"
+            and self._is_agent_available(state, "superrag_agent")
+            and self._is_superrag_request(state)
+        ):
+            reason = (
+                "The request is a RAG/session knowledge-system workflow. "
+                "Route to superrag_agent for ingestion, indexing, session switching, or chat."
+            )
+            objective = state.get("current_objective") or state.get("user_query", "")
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "superrag_agent"
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="superrag_agent",
+                    intent="superrag-dispatch",
+                    content=objective,
+                    state_updates={"current_objective": objective},
+                ),
+            )
+            record_work_note(
+                state,
+                "orchestrator_agent",
+                "decision",
+                f"next_agent=superrag_agent\nreason={reason}\nstate_updates={{'current_objective': '{objective}'}}",
+            )
+            return state
+
+        if (
+            not state.get("plan_steps")
+            and
             state.get("last_agent") != "deep_research_agent"
             and self._is_agent_available(state, "deep_research_agent")
             and not self._is_long_document_request(state)
@@ -881,6 +1210,8 @@ class AgentRuntime:
             return state
 
         if (
+            not state.get("plan_steps")
+            and
             state.get("last_agent") != "long_document_agent"
             and self._is_agent_available(state, "long_document_agent")
             and self._is_long_document_request(state)
@@ -1076,6 +1407,84 @@ Return ONLY valid JSON in this exact schema:
     def new_run_id(self) -> str:
         return f"run_{datetime.now(UTC).timestamp()}"
 
+    def _restore_pending_user_input(self, initial_state: dict, prior_channel_state: dict, user_query: str) -> None:
+        pending_kind = str(prior_channel_state.get("pending_user_input_kind", "") or "").strip()
+        if not pending_kind and prior_channel_state.get("awaiting_user_input"):
+            pending_kind = "clarification"
+        if not pending_kind:
+            return
+
+        previous_objective = str(prior_channel_state.get("last_objective", "") or "").strip()
+        if pending_kind == "clarification":
+            if previous_objective:
+                initial_state["current_objective"] = f"{previous_objective}\n\nUser clarification: {user_query}"
+            initial_state["plan_needs_clarification"] = False
+            initial_state["pending_user_input_kind"] = ""
+            initial_state["pending_user_question"] = ""
+            initial_state["plan_ready"] = False
+            return
+
+        scope = str(prior_channel_state.get("approval_pending_scope", "") or "").strip()
+        prompt = str(prior_channel_state.get("pending_user_question", "") or "").strip()
+        if previous_objective:
+            initial_state["current_objective"] = previous_objective
+        response = self._interpret_user_input_response(user_query)
+
+        if response["action"] == "approve":
+            initial_state["pending_user_input_kind"] = ""
+            initial_state["approval_pending_scope"] = ""
+            initial_state["pending_user_question"] = ""
+            if scope == "root_plan":
+                initial_state["plan_waiting_for_approval"] = False
+                initial_state["plan_approval_status"] = "approved"
+                initial_state["plan_ready"] = bool(initial_state.get("plan_steps"))
+                initial_state["plan_needs_clarification"] = False
+            elif scope == "long_document_plan":
+                initial_state["long_document_plan_waiting_for_approval"] = False
+                initial_state["long_document_plan_status"] = "approved"
+                initial_state["long_document_execute_from_saved_outline"] = True
+                initial_state["plan_ready"] = bool(initial_state.get("plan_steps")) and initial_state.get("plan_approval_status") == "approved"
+            return
+
+        if response["action"] == "revise":
+            initial_state["pending_user_input_kind"] = ""
+            initial_state["approval_pending_scope"] = ""
+            initial_state["pending_user_question"] = ""
+            if scope == "root_plan":
+                initial_state["plan_waiting_for_approval"] = False
+                initial_state["plan_approval_status"] = "revision_requested"
+                initial_state["plan_revision_feedback"] = response["feedback"]
+                initial_state["plan_revision_count"] = int(initial_state.get("plan_revision_count", 0) or 0) + 1
+                initial_state["plan_ready"] = False
+                if previous_objective:
+                    initial_state["current_objective"] = (
+                        f"{previous_objective}\n\nPlan revision instructions from the user:\n{response['feedback']}"
+                    )
+            elif scope == "long_document_plan":
+                initial_state["long_document_plan_waiting_for_approval"] = False
+                initial_state["long_document_plan_status"] = "revision_requested"
+                initial_state["long_document_plan_feedback"] = response["feedback"]
+                initial_state["long_document_plan_revision_count"] = int(initial_state.get("long_document_plan_revision_count", 0) or 0) + 1
+                initial_state["long_document_replan_requested"] = True
+                initial_state["plan_ready"] = bool(initial_state.get("plan_steps")) and initial_state.get("plan_approval_status") == "approved"
+                if previous_objective:
+                    initial_state["current_objective"] = previous_objective
+            return
+
+        explicit_instruction = "Reply `approve` to continue, or describe the changes you want."
+        initial_state["pending_user_input_kind"] = pending_kind
+        initial_state["approval_pending_scope"] = scope
+        if prompt:
+            initial_state["pending_user_question"] = prompt if explicit_instruction in prompt else f"{prompt}\n\n{explicit_instruction}"
+        else:
+            initial_state["pending_user_question"] = explicit_instruction
+        if scope == "root_plan":
+            initial_state["plan_waiting_for_approval"] = True
+            initial_state["plan_ready"] = False
+        elif scope == "long_document_plan":
+            initial_state["long_document_plan_waiting_for_approval"] = True
+            initial_state["plan_ready"] = bool(initial_state.get("plan_steps")) and initial_state.get("plan_approval_status") == "approved"
+
     def build_initial_state(self, user_query: str, **overrides) -> dict:
         resolved_run_id = overrides.get("run_id", self.new_run_id())
         session_started_at = overrides.get("session_started_at") or datetime.now(UTC).isoformat()
@@ -1092,10 +1501,26 @@ Return ONLY valid JSON in this exact schema:
             "plan_step_index": 0,
             "plan_execution_count": 0,
             "plan_ready": False,
+            "plan_waiting_for_approval": False,
+            "plan_approval_status": "not_started",
+            "plan_revision_feedback": "",
+            "plan_revision_count": 0,
+            "plan_version": 0,
             "plan_needs_clarification": False,
             "plan_clarification_questions": [],
             "planned_active_agent": "",
+            "active_agent_task": "",
             "pending_user_question": "",
+            "pending_user_input_kind": "",
+            "approval_pending_scope": "",
+            "planning_notes": [],
+            "long_document_plan_waiting_for_approval": False,
+            "long_document_plan_status": "",
+            "long_document_plan_feedback": "",
+            "long_document_plan_revision_count": 0,
+            "long_document_plan_version": 0,
+            "long_document_plan_markdown": "",
+            "long_document_plan_data": {},
             "resume_requested": False,
             "resume_ready": False,
             "resume_blocked": False,
@@ -1134,8 +1559,28 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["plan_steps"] = prior_channel_state.get("last_plan_steps", [])
             if isinstance(prior_channel_state.get("last_plan_step_index"), int):
                 initial_state["plan_step_index"] = max(0, int(prior_channel_state.get("last_plan_step_index", 0)))
-            if initial_state.get("plan_steps"):
+            initial_state["plan_waiting_for_approval"] = bool(prior_channel_state.get("plan_waiting_for_approval", False))
+            initial_state["plan_approval_status"] = str(prior_channel_state.get("plan_approval_status", initial_state.get("plan_approval_status", "")) or initial_state.get("plan_approval_status", ""))
+            initial_state["plan_revision_feedback"] = str(prior_channel_state.get("plan_revision_feedback", "") or "")
+            initial_state["plan_revision_count"] = int(prior_channel_state.get("plan_revision_count", 0) or 0)
+            initial_state["plan_version"] = int(prior_channel_state.get("plan_version", 0) or 0)
+            initial_state["planning_notes"] = prior_channel_state.get("planning_notes", [])
+            initial_state["pending_user_input_kind"] = str(prior_channel_state.get("pending_user_input_kind", "") or "")
+            initial_state["approval_pending_scope"] = str(prior_channel_state.get("approval_pending_scope", "") or "")
+            initial_state["pending_user_question"] = str(prior_channel_state.get("pending_user_question", "") or "")
+            initial_state["long_document_plan_waiting_for_approval"] = bool(prior_channel_state.get("long_document_plan_waiting_for_approval", False))
+            initial_state["long_document_plan_status"] = str(prior_channel_state.get("long_document_plan_status", "") or "")
+            initial_state["long_document_plan_feedback"] = str(prior_channel_state.get("long_document_plan_feedback", "") or "")
+            initial_state["long_document_plan_revision_count"] = int(prior_channel_state.get("long_document_plan_revision_count", 0) or 0)
+            initial_state["long_document_plan_markdown"] = str(prior_channel_state.get("long_document_plan_markdown", "") or "")
+            initial_state["long_document_plan_data"] = prior_channel_state.get("long_document_plan_data", {})
+            initial_state["long_document_plan_version"] = int(prior_channel_state.get("long_document_plan_version", 0) or 0)
+            if prior_channel_state.get("long_document_outline"):
+                initial_state["long_document_outline"] = prior_channel_state.get("long_document_outline", {})
+            if initial_state.get("plan_steps") and initial_state.get("plan_approval_status") == "approved" and not initial_state.get("plan_waiting_for_approval", False):
                 initial_state["plan_ready"] = True
+            if prior_channel_state.get("superrag_active_session_id"):
+                initial_state["superrag_active_session_id"] = str(prior_channel_state.get("superrag_active_session_id", "")).strip()
             if prior_channel_state.get("last_objective"):
                 initial_state["session_previous_objective"] = str(prior_channel_state.get("last_objective", ""))
             if prior_channel_state.get("history"):
@@ -1143,11 +1588,7 @@ Return ONLY valid JSON in this exact schema:
             if prior_channel_state.get("failure_checkpoint"):
                 initial_state["failure_checkpoint"] = prior_channel_state.get("failure_checkpoint", {})
             if prior_channel_state.get("awaiting_user_input"):
-                previous_objective = str(prior_channel_state.get("last_objective", "")).strip()
-                if previous_objective:
-                    initial_state["current_objective"] = f"{previous_objective}\n\nUser clarification: {user_query}"
-                initial_state["plan_needs_clarification"] = False
-                initial_state["plan_ready"] = False
+                self._restore_pending_user_input(initial_state, prior_channel_state, user_query)
             previous_failed = str(prior_channel_state.get("last_status", "")).strip().lower() == "failed"
             resume_checkpoint = initial_state.get("failure_checkpoint", {})
             resume_requested = self._looks_like_resume_request(user_query)
@@ -1158,7 +1599,7 @@ Return ONLY valid JSON in this exact schema:
                 if can_resume and initial_state.get("plan_steps"):
                     failed_index = int(resume_checkpoint.get("step_index", initial_state.get("plan_step_index", 0)) or 0)
                     initial_state["plan_step_index"] = max(0, min(failed_index, max(0, len(initial_state.get("plan_steps", [])) - 1)))
-                    initial_state["plan_ready"] = True
+                    initial_state["plan_ready"] = initial_state.get("plan_approval_status") == "approved" and not self._awaiting_user_input(initial_state)
                     initial_state["plan_needs_clarification"] = False
                     initial_state["resume_ready"] = True
                     failed_task = str(resume_checkpoint.get("task_content", "") or "").strip()
@@ -1246,23 +1687,26 @@ Return ONLY valid JSON in this exact schema:
             final_output = result.get("final_output") or result.get("draft_response", "")
             if create_outputs:
                 write_text_file("final_output.txt", final_output)
-            update_run(run_id, status="completed", completed_at=datetime.now(UTC).isoformat(), final_output=final_output)
-            append_daily_memory_note(result, "system", "run_completed", self._truncate(final_output, 1000))
-            append_long_term_memory(result, "Run Summary", self._truncate(final_output, 1200))
-            self._write_session_record(result, status="completed", completed_at=datetime.now(UTC).isoformat())
+            completed_at = datetime.now(UTC).isoformat()
+            final_status = "awaiting_user_input" if self._awaiting_user_input(result) else "completed"
+            update_run(run_id, status=final_status, completed_at=completed_at, final_output=final_output)
+            append_daily_memory_note(result, "system", f"run_{final_status}", self._truncate(final_output, 1000))
+            if final_status == "completed":
+                append_long_term_memory(result, "Run Summary", self._truncate(final_output, 1200))
+            self._write_session_record(result, status=final_status, completed_at=completed_at)
             update_planning_file(
                 result,
-                status="completed",
+                status=final_status,
                 objective=result.get("current_objective", result.get("user_query", "")),
                 plan_text=result.get("plan", ""),
                 clarifications=result.get("plan_clarification_questions", []),
-                execution_note="Run completed.",
+                execution_note="Run completed." if final_status == "completed" else "Run paused pending user input.",
             )
-            close_session_memory(result, status="completed", final_output=final_output)
+            close_session_memory(result, status=final_status, final_output=final_output)
             append_privileged_audit_event(
                 result,
                 actor="runtime",
-                action="run_completed",
+                action="run_completed" if final_status == "completed" else "run_paused",
                 status="ok",
                 detail={"run_id": run_id, "final_output_excerpt": self._truncate(final_output, 400)},
             )

@@ -33,16 +33,22 @@ _CODING_AGENTS = {
 }
 
 
-def model_for_agent(agent_name: str = "") -> str:
+def model_selection_for_agent(agent_name: str = "") -> dict[str, str]:
     name = (agent_name or "").strip()
     if name:
         agent_key = f"OPENAI_MODEL_AGENT_{name.upper()}"
         agent_specific = os.getenv(agent_key, "").strip()
         if agent_specific:
-            return agent_specific
+            return {"model": agent_specific, "source": agent_key}
     if name in _CODING_AGENTS:
-        return os.getenv("OPENAI_MODEL_CODING", os.getenv("OPENAI_CODEX_MODEL", _DEFAULT_CODING_MODEL)).strip() or _DEFAULT_CODING_MODEL
-    return os.getenv("OPENAI_MODEL_GENERAL", os.getenv("OPENAI_MODEL", _DEFAULT_GENERAL_MODEL)).strip() or _DEFAULT_GENERAL_MODEL
+        model = os.getenv("OPENAI_MODEL_CODING", os.getenv("OPENAI_CODEX_MODEL", _DEFAULT_CODING_MODEL)).strip() or _DEFAULT_CODING_MODEL
+        return {"model": model, "source": "OPENAI_MODEL_CODING/OPENAI_CODEX_MODEL"}
+    model = os.getenv("OPENAI_MODEL_GENERAL", os.getenv("OPENAI_MODEL", _DEFAULT_GENERAL_MODEL)).strip() or _DEFAULT_GENERAL_MODEL
+    return {"model": model, "source": "OPENAI_MODEL_GENERAL/OPENAI_MODEL"}
+
+
+def model_for_agent(agent_name: str = "") -> str:
+    return model_selection_for_agent(agent_name).get("model", _DEFAULT_GENERAL_MODEL)
 
 
 def _client_for_model(model: str) -> ChatOpenAI:

@@ -7,6 +7,7 @@ This project now includes a deeper research stack for investigating people, comp
 - `access_control_agent`
 - `web_crawl_agent`
 - `document_ingestion_agent`
+- `local_drive_agent`
 - `ocr_agent`
 - `entity_resolution_agent`
 - `knowledge_graph_agent`
@@ -57,6 +58,39 @@ docker compose up --build
 ## Current API Coverage
 
 No extra paid APIs are required beyond OpenAI and SerpAPI for the current implementation.
+
+## Local Drive Intelligence
+
+`local_drive_agent` can scan user-selected local folders, process supported files one at a time, and create per-document summaries for downstream synthesis and reporting.
+
+Supported classes include:
+
+- text and web docs (`txt`, `md`, `json`, `html`)
+- office docs (`doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`)
+- data files (`csv`)
+- PDFs (`pdf`)
+- images with OCR (`png`, `jpg`, `jpeg`, `bmp`, `gif`, `webp`, `tif`, `tiff`)
+
+## Long Document Visual Synthesis
+
+`long_document_agent` now pauses for an explicit section-plan approval before it starts the expensive section research/drafting pass. The stored subplan includes:
+
+- section/chapter breakdown
+- per-step model allocation (`deep_research` model for evidence gathering, resolved document model for drafting/merge work)
+- approval-ready markdown persisted into the active run folder and session planning memory
+
+After approval, it augments section drafts with visuals where needed:
+
+- markdown tables for structured comparisons and KPI snapshots
+- mermaid flowcharts for process and dependency narratives
+
+Artifacts are persisted inline with each run:
+
+- `section_##/visual_assets.json`
+- `section_##/visual_assets.md`
+- `section_##/flowchart_##.mmd`
+- `long_document_visual_index.md`
+- `long_document_visual_index.json`
 
 ## Recommended Future Integrations
 

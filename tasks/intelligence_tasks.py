@@ -1,9 +1,11 @@
 import json
 import os
+import re
 from pathlib import Path
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.research_infra import (
+    LOCAL_DRIVE_SUPPORTED_EXTENSIONS,
     build_evidence_bundle,
     chunk_text,
     crawl_urls,
@@ -20,6 +22,36 @@ from tasks.research_infra import (
     upsert_memory_records,
 )
 from tasks.utils import OUTPUT_DIR, log_task_update, write_text_file
+
+
+AGENT_METADATA = {
+    "local_drive_agent": {
+        "description": (
+            "Indexes a user-selected local folder, reads supported files one at a time, "
+            "builds per-document summaries, and creates a reusable summary bank."
+        ),
+        "skills": ["local-drive", "document-ingestion", "ocr", "summarization", "knowledge-bank"],
+        "input_keys": [
+            "local_drive_paths",
+            "local_drive_recursive",
+            "local_drive_max_files",
+            "local_drive_extensions",
+            "local_drive_enable_image_ocr",
+            "local_drive_ocr_instruction",
+            "local_drive_working_directory",
+            "current_objective",
+        ],
+        "output_keys": [
+            "local_drive_files",
+            "local_drive_documents",
+            "local_drive_document_summaries",
+            "local_drive_summary_bank",
+            "document_summary",
+            "draft_response",
+        ],
+        "requirements": [],
+    }
+}
 
 
 def _safe_json_filename(agent_name: str, call_number: int) -> str:
@@ -44,11 +76,80 @@ def _resolve_paths(raw_paths, working_directory: str | None = None) -> list[str]
         raw_paths = [raw_paths]
     results = []
     for raw_path in raw_paths or []:
-        path = Path(raw_path)
+        candidate = str(raw_path or "").strip()
+        if not candidate:
+            continue
+        windows_drive_match = re.match(r"^([a-zA-Z]):[\\/](.*)$", candidate)
+        if windows_drive_match:
+            drive = windows_drive_match.group(1).lower()
+            tail = windows_drive_match.group(2).replace("\\", "/")
+            wsl_path = Path(f"/mnt/{drive}/{tail}")
+            path = wsl_path if wsl_path.exists() else Path(candidate)
+        else:
+            path = Path(candidate)
         if not path.is_absolute():
             path = Path(working_directory or ".").resolve() / path
         results.append(str(path))
     return results
+
+
+def _normalize_extension_set(raw_extensions) -> set[str]:
+    if isinstance(raw_extensions, str):
+        items = [item.strip() for item in raw_extensions.split(",")]
+    elif isinstance(raw_extensions, list):
+        items = [str(item).strip() for item in raw_extensions]
+    else:
+        items = []
+    normalized = {f".{item.lower().lstrip('.')}" for item in items if item}
+    return normalized or set(LOCAL_DRIVE_SUPPORTED_EXTENSIONS)
+
+
+def _discover_local_drive_files(
+    roots: list[str],
+    *,
+    recursive: bool,
+    include_hidden: bool,
+    max_files: int,
+    allowed_extensions: set[str],
+) -> list[str]:
+    discovered = []
+    seen = set()
+    for root_item in roots:
+        root = Path(root_item).expanduser().resolve()
+        candidates = []
+        if root.is_file():
+            candidates = [root]
+        elif root.is_dir():
+            iterator = root.rglob("*") if recursive else root.glob("*")
+            candidates = [path for path in iterator if path.is_file()]
+        for path in sorted(candidates):
+            if path in seen:
+                continue
+            if not include_hidden and any(part.startswith(".") for part in path.parts):
+                continue
+            if path.suffix.lower() not in allowed_extensions:
+                continue
+            discovered.append(str(path))
+            seen.add(path)
+            if len(discovered) >= max_files:
+                return discovered
+    return discovered
+
+
+def _merge_documents(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    by_path = {}
+    for item in existing or []:
+        if isinstance(item, dict):
+            by_path[str(item.get("path", ""))] = item
+    for item in incoming or []:
+        if isinstance(item, dict):
+            by_path[str(item.get("path", ""))] = item
+    return [item for key, item in sorted(by_path.items()) if key]
+
+
+def _safe_slug(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip()).strip("_").lower()
+    return slug[:64] or "document"
 
 
 def _textual_sources_for_memory(state: dict) -> list[dict]:
@@ -80,6 +181,16 @@ def _textual_sources_for_memory(state: dict) -> list[dict]:
                     "source": item.get("path", "ocr"),
                     "text": item["text"],
                     "payload": {"source_type": "ocr"},
+                }
+            )
+    for item in state.get("local_drive_document_summaries", []) or []:
+        summary_text = (item or {}).get("summary", "")
+        if summary_text:
+            records.append(
+                {
+                    "source": f"{item.get('path', 'document')}#summary",
+                    "text": summary_text,
+                    "payload": {"source_type": "document_summary", "document_type": item.get("type", "unknown")},
                 }
             )
     return records
@@ -236,6 +347,187 @@ Summarize the important facts, entities, dates, metrics, and unanswered question
         summary,
         f"document_ingestion_result_{call_number}",
         recipients=["orchestrator_agent", "worker_agent", "reviewer_agent"],
+    )
+
+
+def local_drive_agent(state):
+    _, task_content, _ = begin_agent_session(state, "local_drive_agent")
+    state["local_drive_calls"] = state.get("local_drive_calls", 0) + 1
+    call_number = state["local_drive_calls"]
+
+    base_directory = state.get("local_drive_working_directory") or state.get("working_directory")
+    raw_roots = (
+        state.get("local_drive_paths")
+        or state.get("knowledge_drive_paths")
+        or state.get("drive_paths")
+        or state.get("document_root_paths")
+        or []
+    )
+    if not raw_roots and task_content:
+        try:
+            if Path(task_content).exists():
+                raw_roots = [task_content]
+        except Exception:
+            raw_roots = []
+    if not raw_roots and base_directory:
+        raw_roots = [base_directory]
+    roots = _resolve_paths(raw_roots, base_directory)
+    if not roots:
+        raise ValueError("local_drive_agent requires 'local_drive_paths' or a valid working_directory.")
+
+    recursive = bool(state.get("local_drive_recursive", True))
+    include_hidden = bool(state.get("local_drive_include_hidden", False))
+    max_files = max(1, min(int(state.get("local_drive_max_files", 200)), 1000))
+    allowed_extensions = _normalize_extension_set(state.get("local_drive_extensions"))
+    image_ocr_enabled = bool(state.get("local_drive_enable_image_ocr", True))
+    ocr_instruction = state.get("local_drive_ocr_instruction")
+    objective = state.get("current_objective") or state.get("user_query", "")
+
+    files = _discover_local_drive_files(
+        roots,
+        recursive=recursive,
+        include_hidden=include_hidden,
+        max_files=max_files,
+        allowed_extensions=allowed_extensions,
+    )
+    if not files:
+        raise ValueError("local_drive_agent found no supported files in the selected path(s).")
+
+    log_task_update(
+        "Local Drive",
+        f"Local drive pass #{call_number} started. Processing {len(files)} file(s).",
+        "\n".join(files[:20]),
+    )
+
+    documents = []
+    document_summaries = []
+    for index, file_path in enumerate(files, start=1):
+        parsed = parse_documents(
+            [file_path],
+            continue_on_error=True,
+            ocr_images=image_ocr_enabled,
+            ocr_instruction=ocr_instruction,
+        )[0]
+        documents.append(parsed)
+
+        parsed_text = str(parsed.get("text", "") or "").strip()
+        metadata = parsed.get("metadata", {}) if isinstance(parsed.get("metadata"), dict) else {}
+        document_type = str(metadata.get("type", Path(file_path).suffix.lstrip(".").lower() or "unknown"))
+        if parsed_text:
+            prompt = f"""
+You are a document-reading sub-agent.
+
+Task objective:
+{objective}
+
+Document path:
+{file_path}
+
+Document type:
+{document_type}
+
+Extracted content:
+{parsed_text[:16000]}
+
+Write a concise summary with:
+- what this document is about
+- critical facts, numbers, dates, and entities
+- decisions or action items
+- data quality concerns or missing pieces
+"""
+            summary = llm_text(prompt)
+        else:
+            summary = f"No readable text extracted. Reason: {metadata.get('error', 'empty document after extraction')}"
+
+        summary_item = {
+            "index": index,
+            "path": file_path,
+            "file_name": Path(file_path).name,
+            "type": document_type,
+            "summary": summary,
+            "char_count": len(parsed_text),
+            "error": metadata.get("error", ""),
+        }
+        document_summaries.append(summary_item)
+
+        artifact_name = f"local_drive_doc_summary_{call_number}_{index:03d}_{_safe_slug(Path(file_path).stem)}.txt"
+        artifact_body = "\n".join(
+            [
+                f"File: {summary_item['file_name']}",
+                f"Path: {summary_item['path']}",
+                f"Type: {summary_item['type']}",
+                f"Characters: {summary_item['char_count']}",
+                f"Error: {summary_item['error'] or 'none'}",
+                "",
+                summary_item["summary"],
+            ]
+        )
+        write_text_file(artifact_name, artifact_body)
+
+    rollup_input = {
+        "objective": objective,
+        "document_count": len(document_summaries),
+        "documents": [
+            {
+                "index": item["index"],
+                "path": item["path"],
+                "type": item["type"],
+                "summary": item["summary"],
+                "error": item["error"],
+            }
+            for item in document_summaries
+        ],
+    }
+    rollup_prompt = f"""
+You are a knowledge-synthesis agent. Build one actionable summary from these document summaries.
+
+Return:
+- 5-10 bullet key findings
+- contradictions or missing data
+- recommended next tasks for report generation
+- list of highest-priority source files to inspect deeper
+
+Input:
+{json.dumps(rollup_input, indent=2, ensure_ascii=False)[:28000]}
+"""
+    rollup_summary = llm_text(rollup_prompt)
+
+    payload = {
+        "roots": roots,
+        "recursive": recursive,
+        "max_files": max_files,
+        "allowed_extensions": sorted(allowed_extensions),
+        "image_ocr_enabled": image_ocr_enabled,
+        "files": files,
+        "documents": [
+            {
+                "path": item.get("path", ""),
+                "type": (item.get("metadata") or {}).get("type", ""),
+                "char_count": len(item.get("text", "") or ""),
+                "error": (item.get("metadata") or {}).get("error", ""),
+            }
+            for item in documents
+        ],
+        "document_summaries": document_summaries,
+    }
+    _write_agent_artifacts("local_drive_agent", call_number, rollup_summary, payload)
+
+    state["local_drive_files"] = files
+    state["local_drive_documents"] = documents
+    state["local_drive_document_summaries"] = document_summaries
+    state["local_drive_summary_bank"] = {item["path"]: item["summary"] for item in document_summaries}
+    state["documents"] = _merge_documents(state.get("documents", []), documents)
+    state["local_drive_summary"] = rollup_summary
+    state["document_summary"] = rollup_summary
+    state["draft_response"] = rollup_summary
+    if state.get("local_drive_index_to_memory", True):
+        _maybe_upsert_memory(state, _textual_sources_for_memory(state))
+    return publish_agent_output(
+        state,
+        "local_drive_agent",
+        rollup_summary,
+        f"local_drive_result_{call_number}",
+        recipients=["orchestrator_agent", "worker_agent", "reviewer_agent", "report_agent"],
     )
 
 

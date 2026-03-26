@@ -23,6 +23,8 @@ class RegistryDiscoveryTests(unittest.TestCase):
             "heartbeat_agent",
             "monitor_rule_agent",
             "stock_monitor_agent",
+            "local_drive_agent",
+            "superrag_agent",
         ]:
             self.assertIn(agent_name, registry.agents)
 

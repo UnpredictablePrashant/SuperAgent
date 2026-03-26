@@ -174,9 +174,86 @@ superagent run \
 
 Expected behavior:
 - Routes to `long_document_agent` for staged section planning, deep research, chapter drafting, and continuity alignment.
-- Writes per-section research artifacts plus merged output into `output/runs/<run_id>/`.
+- Requires explicit approval of the top-level plan first, then a second approval of the long-document section/chapter subplan before expensive research starts.
+- Writes per-section research artifacts plus merged output into `output/runs/<run_id>/long_document_runs/long_document_run_<n>/`.
+- Captures per-section references and a consolidated reference register (`long_document_references.md` / `.json`).
+- Adds section visuals where useful (markdown tables + mermaid flowcharts), writes per-section visual artifacts, and compiles a run-level visual index.
 - Coherence is anchored through markdown memory files (`Agent.md`, `soul.md`, `memory.md`, `session.md`, `planning.md`) plus live bridge files (`long_document_coherence_*.md`).
 - Supports very long-running execution windows with explicit research wait configuration.
+
+## Case Study 10: superRAG Session Build + Chat
+
+Goal: Build a persistent session-based RAG system from mixed sources, then chat over indexed knowledge.
+
+Build from local files + URLs:
+
+```bash
+superagent run \
+  --superrag-mode build \
+  --superrag-new-session \
+  --superrag-session-title "product_ops_kb" \
+  --superrag-path ./docs \
+  --superrag-path ./notes \
+  --superrag-url https://example.com/help-center \
+  --superrag-url https://example.com/changelog \
+  "Create a superRAG knowledge base for product operations."
+```
+
+Build from database URL (schema + sampled row knowledge):
+
+```bash
+superagent run \
+  --superrag-mode build \
+  --superrag-session ops_db_kb \
+  --superrag-db-url "postgresql://user:pass@host:5432/appdb" \
+  --superrag-db-schema public \
+  "Scan this database and build a superRAG session."
+```
+
+Build including OneDrive content (requires Microsoft Graph setup):
+
+```bash
+superagent run \
+  --superrag-mode build \
+  --superrag-session onedrive_ops_kb \
+  --superrag-onedrive \
+  --superrag-onedrive-path "Shared/Operations" \
+  "Ingest OneDrive documents into superRAG."
+```
+
+Chat with an existing session:
+
+```bash
+superagent run \
+  --superrag-mode chat \
+  --superrag-session ops_db_kb \
+  --superrag-chat "What are the top risk indicators and their source tables?" \
+  --superrag-top-k 10
+```
+
+Switch to a different session:
+
+```bash
+superagent run --superrag-mode switch --superrag-session onedrive_ops_kb "Switch active superRAG session."
+```
+
+Check one session status:
+
+```bash
+superagent run --superrag-mode status --superrag-session ops_db_kb "Show superRAG status."
+```
+
+List available superRAG sessions:
+
+```bash
+superagent run --superrag-mode list "List my superRAG sessions."
+```
+
+Expected behavior:
+- `superrag_agent` runs ingestion, chunking, embeddings, vector indexing, and session persistence.
+- Console/task logs include preflight analysis, estimated duration, and long-running progress messages.
+- Database builds include schema knowledge base artifacts (tables, columns, keys, sampled rows).
+- Session data is persisted and can be reused across runs (`build`, `chat`, `switch`, `status`, `list`).
 
 ## Useful Companion Commands
 

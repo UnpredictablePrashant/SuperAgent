@@ -346,6 +346,44 @@ def close_session_memory(state: dict, *, status: str, final_output: str = "") ->
     append_session_event(state, "system", "session_closed", f"status={status}")
 
 
+def _iter_plan_steps(steps: list[dict]) -> list[dict]:
+    collected: list[dict] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        collected.append(step)
+        child_steps = step.get("substeps", [])
+        if isinstance(child_steps, list) and child_steps:
+            collected.extend(_iter_plan_steps(child_steps))
+    return collected
+
+
+def _model_allocation_lines(state: dict) -> list[str]:
+    lines: list[str] = []
+    plan_data = state.get("plan_data", {})
+    if isinstance(plan_data, dict):
+        assignments = plan_data.get("model_assignments", [])
+        if isinstance(assignments, list):
+            for item in assignments:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path", "")).strip() or "?"
+                title = str(item.get("title", "")).strip() or str(item.get("step_id", "")).strip() or "step"
+                agent = str(item.get("agent", "")).strip() or "unknown"
+                model = str(item.get("llm_model", "")).strip() or "unknown"
+                source = str(item.get("model_source", "")).strip() or "unknown"
+                lines.append(f"- {path}: {title} | agent={agent} | llm={model} | source={source}")
+
+    long_doc_status = str(state.get("long_document_plan_status", "")).strip()
+    long_doc_md = str(state.get("long_document_plan_markdown", "")).strip()
+    if long_doc_status or long_doc_md:
+        if lines:
+            lines.append("")
+        lines.append(f"- long_document_subplan_status={long_doc_status or 'n/a'}")
+
+    return lines
+
+
 def update_planning_file(
     state: dict,
     *,
@@ -359,19 +397,49 @@ def update_planning_file(
     if not str(planning_path):
         return
 
+    notes = state.get("planning_notes", [])
+    if not isinstance(notes, list):
+        notes = []
+    if execution_note.strip():
+        stamped_note = f"{_now_iso()} | {execution_note.strip()}"
+        if not notes or notes[-1] != stamped_note:
+            notes.append(stamped_note)
+    state["planning_notes"] = notes[-40:]
+
     questions = [item.strip() for item in (clarifications or []) if str(item or "").strip()]
     clarification_block = "\n".join(f"- {item}" for item in questions) if questions else "- none"
-    execution_block = f"- {execution_note.strip()}" if execution_note.strip() else "- none"
+    execution_block = "\n".join(f"- {item}" for item in state.get("planning_notes", []) if str(item).strip()) or "- none"
+    model_block = "\n".join(_model_allocation_lines(state)) or "- none"
+    approval_block = "\n".join(
+        [
+            f"- pending_user_input_kind: {state.get('pending_user_input_kind', '') or 'none'}",
+            f"- approval_scope: {state.get('approval_pending_scope', '') or 'none'}",
+            f"- plan_approval_status: {state.get('plan_approval_status', '') or 'none'}",
+            f"- plan_waiting_for_approval: {bool(state.get('plan_waiting_for_approval', False))}",
+            f"- long_document_plan_status: {state.get('long_document_plan_status', '') or 'none'}",
+            f"- long_document_plan_waiting_for_approval: {bool(state.get('long_document_plan_waiting_for_approval', False))}",
+            f"- pending_user_question: {(state.get('pending_user_question', '') or 'none')}",
+            f"- last_plan_feedback: {state.get('plan_revision_feedback', '') or 'none'}",
+            f"- last_long_document_feedback: {state.get('long_document_plan_feedback', '') or 'none'}",
+        ]
+    )
+    subplan_block = str(state.get("long_document_plan_markdown", "")).strip() or "- none"
     payload = (
         "# planning.md\n\n"
         "## Planning Status\n"
         f"- status: {status}\n"
         f"- updated_at: {_now_iso()}\n"
         f"- objective: {objective}\n\n"
+        "## Approval State\n"
+        f"{approval_block}\n\n"
         "## Clarifications Needed\n"
         f"{clarification_block}\n\n"
+        "## Model Allocation\n"
+        f"{model_block}\n\n"
         "## Step Plan\n"
         f"{(plan_text or '').strip() or '- none'}\n\n"
+        "## Active Subplan\n"
+        f"{subplan_block}\n\n"
         "## Execution Log\n"
         f"{execution_block}\n"
     )

@@ -79,6 +79,10 @@ def _collect_report_context(state: dict) -> dict:
         "long_document_compiled_path": state.get("long_document_compiled_path", ""),
         "long_document_manifest_path": state.get("long_document_manifest_path", ""),
         "long_document_sections_data": state.get("long_document_sections_data", []),
+        "long_document_references": state.get("long_document_references", []),
+        "long_document_references_path": state.get("long_document_references_path", ""),
+        "long_document_visual_index_path": state.get("long_document_visual_index_path", ""),
+        "long_document_visual_index_json_path": state.get("long_document_visual_index_json_path", ""),
         "agent_history": state.get("agent_history", [])[-16:],
     }
 

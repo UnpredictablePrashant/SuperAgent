@@ -17,6 +17,7 @@ dependencies = [
   "beautifulsoup4",
   "pypdf",
   "python-docx",
+  "sqlalchemy",
   "qdrant-client",
   "fastmcp",
   "telethon",

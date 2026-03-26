@@ -5,6 +5,7 @@ import datetime as dt
 import importlib.metadata
 import json
 import os
+import re
 import socket
 import shutil
 import subprocess
@@ -77,6 +78,11 @@ def _colors_enabled(argv: list[str] | None) -> bool:
     if os.getenv("NO_COLOR"):
         return False
     return bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+
+_STATUS_LINE_LENGTH = 0
+_STATUS_LINE_ACTIVE = False
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _cli_style(argv: list[str] | None) -> _CliStyle:
@@ -234,10 +240,114 @@ def _oauth_missing_env(provider: str) -> list[str]:
     return [name for name, value in pairs if not str(value or "").strip()]
 
 
-def _emit_status(args: argparse.Namespace, message: str) -> None:
+def _status_stream_supports_live_updates() -> bool:
+    try:
+        if os.isatty(sys.stderr.fileno()):
+            return True
+    except Exception:
+        pass
+    return bool(getattr(sys.stderr, "isatty", lambda: False)()) or bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+
+def _clear_transient_status_line() -> None:
+    global _STATUS_LINE_ACTIVE, _STATUS_LINE_LENGTH
+
+    if not _STATUS_LINE_ACTIVE:
+        return
+    if _status_stream_supports_live_updates():
+        sys.stderr.write("\r" + (" " * _STATUS_LINE_LENGTH) + "\r")
+        sys.stderr.flush()
+    _STATUS_LINE_ACTIVE = False
+    _STATUS_LINE_LENGTH = 0
+
+
+def _visible_status_length(text: str) -> int:
+    return len(_ANSI_ESCAPE_RE.sub("", str(text or "")))
+
+
+def _truncate_status_text(value: object, limit: int = 140) -> str:
+    cleaned = " ".join(str(value or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 3] + "..."
+
+
+def _task_session_summary(session: dict) -> dict:
+    summary = session.get("summary")
+    if isinstance(summary, dict):
+        return summary
+    raw_summary = session.get("summary_json")
+    if isinstance(raw_summary, str) and raw_summary.strip():
+        try:
+            decoded = json.loads(raw_summary)
+        except Exception:
+            return {}
+        if isinstance(decoded, dict):
+            return decoded
+    return {}
+
+
+def _build_run_progress_message(session: dict) -> str:
+    summary = _task_session_summary(session)
+    message = (
+        f"[run] status={session.get('status', 'running')} "
+        f"active_agent={session.get('active_agent', '') or '-'} "
+        f"steps={session.get('step_count', 0)}"
+    )
+    if bool(summary.get("awaiting_user_input")):
+        pending_kind = _truncate_status_text(summary.get("pending_user_input_kind") or "user_input", limit=40)
+        scope = _truncate_status_text(summary.get("approval_pending_scope") or "", limit=40)
+        message += f" awaiting={pending_kind}"
+        if scope:
+            message += f" scope={scope}"
+    active_task = _truncate_status_text(summary.get("active_task") or summary.get("objective") or "")
+    if active_task:
+        message += f" task={active_task}"
+    return message
+
+
+def _status_level(message: str, *, transient: bool = False) -> str:
+    text = " ".join(str(message or "").split()).lower()
+    if transient or "waiting for completion" in text:
+        return "muted"
+    if any(token in text for token in ("failed", "gateway ingest failed", "error", "exception", "traceback")):
+        return "fail"
+    if any(token in text for token in ("timed out", "not running", "restarting", "stopped", "already running", "canceled", "cancelled")):
+        return "warn"
+    if any(token in text for token in ("ready at", "completed", "started", "running at http://")):
+        return "ok"
+    return "heading"
+
+
+def _style_status_message(args: argparse.Namespace, message: str, *, transient: bool = False) -> str:
+    style = _style_from_args(args)
+    level = _status_level(message, transient=transient)
+    formatter = {
+        "muted": style.muted,
+        "fail": style.fail,
+        "warn": style.warn,
+        "ok": style.ok,
+        "heading": style.heading,
+    }[level]
+    return formatter(str(message))
+
+
+def _emit_status(args: argparse.Namespace, message: str, *, transient: bool = False) -> None:
+    global _STATUS_LINE_ACTIVE, _STATUS_LINE_LENGTH
+
     if bool(getattr(args, "quiet", False)):
         return
-    print(message, file=sys.stderr, flush=True)
+    styled_message = _style_status_message(args, message, transient=transient)
+    if transient and _status_stream_supports_live_updates():
+        text = " ".join(str(styled_message).splitlines()).strip()
+        padding = max(0, _STATUS_LINE_LENGTH - _visible_status_length(text))
+        sys.stderr.write("\r" + text + (" " * padding) + "\r")
+        sys.stderr.flush()
+        _STATUS_LINE_ACTIVE = True
+        _STATUS_LINE_LENGTH = _visible_status_length(text)
+        return
+    _clear_transient_status_line()
+    print(styled_message, file=sys.stderr, flush=True)
 
 
 def _gateway_ready(timeout_seconds: float = 1.0) -> bool:
@@ -377,6 +487,45 @@ def _looks_like_project_root(path_value: str) -> bool:
         ".git",
     ]
     return any((root / marker).exists() for marker in markers)
+
+
+def _extract_requested_page_count(query: str) -> int:
+    text = str(query or "").lower()
+    if not text.strip():
+        return 0
+    matches = [int(item) for item in re.findall(r"\b(\d{1,3})\s*(?:-| )?\s*pages?\b", text)]
+    return max(matches) if matches else 0
+
+
+def _query_requests_long_document(query: str) -> bool:
+    page_count = _extract_requested_page_count(query)
+    if page_count >= 20:
+        return True
+    text = str(query or "").lower()
+    markers = (
+        "long document",
+        "long-form",
+        "long form",
+        "whitepaper",
+        "monograph",
+        "exhaustive report",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _normalize_drive_paths(raw_values: list[str] | None) -> list[str]:
+    deduped = []
+    seen = set()
+    for raw in raw_values or []:
+        for part in str(raw or "").split(","):
+            value = part.strip()
+            if not value:
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            deduped.append(value)
+    return deduped
 
 
 def _configured_working_dir() -> str:
@@ -635,6 +784,112 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
         "--long-document-title",
         default="",
         help="Optional report title override for long-form mode.",
+    )
+    run_parser.add_argument(
+        "--drive",
+        action="append",
+        default=[],
+        help="Local folder or file path for local-drive ingestion. Repeat for multiple paths.",
+    )
+    run_parser.add_argument(
+        "--drive-max-files",
+        type=int,
+        default=0,
+        help="Maximum files to process from drive inputs (0 keeps default).",
+    )
+    run_parser.add_argument(
+        "--drive-extensions",
+        default="",
+        help="Optional comma-separated extension allowlist (for example: pdf,docx,xlsx,pptx,csv,txt,png).",
+    )
+    run_parser.add_argument(
+        "--drive-no-recursive",
+        action="store_true",
+        help="Disable recursive traversal of drive folders.",
+    )
+    run_parser.add_argument(
+        "--drive-include-hidden",
+        action="store_true",
+        help="Include hidden files and folders when scanning drive paths.",
+    )
+    run_parser.add_argument(
+        "--drive-disable-image-ocr",
+        action="store_true",
+        help="Disable OCR for images discovered in drive paths.",
+    )
+    run_parser.add_argument(
+        "--drive-ocr-instruction",
+        default="",
+        help="Optional OCR instruction override for image extraction in drive mode.",
+    )
+    run_parser.add_argument(
+        "--drive-no-memory-index",
+        action="store_true",
+        help="Disable vector-memory indexing of local-drive extraction summaries.",
+    )
+    run_parser.add_argument(
+        "--superrag-mode",
+        choices=["build", "chat", "switch", "list", "status"],
+        default="",
+        help="Run superRAG in a specific mode.",
+    )
+    run_parser.add_argument(
+        "--superrag-session",
+        default="",
+        help="superRAG session id to reuse or switch to.",
+    )
+    run_parser.add_argument(
+        "--superrag-new-session",
+        action="store_true",
+        help="Force a new superRAG session id for build mode.",
+    )
+    run_parser.add_argument(
+        "--superrag-session-title",
+        default="",
+        help="Optional title for the target superRAG session.",
+    )
+    run_parser.add_argument(
+        "--superrag-path",
+        action="append",
+        default=[],
+        help="Local path to ingest into superRAG. Can be repeated.",
+    )
+    run_parser.add_argument(
+        "--superrag-url",
+        action="append",
+        default=[],
+        help="Seed URL to crawl into superRAG. Can be repeated.",
+    )
+    run_parser.add_argument(
+        "--superrag-db-url",
+        default="",
+        help="Database URL for schema and row-sample ingestion into superRAG.",
+    )
+    run_parser.add_argument(
+        "--superrag-db-schema",
+        default="",
+        help="Optional database schema to target for superRAG DB ingestion.",
+    )
+    run_parser.add_argument(
+        "--superrag-onedrive-path",
+        default="",
+        help="Optional OneDrive folder path to ingest (Microsoft Graph).",
+    )
+    run_parser.add_argument(
+        "--superrag-onedrive",
+        action="store_true",
+        help="Enable OneDrive ingestion for superRAG.",
+    )
+    run_parser.add_argument(
+        "--superrag-chat",
+        default="",
+        help="Question to ask in superRAG chat mode.",
+    )
+    run_parser.add_argument(
+        "--superrag-top-k",
+        type=int,
+        default=0,
+        help="Top-K vector matches used in superRAG chat mode (0 keeps defaults).",
     )
     run_parser.add_argument(
         "--research-max-wait-seconds",
@@ -982,6 +1237,69 @@ def _cmd_run(args: argparse.Namespace) -> int:
         ingest_payload["research_max_tool_calls"] = int(args.research_max_tool_calls)
     if int(args.research_max_output_tokens or 0) > 0:
         ingest_payload["research_max_output_tokens"] = int(args.research_max_output_tokens)
+
+    drive_paths = _normalize_drive_paths(args.drive)
+    if drive_paths:
+        ingest_payload["local_drive_paths"] = drive_paths
+        ingest_payload["local_drive_recursive"] = not bool(args.drive_no_recursive)
+        if bool(args.drive_include_hidden):
+            ingest_payload["local_drive_include_hidden"] = True
+        if int(args.drive_max_files or 0) > 0:
+            ingest_payload["local_drive_max_files"] = int(args.drive_max_files)
+        if str(args.drive_extensions or "").strip():
+            ingest_payload["local_drive_extensions"] = [item.strip() for item in str(args.drive_extensions).split(",") if item.strip()]
+        if bool(args.drive_disable_image_ocr):
+            ingest_payload["local_drive_enable_image_ocr"] = False
+        if str(args.drive_ocr_instruction or "").strip():
+            ingest_payload["local_drive_ocr_instruction"] = str(args.drive_ocr_instruction).strip()
+        if bool(args.drive_no_memory_index):
+            ingest_payload["local_drive_index_to_memory"] = False
+        ingest_payload["local_drive_working_directory"] = resolved_working_dir
+
+        inferred_pages = _extract_requested_page_count(query)
+        inferred_long_document = _query_requests_long_document(query)
+        explicit_long_document = bool(args.long_document) or int(args.long_document_pages or 0) > 0
+        if inferred_long_document and not explicit_long_document:
+            ingest_payload["long_document_mode"] = True
+            if inferred_pages >= 20:
+                ingest_payload["long_document_pages"] = inferred_pages
+        if inferred_long_document or explicit_long_document:
+            ingest_payload["local_drive_force_long_document"] = True
+
+    superrag_paths = _normalize_drive_paths(args.superrag_path)
+    superrag_urls = [str(item).strip() for item in list(args.superrag_url or []) if str(item).strip()]
+    if str(args.superrag_mode or "").strip():
+        ingest_payload["superrag_mode"] = str(args.superrag_mode).strip().lower()
+    if str(args.superrag_session or "").strip():
+        ingest_payload["superrag_session_id"] = str(args.superrag_session).strip()
+    if bool(args.superrag_new_session):
+        ingest_payload["superrag_new_session"] = True
+    if str(args.superrag_session_title or "").strip():
+        ingest_payload["superrag_session_title"] = str(args.superrag_session_title).strip()
+    if superrag_paths:
+        ingest_payload["superrag_local_paths"] = superrag_paths
+    if superrag_urls:
+        ingest_payload["superrag_urls"] = superrag_urls
+    if str(args.superrag_db_url or "").strip():
+        ingest_payload["superrag_db_url"] = str(args.superrag_db_url).strip()
+    if str(args.superrag_db_schema or "").strip():
+        ingest_payload["superrag_db_schema"] = str(args.superrag_db_schema).strip()
+    if bool(args.superrag_onedrive):
+        ingest_payload["superrag_onedrive_enabled"] = True
+    if str(args.superrag_onedrive_path or "").strip():
+        ingest_payload["superrag_onedrive_path"] = str(args.superrag_onedrive_path).strip()
+        ingest_payload["superrag_onedrive_enabled"] = True
+    if str(args.superrag_chat or "").strip():
+        ingest_payload["superrag_chat_query"] = str(args.superrag_chat).strip()
+    if int(args.superrag_top_k or 0) > 0:
+        ingest_payload["superrag_top_k"] = int(args.superrag_top_k)
+
+    has_superrag_sources = bool(superrag_paths or superrag_urls or ingest_payload.get("superrag_db_url") or ingest_payload.get("superrag_onedrive_enabled"))
+    if has_superrag_sources and not ingest_payload.get("superrag_mode"):
+        ingest_payload["superrag_mode"] = "build"
+    if ingest_payload.get("superrag_chat_query") and not ingest_payload.get("superrag_mode"):
+        ingest_payload["superrag_mode"] = "chat"
+
     if security_authorized:
         ingest_payload["security_authorized"] = True
     if security_target_url:
@@ -1080,90 +1398,94 @@ def _cmd_run(args: argparse.Namespace) -> int:
     worker = threading.Thread(target=_submit_ingest, daemon=True)
     worker.start()
 
-    _emit_status(
-        args,
-        f"[run] accepted request run_id={client_run_id} | working_directory={resolved_working_dir}",
-    )
-    started_wait = time.time()
-    last_progress = ""
-    last_wait_emit = 0.0
-    while worker.is_alive():
-        worker.join(timeout=1.0)
+    def _poll_task_session_progress(previous_message: str) -> str:
         try:
             sessions = _http_json_get(f"{gateway_base}/task-sessions", timeout_seconds=1.2)
             if isinstance(sessions, list):
                 match = next((item for item in sessions if str(item.get("run_id", "")) == client_run_id), None)
                 if isinstance(match, dict):
-                    message = (
-                        f"[run] status={match.get('status', 'running')} "
-                        f"active_agent={match.get('active_agent', '') or '-'} "
-                        f"steps={match.get('step_count', 0)}"
-                    )
-                    if message != last_progress:
+                    message = _build_run_progress_message(match)
+                    if message != previous_message:
                         _emit_status(args, message)
-                        last_progress = message
+                        return message
         except Exception:
             pass
+        return previous_message
 
-        now = time.time()
-        if now - last_wait_emit >= 8:
-            elapsed = int(now - started_wait)
-            _emit_status(args, f"[run] waiting for completion... {elapsed}s elapsed")
-            last_wait_emit = now
-
-    if holder["error"] is not None:
-        error = holder["error"]
-        if isinstance(error, BaseException):
-            raise error
-        raise SystemExit(str(error))
-    result = holder["result"]
-    if not isinstance(result, dict):
-        raise SystemExit("Gateway ingest failed: did not receive a valid JSON response.")
-
-    if bool(result.get("_ingest_timed_out")):
-        _emit_status(args, "[run] ingest connection timed out; continuing to monitor run by run_id...")
-        while True:
-            run_record: dict[str, object] | None = None
-            try:
-                payload = _http_json_get(f"{gateway_base}/runs/{client_run_id}", timeout_seconds=1.5)
-                if isinstance(payload, dict):
-                    run_record = payload
-            except Exception:
-                run_record = None
-
-            if run_record is not None:
-                status = str(run_record.get("status", "")).strip().lower()
-                if status == "completed":
-                    result = {
-                        "run_id": run_record.get("run_id", client_run_id),
-                        "final_output": run_record.get("final_output", ""),
-                        "last_agent": "",
-                    }
-                    break
-                if status == "failed":
-                    raise SystemExit(
-                        f"Run failed after ingest timeout. "
-                        f"run_id={run_record.get('run_id', client_run_id)}"
-                    )
+    try:
+        _emit_status(
+            args,
+            f"[run] accepted request run_id={client_run_id} | working_directory={resolved_working_dir}",
+        )
+        started_wait = time.time()
+        last_progress = ""
+        last_wait_emit = 0.0
+        while worker.is_alive():
+            worker.join(timeout=1.0)
+            last_progress = _poll_task_session_progress(last_progress)
 
             now = time.time()
             if now - last_wait_emit >= 8:
                 elapsed = int(now - started_wait)
-                _emit_status(args, f"[run] waiting for completion... {elapsed}s elapsed")
+                _emit_status(args, f"[run] waiting for completion... {elapsed}s elapsed", transient=True)
                 last_wait_emit = now
-            time.sleep(1.0)
 
-    _emit_status(
-        args,
-        f"[run] completed run_id={result.get('run_id', client_run_id)} "
-        f"last_agent={result.get('last_agent', '') or '-'}",
-    )
+        if holder["error"] is not None:
+            error = holder["error"]
+            if isinstance(error, BaseException):
+                raise error
+            raise SystemExit(str(error))
+        result = holder["result"]
+        if not isinstance(result, dict):
+            raise SystemExit("Gateway ingest failed: did not receive a valid JSON response.")
 
-    if args.json:
-        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
-    else:
-        print(result.get("final_output", ""))
-    return 0
+        if bool(result.get("_ingest_timed_out")):
+            _emit_status(args, "[run] ingest connection timed out; continuing to monitor run by run_id...")
+            while True:
+                run_record: dict[str, object] | None = None
+                last_progress = _poll_task_session_progress(last_progress)
+                try:
+                    payload = _http_json_get(f"{gateway_base}/runs/{client_run_id}", timeout_seconds=1.5)
+                    if isinstance(payload, dict):
+                        run_record = payload
+                except Exception:
+                    run_record = None
+
+                if run_record is not None:
+                    status = str(run_record.get("status", "")).strip().lower()
+                    if status == "completed":
+                        result = {
+                            "run_id": run_record.get("run_id", client_run_id),
+                            "final_output": run_record.get("final_output", ""),
+                            "last_agent": "",
+                        }
+                        break
+                    if status == "failed":
+                        raise SystemExit(
+                            f"Run failed after ingest timeout. "
+                            f"run_id={run_record.get('run_id', client_run_id)}"
+                        )
+
+                now = time.time()
+                if now - last_wait_emit >= 8:
+                    elapsed = int(now - started_wait)
+                    _emit_status(args, f"[run] waiting for completion... {elapsed}s elapsed", transient=True)
+                    last_wait_emit = now
+                time.sleep(1.0)
+
+        _emit_status(
+            args,
+            f"[run] completed run_id={result.get('run_id', client_run_id)} "
+            f"last_agent={result.get('last_agent', '') or '-'}",
+        )
+
+        if args.json:
+            print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        else:
+            print(result.get("final_output", ""))
+        return 0
+    finally:
+        _clear_transient_status_line()
 
 
 def _cmd_gateway(args: argparse.Namespace) -> int:

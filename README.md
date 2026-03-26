@@ -159,6 +159,7 @@ Agents are now discovered dynamically from built-in task modules and external pl
 - `access_control_agent`
 - `web_crawl_agent`
 - `document_ingestion_agent`
+- `local_drive_agent`
 - `ocr_agent`
 - `image_agent`
 - `entity_resolution_agent`
@@ -294,6 +295,14 @@ Database file:
 
 Human-readable planning/work notes are now stored inside each run folder as `agent_work_notes.txt`.
 
+The runtime now treats planning as a first-class approval stage:
+
+- every new task is planned before execution
+- the generated plan is stored in session memory (`planning.md`) plus run artifacts (`planner_output.txt`, `planner_output.json`)
+- execution pauses until the user approves the plan or requests revisions
+- plan steps now show the resolved LLM/model assignment for each task so users can review cost-sensitive routing before execution
+- long-form document workflows create a second section-by-section subplan that also requires approval before research/drafting begins
+
 ### 3.1 Per-Run Artifact Folders
 
 Each workflow run now creates its own temporary artifact folder under [output/runs](/mnt/d/Personal%20Data/projects/multi-agents/sample-agents/output/runs).
@@ -347,7 +356,7 @@ It currently provides:
 - HTML-to-text extraction
 - simple site crawling and link following
 - SerpAPI search wrapper
-- document parsing for `txt`, `md`, `json`, `html`, `csv`, `pdf`, `docx`
+- document parsing for `txt`, `md`, `json`, `html`, `csv`, `pdf`, `doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`
 - OpenAI vision-based OCR
 - chunking utilities
 - Qdrant collection creation
@@ -361,7 +370,7 @@ A typical deep-research flow should look like this:
 1. `access_control_agent`
 2. `google_search_agent` or `news_monitor_agent`
 3. `web_crawl_agent`
-4. `document_ingestion_agent` and/or `ocr_agent`
+4. `local_drive_agent` and/or `document_ingestion_agent` and/or `ocr_agent`
 5. `entity_resolution_agent`
 6. `memory_index_agent`
 7. `people_research_agent` or `company_research_agent`
@@ -373,6 +382,55 @@ A typical deep-research flow should look like this:
 13. `report_agent`
 
 The reviewer can interrupt or reroute this flow whenever it decides a step is insufficient.
+
+## Local Drive Knowledge Workflow
+
+The system now supports a local-drive ingestion pattern where users point the superagent to one or more local folders and the agent processes files one at a time.
+
+`local_drive_agent` supports:
+
+- recursive scan of user-selected local paths
+- broad file support (`doc`, `docx`, `pdf`, `xls`, `xlsx`, `csv`, `ppt`, `pptx`, `txt`, `md`, `json`, `html`)
+- image OCR extraction for image files (`png`, `jpg`, `jpeg`, `bmp`, `gif`, `webp`, `tif`, `tiff`) when enabled
+- per-document summary generation and persisted summary artifacts
+- summary-bank state keys (`local_drive_document_summaries`, `local_drive_summary_bank`) for downstream agents
+- optional vector-memory indexing so report and research agents can reuse extracted context
+
+Typical sequence:
+
+1. `local_drive_agent`
+2. `memory_index_agent` (optional, if you want semantic retrieval)
+3. `report_agent` or any domain agent that needs local document context
+
+Primary state inputs:
+
+- `local_drive_paths`
+- `local_drive_recursive` (default `true`)
+- `local_drive_max_files` (default `200`)
+- `local_drive_extensions` (optional allowlist override)
+- `local_drive_enable_image_ocr` (default `true`)
+- `local_drive_ocr_instruction` (optional OCR prompt)
+
+CLI example (no Docker dependency for this path):
+
+```bash
+superagent run \
+  --drive="D:/xyz/folder" \
+  "Do a deep analysis of the content and create a complete summary as if you are a financial head of the company in 50 pages"
+```
+
+Case study:
+
+- [Local Drive Intelligence Case Study](/mnt/d/Personal%20Data/projects/multi-agents/sample-agents/docs/local_drive_case_study.md)
+
+For long-running `long_document_agent` runs, the runtime now persists an intermediate artifact folder per pass (`long_document_runs/long_document_run_<n>/`) with:
+
+- section research/raw artifacts
+- section bridge/continuity files
+- per-section source lists
+- consolidated references (`long_document_references.md`, `long_document_references.json`)
+- per-section visual artifacts (`visual_assets.json`, `visual_assets.md`, `flowchart_*.mmd`)
+- run-level visual register (`long_document_visual_index.md`, `long_document_visual_index.json`)
 
 ## Deal Advisory Workflow Pattern
 
@@ -1341,10 +1399,19 @@ Run a single CLI query:
 superagent run "analyze this company and build a report"
 ```
 
+Run against local-drive documents directly from CLI:
+
+```bash
+superagent run --drive="D:/xyz/folder" "Create a 50-page financial leadership analysis from these files"
+```
+
+For the first run in a session, expect `superagent run` to return an approval-ready plan instead of immediately executing the task. Reply with `approve` in the same session to continue, or send revisions to regenerate the plan. Long-document requests add a second approval gate for the section/chapter subplan.
+
 `superagent run` now uses the gateway flow by default:
 
 - ensures the gateway is running at `http://127.0.0.1:8790` (or `GATEWAY_HOST` / `GATEWAY_PORT`)
 - submits the query through `POST /ingest`
+- runs as a local Python process; Docker is optional and only needed for optional services like containerized Qdrant/MCP stacks
 
 List discovered agents:
 

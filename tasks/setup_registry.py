@@ -638,6 +638,7 @@ def _build_agent_status(services: dict, agent_cards: list[dict]) -> tuple[dict, 
         "monitor_rule_agent",
         "stock_monitor_agent",
         "long_document_agent",
+        "superrag_agent",
     ]
 
     for agent_name in llm_agents:
@@ -687,6 +688,12 @@ def _build_agent_status(services: dict, agent_cards: list[dict]) -> tuple[dict, 
         ok and qdrant_ok,
         missing + ([] if qdrant_ok else ["qdrant"]),
         "Requires OpenAI and a reachable Qdrant instance.",
+    )
+    mark(
+        "superrag_agent",
+        ok and qdrant_ok,
+        missing + ([] if qdrant_ok else ["qdrant"]),
+        "Requires OpenAI and a reachable Qdrant instance (plus optional source connectors).",
     )
 
     google_ok, google_missing = _require_all(services, "openai", "google_workspace")

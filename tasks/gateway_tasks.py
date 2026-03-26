@@ -324,7 +324,13 @@ def session_router_agent(state):
             "history": history,
             "last_objective": state.get("current_objective", state.get("user_query", "")),
             "last_plan": state.get("plan", ""),
-            "awaiting_user_input": bool(state.get("plan_needs_clarification", False)),
+            "awaiting_user_input": bool(
+                state.get("plan_needs_clarification", False)
+                or state.get("plan_waiting_for_approval", False)
+                or state.get("long_document_plan_waiting_for_approval", False)
+            ),
+            "pending_user_input_kind": state.get("pending_user_input_kind", ""),
+            "approval_pending_scope": state.get("approval_pending_scope", ""),
             "pending_user_question": state.get("pending_user_question", ""),
         },
         "updated_at": _now_iso(),

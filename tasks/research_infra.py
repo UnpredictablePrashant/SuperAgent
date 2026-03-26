@@ -4,9 +4,13 @@ import json
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
+import zipfile
 from pathlib import Path
 from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
+import xml.etree.ElementTree as ET
 
 from tasks.utils import llm
 
@@ -20,6 +24,25 @@ DEFAULT_QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 DEFAULT_QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "research_memory")
 SERP_API_URL = "https://serpapi.com/search.json"
 OPENALEX_API_URL = "https://api.openalex.org/works"
+IMAGE_FILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
+LOCAL_DRIVE_SUPPORTED_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".json",
+    ".html",
+    ".htm",
+    ".csv",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".xlsm",
+    ".ppt",
+    ".pptx",
+    ".pptm",
+    *IMAGE_FILE_EXTENSIONS,
+}
 
 
 def strip_code_fences(text: str) -> str:
@@ -243,8 +266,199 @@ Produce a concise but evidence-oriented summary. Mention important facts, confli
     return llm_text(prompt)
 
 
-def parse_document(path_str: str) -> dict:
+def _clean_whitespace(value: str) -> str:
+    return re.sub(r"[ \t]+", " ", (value or "")).strip()
+
+
+def _extract_printable_chunks(data: bytes, *, min_length: int = 6, max_chunks: int = 3000) -> str:
+    decoded = data.decode("latin-1", errors="ignore").replace("\x00", " ")
+    pattern = rf"[^\x00-\x1F]{{{max(1, min_length)},}}"
+    chunks = [_clean_whitespace(item) for item in re.findall(pattern, decoded)]
+    filtered = [item for item in chunks if len(item) >= min_length and not item.startswith("PK")]
+    return "\n".join(filtered[:max_chunks])
+
+
+def _run_command_capture_text(command: list[str], timeout: int = 60) -> str:
+    executable = command[0]
+    if not shutil.which(executable):
+        return ""
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except Exception:
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return (completed.stdout or "").strip()
+
+
+def _extract_doc_text(path: Path) -> tuple[str, dict]:
+    for command in (["antiword", str(path)], ["catdoc", str(path)]):
+        text = _run_command_capture_text(command)
+        if text:
+            return text, {"type": "doc", "reader": command[0]}
+    fallback = _extract_printable_chunks(path.read_bytes())
+    if fallback:
+        return fallback, {"type": "doc", "reader": "binary_strings"}
+    raise ValueError(f"Unable to read legacy DOC file: {path}")
+
+
+def _extract_xlsx_xml_text(path: Path) -> tuple[str, dict]:
+    with zipfile.ZipFile(path) as archive:
+        shared_strings = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            shared_strings = [node.text.strip() for node in root.findall(".//{*}t") if node.text and node.text.strip()]
+
+        sheet_paths = sorted(
+            item
+            for item in archive.namelist()
+            if item.startswith("xl/worksheets/") and item.endswith(".xml")
+        )
+
+        lines = []
+        for sheet_index, sheet_path in enumerate(sheet_paths, start=1):
+            lines.append(f"[Sheet {sheet_index}] {Path(sheet_path).name}")
+            root = ET.fromstring(archive.read(sheet_path))
+            for row in root.findall(".//{*}row")[:600]:
+                row_values = []
+                for cell in row.findall("{*}c"):
+                    cell_type = cell.attrib.get("t", "")
+                    text_value = ""
+                    if cell_type == "inlineStr":
+                        text_value = " ".join(
+                            item.text.strip()
+                            for item in cell.findall(".//{*}t")
+                            if item.text and item.text.strip()
+                        )
+                    else:
+                        value_node = cell.find("{*}v")
+                        if value_node is not None and value_node.text:
+                            if cell_type == "s":
+                                try:
+                                    idx = int(value_node.text)
+                                    text_value = shared_strings[idx] if 0 <= idx < len(shared_strings) else value_node.text
+                                except Exception:
+                                    text_value = value_node.text
+                            else:
+                                text_value = value_node.text
+                    cleaned = _clean_whitespace(text_value)
+                    if cleaned:
+                        row_values.append(cleaned)
+                if row_values:
+                    lines.append(", ".join(row_values))
+        text = "\n".join(lines).strip()
+        return text, {"type": "xlsx", "reader": "zipxml", "sheets": len(sheet_paths)}
+
+
+def _extract_xlsx_text(path: Path) -> tuple[str, dict]:
+    try:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(str(path), data_only=True, read_only=True)
+        lines = []
+        for sheet in workbook.worksheets:
+            lines.append(f"[Sheet] {sheet.title}")
+            for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                if row_index > 600:
+                    break
+                values = [_clean_whitespace(str(value)) for value in row if value is not None and _clean_whitespace(str(value))]
+                if values:
+                    lines.append(", ".join(values))
+        text = "\n".join(lines).strip()
+        return text, {"type": "xlsx", "reader": "openpyxl", "sheets": len(workbook.worksheets)}
+    except Exception:
+        return _extract_xlsx_xml_text(path)
+
+
+def _extract_xls_text(path: Path) -> tuple[str, dict]:
+    try:
+        import xlrd
+
+        workbook = xlrd.open_workbook(str(path))
+        lines = []
+        for sheet in workbook.sheets():
+            lines.append(f"[Sheet] {sheet.name}")
+            for row_index in range(min(sheet.nrows, 600)):
+                values = []
+                for col_index in range(sheet.ncols):
+                    value = _clean_whitespace(str(sheet.cell_value(row_index, col_index)))
+                    if value:
+                        values.append(value)
+                if values:
+                    lines.append(", ".join(values))
+        text = "\n".join(lines).strip()
+        return text, {"type": "xls", "reader": "xlrd", "sheets": workbook.nsheets}
+    except Exception:
+        text = _run_command_capture_text(["xls2csv", str(path)])
+        if text:
+            return text, {"type": "xls", "reader": "xls2csv"}
+        fallback = _extract_printable_chunks(path.read_bytes())
+        if fallback:
+            return fallback, {"type": "xls", "reader": "binary_strings"}
+        raise ValueError(f"Unable to read legacy XLS file: {path}")
+
+
+def _extract_pptx_xml_text(path: Path) -> tuple[str, dict]:
+    with zipfile.ZipFile(path) as archive:
+        slide_paths = sorted(
+            item
+            for item in archive.namelist()
+            if item.startswith("ppt/slides/slide") and item.endswith(".xml")
+        )
+        lines = []
+        for index, slide_path in enumerate(slide_paths, start=1):
+            root = ET.fromstring(archive.read(slide_path))
+            parts = [node.text.strip() for node in root.findall(".//{*}t") if node.text and node.text.strip()]
+            lines.append(f"[Slide {index}]")
+            if parts:
+                lines.append(" ".join(parts))
+        text = "\n".join(lines).strip()
+        return text, {"type": "pptx", "reader": "zipxml", "slides": len(slide_paths)}
+
+
+def _extract_pptx_text(path: Path) -> tuple[str, dict]:
+    try:
+        from pptx import Presentation
+
+        presentation = Presentation(str(path))
+        lines = []
+        for slide_index, slide in enumerate(presentation.slides, start=1):
+            parts = []
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False) and shape.text:
+                    cleaned = _clean_whitespace(shape.text)
+                    if cleaned:
+                        parts.append(cleaned)
+            lines.append(f"[Slide {slide_index}]")
+            if parts:
+                lines.append(" ".join(parts))
+        text = "\n".join(lines).strip()
+        return text, {"type": "pptx", "reader": "python-pptx", "slides": len(presentation.slides)}
+    except Exception:
+        return _extract_pptx_xml_text(path)
+
+
+def _extract_ppt_text(path: Path) -> tuple[str, dict]:
+    text = _run_command_capture_text(["catppt", str(path)])
+    if text:
+        return text, {"type": "ppt", "reader": "catppt"}
+    fallback = _extract_printable_chunks(path.read_bytes())
+    if fallback:
+        return fallback, {"type": "ppt", "reader": "binary_strings"}
+    raise ValueError(f"Unable to read legacy PPT file: {path}")
+
+
+def parse_document(path_str: str, *, ocr_images: bool = False, ocr_instruction: str | None = None) -> dict:
     path = Path(path_str)
+    if not path.exists() or not path.is_file():
+        raise ValueError(f"File not found for ingestion: {path}")
+
     suffix = path.suffix.lower()
     if suffix in {".txt", ".md", ".json", ".html", ".htm"}:
         text = path.read_text(encoding="utf-8", errors="ignore")
@@ -269,13 +483,55 @@ def parse_document(path_str: str) -> dict:
         doc = Document(str(path))
         text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
         return {"path": str(path), "text": text, "metadata": {"type": "docx", "paragraphs": len(doc.paragraphs)}}
+    if suffix == ".doc":
+        text, metadata = _extract_doc_text(path)
+        return {"path": str(path), "text": text, "metadata": metadata}
+    if suffix in {".xlsx", ".xlsm"}:
+        text, metadata = _extract_xlsx_text(path)
+        return {"path": str(path), "text": text, "metadata": metadata}
+    if suffix == ".xls":
+        text, metadata = _extract_xls_text(path)
+        return {"path": str(path), "text": text, "metadata": metadata}
+    if suffix in {".pptx", ".pptm"}:
+        text, metadata = _extract_pptx_text(path)
+        return {"path": str(path), "text": text, "metadata": metadata}
+    if suffix == ".ppt":
+        text, metadata = _extract_ppt_text(path)
+        return {"path": str(path), "text": text, "metadata": metadata}
+    if suffix in IMAGE_FILE_EXTENSIONS:
+        if not ocr_images:
+            raise ValueError(f"Image ingestion requires OCR mode for file: {path}")
+        result = openai_ocr_image(str(path), instruction=ocr_instruction)
+        return {
+            "path": str(path),
+            "text": result.get("text", ""),
+            "metadata": {"type": "image", "reader": "openai_ocr", "ocr_characters": len(result.get("text", "") or "")},
+        }
     raise ValueError(f"Unsupported document type for ingestion: {path}")
 
 
-def parse_documents(paths: list[str]) -> list[dict]:
+def parse_documents(
+    paths: list[str],
+    *,
+    continue_on_error: bool = False,
+    ocr_images: bool = False,
+    ocr_instruction: str | None = None,
+) -> list[dict]:
     documents = []
     for path in paths:
-        documents.append(parse_document(path))
+        try:
+            documents.append(parse_document(path, ocr_images=ocr_images, ocr_instruction=ocr_instruction))
+        except Exception as exc:
+            if not continue_on_error:
+                raise
+            resolved_path = Path(path)
+            documents.append(
+                {
+                    "path": str(resolved_path),
+                    "text": "",
+                    "metadata": {"type": resolved_path.suffix.lstrip(".") or "unknown", "error": str(exc)},
+                }
+            )
     return documents
 
 
