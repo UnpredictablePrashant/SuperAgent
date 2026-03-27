@@ -98,8 +98,60 @@ class AgentRuntime:
         ensure_a2a_state(state, filtered_cards)
         return state
 
+    _DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
+    _DEFAULT_MAX_SAME_AGENT_DISPATCHES = 5
+
     def _is_agent_available(self, state: dict, agent_name: str) -> bool:
+        if agent_name in (state.get("_circuit_broken_agents") or {}):
+            return False
         return agent_name in set(state.get("available_agents", []))
+
+    # ------------------------------------------------------------------
+    # Stuck-agent detection and circuit breaker
+    # ------------------------------------------------------------------
+
+    def _record_agent_failure(self, state: dict, agent_name: str, error_message: str) -> None:
+        failures = state.setdefault("_consecutive_failures", {})
+        record = failures.setdefault(agent_name, {"count": 0, "last_error": ""})
+        record["count"] += 1
+        record["last_error"] = str(error_message)[:500]
+        max_failures = int(state.get("max_consecutive_agent_failures", self._DEFAULT_MAX_CONSECUTIVE_FAILURES))
+        if record["count"] >= max_failures:
+            broken = state.setdefault("_circuit_broken_agents", {})
+            broken[agent_name] = {
+                "reason": f"Agent failed {record['count']} consecutive times. Last error: {record['last_error']}",
+                "failure_count": record["count"],
+            }
+            logger.warning(
+                "Circuit breaker tripped for %s after %d consecutive failures: %s",
+                agent_name, record["count"], record["last_error"],
+            )
+
+    def _clear_agent_failures(self, state: dict, agent_name: str) -> None:
+        failures = state.get("_consecutive_failures", {})
+        failures.pop(agent_name, None)
+
+    def _is_stuck_on_agent(self, state: dict, agent_name: str) -> bool:
+        history = state.get("agent_history", [])
+        max_same = int(state.get("max_same_agent_dispatches", self._DEFAULT_MAX_SAME_AGENT_DISPATCHES))
+        if len(history) < max_same:
+            return False
+        recent = history[-max_same:]
+        return all(entry.get("agent") == agent_name for entry in recent)
+
+    def _stuck_agent_message(self, state: dict, agent_name: str) -> str:
+        failures = (state.get("_consecutive_failures") or {}).get(agent_name, {})
+        broken = (state.get("_circuit_broken_agents") or {}).get(agent_name, {})
+        parts = [f"Agent '{agent_name}' appears stuck in a dispatch loop."]
+        if failures.get("last_error"):
+            parts.append(f"Last error: {failures['last_error']}")
+        if broken.get("reason"):
+            parts.append(f"Circuit breaker: {broken['reason']}")
+        parts.append(
+            "This is likely caused by a transient network or LLM provider issue. "
+            "Check your network connection and API keys, then retry."
+        )
+        return " ".join(parts)
 
     def _available_agent_descriptions(self, state: dict) -> dict[str, str]:
         available = set(state.get("available_agents", []))
@@ -891,6 +943,7 @@ class AgentRuntime:
             with agent_model_context(agent_name):
                 state = spec.handler(state)
             output_text = self._infer_agent_output(before_state, state)
+            self._clear_agent_failures(state, agent_name)
             if active_task.get("status") == "pending":
                 state = complete_task(state, active_task["task_id"], "completed")
             skip_review = bool(state.pop("_skip_review_once", False))
@@ -913,6 +966,7 @@ class AgentRuntime:
         except Exception as exc:
             error_message = str(exc)
             state["last_error"] = error_message
+            self._record_agent_failure(state, agent_name, error_message)
             state = complete_task(state, active_task["task_id"], "failed")
             state["review_pending"] = False
             state = append_message(state, make_message(agent_name, "orchestrator_agent", "error", error_message))
@@ -948,6 +1002,24 @@ class AgentRuntime:
                 or state.get("last_agent_output")
                 or "Reached the orchestration step limit without a better final answer."
             )
+            return state
+
+        # --- Circuit breaker: abort if any agent has been tripped ---
+        broken_agents = state.get("_circuit_broken_agents") or {}
+        if broken_agents:
+            last_agent = state.get("last_agent", "")
+            if last_agent in broken_agents:
+                state["next_agent"] = "__finish__"
+                state["final_output"] = self._stuck_agent_message(state, last_agent)
+                log_task_update("Orchestrator", f"Circuit breaker: aborting run due to {last_agent} failures.")
+                return state
+
+        # --- Stuck-agent detection: same agent dispatched N+ times in a row ---
+        last_agent = state.get("last_agent", "")
+        if last_agent and self._is_stuck_on_agent(state, last_agent):
+            state["next_agent"] = "__finish__"
+            state["final_output"] = self._stuck_agent_message(state, last_agent)
+            log_task_update("Orchestrator", f"Stuck-agent detection: {last_agent} dispatched too many times consecutively.")
             return state
 
         if bool(state.get("resume_blocked", False)):
@@ -1544,18 +1616,37 @@ Return ONLY valid JSON in this exact schema:
 }}
 """.strip()
 
-        with agent_model_context("orchestrator_agent"):
-            response = llm.invoke(prompt)
-        raw_output = response.content.strip() if hasattr(response, "content") else str(response).strip()
         try:
-            decision = self._parse_orchestrator_output(raw_output)
-        except Exception:
+            with agent_model_context("orchestrator_agent"):
+                response = llm.invoke(prompt)
+            raw_output = response.content.strip() if hasattr(response, "content") else str(response).strip()
+        except Exception as llm_exc:
+            logger.warning("Orchestrator LLM call failed: %s", llm_exc)
             decision = {
                 "agent": "finish",
-                "reason": "The orchestrator returned invalid JSON. Falling back to the current best result.",
+                "reason": f"Orchestrator LLM call failed ({type(llm_exc).__name__}: {llm_exc}). "
+                          "This is likely a network or API provider issue.",
                 "state_updates": {},
-                "final_response": state.get("draft_response") or state.get("last_agent_output") or "The orchestrator could not produce a valid routing decision.",
+                "final_response": (
+                    state.get("draft_response")
+                    or state.get("last_agent_output")
+                    or f"The orchestrator could not reach the LLM provider: {llm_exc}. "
+                       "Check your network connection and API keys, then retry."
+                ),
             }
+            state["last_error"] = f"orchestrator_llm_failed: {llm_exc}"
+            raw_output = None
+
+        if raw_output is not None:
+            try:
+                decision = self._parse_orchestrator_output(raw_output)
+            except Exception:
+                decision = {
+                    "agent": "finish",
+                    "reason": "The orchestrator returned invalid JSON. Falling back to the current best result.",
+                    "state_updates": {},
+                    "final_response": state.get("draft_response") or state.get("last_agent_output") or "The orchestrator could not produce a valid routing decision.",
+                }
 
         state_updates = decision.get("state_updates", {})
         if isinstance(state_updates, dict):

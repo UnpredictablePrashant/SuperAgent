@@ -252,8 +252,9 @@ def channel_gateway_agent(state):
         state["user_query"] = text
         state["current_objective"] = text
     state["gateway_message"] = normalized
-    summary = llm_text(
-        f"""You are a channel gateway agent.
+    try:
+        summary = llm_text(
+            f"""You are a channel gateway agent.
 
 Summarize this inbound channel message normalization result.
 Explain whether the message should activate the main workflow and why.
@@ -261,7 +262,13 @@ Explain whether the message should activate the main workflow and why.
 Payload:
 {json.dumps(normalized, indent=2, ensure_ascii=False)}
 """
-    )
+        )
+    except Exception as exc:
+        summary = (
+            f"Channel gateway normalization completed (LLM summary unavailable: {type(exc).__name__}). "
+            f"channel={normalized.get('channel')}, should_activate={normalized.get('should_activate')}, "
+            f"sender_id={normalized.get('sender_id', 'unknown')}."
+        )
     _write_outputs("channel_gateway_agent", call_number, summary, normalized)
     state["draft_response"] = summary
     return publish_agent_output(

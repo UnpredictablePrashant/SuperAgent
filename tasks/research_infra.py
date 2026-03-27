@@ -1,11 +1,13 @@
 import base64
 import csv
 import json
+import logging
 import mimetypes
 import os
 import re
 import shutil
 import subprocess
+import time
 import zipfile
 from pathlib import Path
 from urllib.parse import urlencode, urljoin, urlparse
@@ -13,6 +15,8 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 from tasks.utils import llm
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -54,9 +58,39 @@ def strip_code_fences(text: str) -> str:
     return stripped
 
 
-def llm_text(prompt: str) -> str:
-    response = llm.invoke(prompt)
-    return response.content.strip() if hasattr(response, "content") else str(response).strip()
+_LLM_MAX_RETRIES = int(os.getenv("SUPERAGENT_LLM_MAX_RETRIES", "3"))
+_LLM_BASE_DELAY = float(os.getenv("SUPERAGENT_LLM_BASE_DELAY", "2.0"))
+_LLM_MAX_DELAY = float(os.getenv("SUPERAGENT_LLM_MAX_DELAY", "30.0"))
+
+_TRANSIENT_ERROR_MARKERS = (
+    "timeout", "timed out", "connection", "connect", "reset by peer",
+    "temporarily unavailable", "rate limit", "429", "502", "503", "504",
+    "eof", "broken pipe", "network", "ssl", "handshake",
+)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _TRANSIENT_ERROR_MARKERS)
+
+
+def llm_text(prompt: str, *, max_retries: int = _LLM_MAX_RETRIES) -> str:
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = llm.invoke(prompt)
+            return response.content.strip() if hasattr(response, "content") else str(response).strip()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_retries or not _is_transient_error(exc):
+                raise
+            delay = min(_LLM_BASE_DELAY * (2 ** (attempt - 1)), _LLM_MAX_DELAY)
+            logger.warning(
+                "llm_text transient error (attempt %d/%d): %s — retrying in %.1fs",
+                attempt, max_retries, exc, delay,
+            )
+            time.sleep(delay)
+    raise last_exc  # unreachable but satisfies type checkers
 
 
 def llm_json(prompt: str, fallback):
