@@ -12,7 +12,7 @@ from tasks.privileged_control import (
     path_allowed,
     redact_sensitive_text,
 )
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, resolve_output_path, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_task_update, normalize_llm_text, resolve_output_path, write_text_file
 
 
 RESPONSES_API_URL = "https://api.openai.com/v1/responses"
@@ -165,7 +165,7 @@ def _parse_coding_response(raw_output: str) -> tuple[str, str, str]:
 
 
 def _strip_code_fences(code: str) -> str:
-    stripped = code.strip()
+    stripped = normalize_llm_text(code).strip()
     if stripped.startswith("```") and stripped.endswith("```"):
         inner = stripped.splitlines()
         if len(inner) >= 2:
@@ -174,7 +174,7 @@ def _strip_code_fences(code: str) -> str:
 
 
 def _strip_json_fences(text: str) -> str:
-    cleaned = (text or "").strip()
+    cleaned = normalize_llm_text(text).strip()
     if cleaned.startswith("```") and cleaned.endswith("```"):
         lines = cleaned.splitlines()
         if len(lines) >= 2:

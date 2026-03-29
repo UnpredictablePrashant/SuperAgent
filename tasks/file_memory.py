@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
-DEFAULT_WORKSPACE_DIR = os.getenv("SUPERAGENT_MEMORY_WORKSPACE", os.path.join("output", "workspace_memory"))
+DEFAULT_WORKSPACE_DIR = os.getenv("KENDR_MEMORY_WORKSPACE", os.path.join("output", "workspace_memory"))
 
 
 def _now_iso() -> str:
@@ -44,6 +44,13 @@ def _append(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(content)
+
+
+def _truncate(text: str, limit: int = 240) -> str:
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 3] + "..."
 
 
 def _session_scope(state: dict) -> str:
@@ -289,6 +296,19 @@ def append_session_event(state: dict, actor: str, event: str, detail: str = "") 
     ts = _now_iso()
     payload = f"\n## {ts} | {actor} | {event}\n{(detail or '').strip()}\n"
     _append(events_path, payload)
+    if isinstance(state, dict):
+        recent = state.get("recent_events", [])
+        if not isinstance(recent, list):
+            recent = []
+        recent.append(
+            {
+                "timestamp": ts,
+                "actor": str(actor),
+                "event": str(event),
+                "detail": _truncate(detail, 240),
+            }
+        )
+        state["recent_events"] = recent[-20:]
 
 
 def update_session_file(

@@ -7,6 +7,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
+from tasks.research_infra import parse_document
 from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
 
 
@@ -114,8 +115,8 @@ def _parse_sheet_rows(archive: zipfile.ZipFile, sheet_path: str, shared_strings:
 
 
 def _load_workbook_data(file_path: Path) -> dict:
-    if file_path.suffix.lower() != ".xlsx":
-        raise ValueError("excel_agent currently supports .xlsx files.")
+    if file_path.suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise ValueError("excel_agent currently supports .xlsx/.xlsm files.")
 
     with zipfile.ZipFile(file_path) as archive:
         shared_strings = _load_shared_strings(archive)
@@ -254,43 +255,201 @@ def excel_agent(state):
     state["excel_agent_calls"] = state.get("excel_agent_calls", 0) + 1
     call_number = state["excel_agent_calls"]
 
-    raw_path = state.get("excel_file_path") or state.get("excel_path")
-    if not raw_path:
-        raise ValueError("excel_agent requires 'excel_file_path' or 'excel_path' in state.")
-
-    file_path = Path(raw_path)
-    if not file_path.is_absolute():
-        file_path = Path(state.get("excel_working_directory", ".")).resolve() / file_path
-    if not file_path.exists():
-        raise FileNotFoundError(f"Excel file not found: {file_path}")
-
     objective = state.get("current_objective") or state.get("user_query", "")
     analysis_question = state.get("excel_question") or task_content or objective
     max_rows = int(state.get("excel_max_sample_rows", 5))
+    working_directory = state.get("excel_working_directory", ".")
 
-    log_task_update("Excel Agent", f"Analysis pass #{call_number} started.", str(file_path))
-    workbook_data = _load_workbook_data(file_path)
-    summarized_sheets = [_summarize_sheet(sheet, max_rows=max_rows) for sheet in workbook_data["sheets"]]
-    workbook_summary = {
-        "file_name": workbook_data["file_name"],
-        "file_path": workbook_data["file_path"],
-        "sheets": summarized_sheets,
-    }
+    primary_path = state.get("excel_file_path") or state.get("excel_path")
+    candidate_paths: list[str] = []
+    if primary_path:
+        candidate_paths.append(str(primary_path))
 
-    workbook_text = _render_workbook_summary(workbook_summary)
+    multi_paths = state.get("excel_file_paths") or state.get("excel_paths") or []
+    if isinstance(multi_paths, list):
+        candidate_paths.extend(str(item) for item in multi_paths if str(item).strip())
+
+    routed_paths = []
+    local_routes = state.get("local_drive_handler_routes", {})
+    if isinstance(local_routes, dict):
+        raw = local_routes.get("excel_agent", [])
+        if isinstance(raw, list):
+            routed_paths = [str(item) for item in raw if str(item).strip()]
+    candidate_paths.extend(routed_paths)
+
+    resolved_paths: list[Path] = []
+    seen: set[str] = set()
+    for raw in candidate_paths:
+        raw_value = str(raw or "").strip()
+        if not raw_value:
+            continue
+        file_path = Path(raw_value)
+        if not file_path.is_absolute():
+            file_path = Path(working_directory).resolve() / file_path
+        normalized = str(file_path.resolve())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        resolved_paths.append(file_path)
+
+    if not resolved_paths:
+        summary = (
+            "No spreadsheet files were routed to excel_agent. "
+            "Skipped Excel analysis and continued without blocking the workflow."
+        )
+        write_text_file(f"excel_agent_output_{call_number}.txt", summary)
+        state["excel_workbook_summary"] = {}
+        state["excel_workbook_summaries"] = []
+        state["excel_summary_text"] = ""
+        state["excel_analysis"] = summary
+        state["excel_skipped"] = True
+        state["excel_skip_reason"] = "no_excel_paths"
+        state["draft_response"] = summary
+        log_task_update("Excel Agent", f"Analysis pass #{call_number} skipped: no spreadsheet files detected.")
+        return publish_agent_output(
+            state,
+            "excel_agent",
+            summary,
+            f"excel_analysis_{call_number}",
+            recipients=["orchestrator_agent", "worker_agent", "reviewer_agent"],
+        )
+
+    log_task_update("Excel Agent", f"Analysis pass #{call_number} started.", "\n".join(str(path) for path in resolved_paths))
+    workbook_summaries = []
+    fallback_documents = []
+    skipped_files = []
+    for index, file_path in enumerate(resolved_paths, start=1):
+        log_task_update("Excel Agent", f"[{index}/{len(resolved_paths)}] Reading workbook.", str(file_path))
+        if not file_path.exists():
+            skipped_files.append({"path": str(file_path), "error": "file_not_found"})
+            log_task_update("Excel Agent", f"[{index}/{len(resolved_paths)}] Skipped workbook.", f"{file_path}\nreason: file_not_found")
+            continue
+        if file_path.suffix.lower() not in {".xlsx", ".xlsm"}:
+            skipped_files.append({"path": str(file_path), "error": "unsupported_extension"})
+            log_task_update(
+                "Excel Agent",
+                f"[{index}/{len(resolved_paths)}] Skipped workbook.",
+                f"{file_path}\nreason: unsupported_extension",
+            )
+            continue
+        try:
+            workbook_data = _load_workbook_data(file_path)
+            summarized_sheets = [_summarize_sheet(sheet, max_rows=max_rows) for sheet in workbook_data["sheets"]]
+            workbook_summaries.append(
+                {
+                    "file_name": workbook_data["file_name"],
+                    "file_path": workbook_data["file_path"],
+                    "sheets": summarized_sheets,
+                }
+            )
+            log_task_update("Excel Agent", f"[{index}/{len(resolved_paths)}] Parsed workbook.", str(file_path))
+        except Exception as exc:
+            try:
+                fallback_doc = parse_document(str(file_path))
+                fallback_text = str(fallback_doc.get("text", "") or "").strip()
+                if fallback_text:
+                    fallback_documents.append(
+                        {
+                            "file_name": file_path.name,
+                            "file_path": str(file_path),
+                            "text": fallback_text[:12000],
+                            "metadata": fallback_doc.get("metadata", {}),
+                            "source_error": str(exc),
+                        }
+                    )
+                    log_task_update(
+                        "Excel Agent",
+                        f"[{index}/{len(resolved_paths)}] Used fallback text extraction.",
+                        f"{file_path}\nreader: {fallback_doc.get('metadata', {}).get('reader', 'fallback')}",
+                    )
+                    continue
+            except Exception as fallback_exc:
+                skipped_files.append(
+                    {
+                        "path": str(file_path),
+                        "error": f"primary={exc}; fallback={fallback_exc}",
+                    }
+                )
+                log_task_update(
+                    "Excel Agent",
+                    f"[{index}/{len(resolved_paths)}] Skipped workbook.",
+                    f"{file_path}\nreason: primary={exc}; fallback={fallback_exc}",
+                )
+                continue
+
+            skipped_files.append({"path": str(file_path), "error": str(exc)})
+            log_task_update("Excel Agent", f"[{index}/{len(resolved_paths)}] Skipped workbook.", f"{file_path}\nreason: {exc}")
+
+    if not workbook_summaries and not fallback_documents:
+        summary = (
+            "No supported spreadsheet content could be parsed. "
+            "Skipped Excel analysis and continued without blocking the workflow."
+        )
+        if skipped_files:
+            summary = (
+                f"{summary}\n\nExcel file handling summary:\n"
+                f"- Attempted: {len(resolved_paths)}\n"
+                f"- Parsed: 0\n"
+                f"- Skipped: {len(skipped_files)}"
+            )
+        write_text_file(f"excel_agent_output_{call_number}.txt", summary)
+        state["excel_workbook_summary"] = {}
+        state["excel_workbook_summaries"] = []
+        state["excel_summary_text"] = ""
+        state["excel_analysis"] = summary
+        state["excel_skipped"] = True
+        state["excel_skip_reason"] = "no_parsed_workbooks"
+        state["excel_skipped_files"] = skipped_files
+        state["draft_response"] = summary
+        return publish_agent_output(
+            state,
+            "excel_agent",
+            summary,
+            f"excel_analysis_{call_number}",
+            recipients=["orchestrator_agent", "worker_agent", "reviewer_agent"],
+        )
+
+    workbook_text_blocks = []
+    for workbook_summary in workbook_summaries:
+        workbook_text_blocks.append(_render_workbook_summary(workbook_summary))
+    for fallback_item in fallback_documents:
+        workbook_text_blocks.append(
+            "\n".join(
+                [
+                    f"Excel fallback text source: {fallback_item['file_name']}",
+                    f"Path: {fallback_item['file_path']}",
+                    f"Fallback metadata: {json.dumps(fallback_item.get('metadata', {}), ensure_ascii=False)}",
+                    "Extracted text:",
+                    fallback_item["text"],
+                ]
+            )
+        )
+    workbook_text = "\n\n---\n\n".join(workbook_text_blocks)
     analysis_text = _interpret_summary_with_llm(objective, workbook_text, analysis_question)
+    if skipped_files:
+        analysis_text = (
+            f"{analysis_text}\n\nExcel file handling summary:\n"
+            f"- Attempted: {len(resolved_paths)}\n"
+            f"- Parsed: {len(workbook_summaries)}\n"
+            f"- Skipped: {len(skipped_files)}"
+        )
 
     raw_filename = f"excel_agent_raw_{call_number}.json"
     summary_filename = f"excel_agent_summary_{call_number}.txt"
     output_filename = f"excel_agent_output_{call_number}.txt"
 
-    write_text_file(raw_filename, json.dumps(workbook_summary, indent=2, ensure_ascii=False))
+    write_text_file(raw_filename, json.dumps(workbook_summaries, indent=2, ensure_ascii=False))
     write_text_file(summary_filename, workbook_text)
     write_text_file(output_filename, analysis_text)
 
-    state["excel_workbook_summary"] = workbook_summary
+    state["excel_workbook_summary"] = workbook_summaries[0] if workbook_summaries else {}
+    state["excel_workbook_summaries"] = workbook_summaries
+    state["excel_fallback_documents"] = fallback_documents
     state["excel_summary_text"] = workbook_text
     state["excel_analysis"] = analysis_text
+    state["excel_skipped"] = False
+    state["excel_skip_reason"] = ""
+    state["excel_skipped_files"] = skipped_files
     state["draft_response"] = analysis_text
 
     log_task_update(

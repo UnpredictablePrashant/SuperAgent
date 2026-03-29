@@ -20,12 +20,12 @@ def _ensure_env_file() -> tuple[bool, Path]:
         return False, env_path
     if example_path.exists():
         text = example_path.read_text(encoding="utf-8")
-        text = text.replace('SUPERAGENT_WORKING_DIR="C:/path/to/your/workdir"', f'SUPERAGENT_WORKING_DIR="{DEFAULT_WORKDIR.as_posix()}"')
+        text = text.replace('KENDR_WORKING_DIR="C:/path/to/your/workdir"', f'KENDR_WORKING_DIR="{DEFAULT_WORKDIR.as_posix()}"')
         text = text.replace('QDRANT_URL="http://qdrant:6333"', f'QDRANT_URL="{DEFAULT_QDRANT_URL}"')
         env_path.write_text(text, encoding="utf-8")
         return True, env_path
     env_path.write_text(
-        f'OPENAI_API_KEY=\nSUPERAGENT_WORKING_DIR="{DEFAULT_WORKDIR.as_posix()}"\nQDRANT_URL="{DEFAULT_QDRANT_URL}"\nSERP_API_KEY=\n',
+        f'OPENAI_API_KEY=\nKENDR_WORKING_DIR="{DEFAULT_WORKDIR.as_posix()}"\nQDRANT_URL="{DEFAULT_QDRANT_URL}"\nSERP_API_KEY=\n',
         encoding="utf-8",
     )
     return True, env_path

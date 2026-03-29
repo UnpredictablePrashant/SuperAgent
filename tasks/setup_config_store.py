@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
-from superagent.persistence import (
+from kendr.persistence import (
     delete_setup_config_value,
     get_setup_component,
     get_setup_config_value,
@@ -12,7 +12,7 @@ from superagent.persistence import (
     upsert_setup_component,
     upsert_setup_config_value,
 )
-from superagent.setup.catalog import setup_component_catalog
+from kendr.setup.catalog import setup_component_catalog
 
 
 def _utc_now() -> str:

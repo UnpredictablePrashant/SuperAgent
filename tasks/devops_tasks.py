@@ -13,7 +13,7 @@ from tasks.privileged_control import (
     build_privileged_policy,
     path_allowed,
 )
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_file_action, log_task_update, normalize_llm_text, write_text_file
 
 
 AGENT_METADATA = {
@@ -34,7 +34,7 @@ AGENT_METADATA = {
 
 
 def _strip_code_fences(text: str) -> str:
-    stripped = (text or "").strip()
+    stripped = normalize_llm_text(text).strip()
     if stripped.startswith("```") and stripped.endswith("```"):
         lines = stripped.splitlines()
         if len(lines) >= 2:
@@ -65,6 +65,7 @@ def _write_file(root: Path, relative_path: str, content: str, policy: dict) -> s
         raise PermissionError(f"Write blocked: {target} outside allowed scope.")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
+    log_file_action("wrote", str(target))
     return str(target)
 
 

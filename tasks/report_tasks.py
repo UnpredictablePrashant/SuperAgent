@@ -8,11 +8,11 @@ from io import BytesIO
 from pathlib import Path
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, resolve_output_path, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_task_update, normalize_llm_text, resolve_output_path, write_text_file
 
 
 def _strip_code_fences(text: str) -> str:
-    stripped = text.strip()
+    stripped = normalize_llm_text(text).strip()
     if stripped.startswith("```") and stripped.endswith("```"):
         lines = stripped.splitlines()
         if len(lines) >= 2:

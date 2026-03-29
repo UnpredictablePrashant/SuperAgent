@@ -7,8 +7,8 @@ cd "$ROOT_DIR"
 SCRIPT_DIR="$ROOT_DIR/.venv/bin"
 
 if [ -x ".venv/bin/python" ]; then
-  echo "[uninstall] uninstalling superagent-runtime from .venv"
-  .venv/bin/python -m pip uninstall -y superagent-runtime >/dev/null 2>&1 || true
+  echo "[uninstall] uninstalling kendr-runtime from .venv"
+  .venv/bin/python -m pip uninstall -y kendr-runtime >/dev/null 2>&1 || true
 else
   echo "[uninstall] .venv not found; skipping package uninstall"
 fi

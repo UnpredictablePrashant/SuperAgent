@@ -8,16 +8,16 @@ from pathlib import Path
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
-from superagent.http import normalize_channel, session_id_for_payload
-from superagent.orchestration import state_awaiting_user_input
-from superagent.persistence import (
+from kendr.http import normalize_channel, session_id_for_payload
+from kendr.orchestration import state_awaiting_user_input
+from kendr.persistence import (
     get_channel_session,
     initialize_db,
     insert_notification,
     insert_scheduled_job,
     upsert_channel_session,
 )
-from superagent.providers import get_slack_bot_token
+from kendr.providers import get_slack_bot_token
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.research_infra import html_to_text, llm_text
@@ -221,7 +221,7 @@ def channel_gateway_agent(state):
     payload = state.get("incoming_payload", {})
     if not isinstance(payload, dict):
         payload = {}
-    channel = _normalize_channel(state.get("incoming_channel") or payload.get("channel") or "webchat")
+    channel = normalize_channel(state.get("incoming_channel") or payload.get("channel") or "webchat")
     sender_id = str(state.get("incoming_sender_id") or payload.get("sender_id") or payload.get("from") or "")
     chat_id = str(state.get("incoming_chat_id") or payload.get("chat_id") or payload.get("thread_id") or sender_id)
     workspace_id = str(state.get("incoming_workspace_id") or payload.get("workspace_id") or "")
@@ -287,7 +287,7 @@ def session_router_agent(state):
     initialize_db()
 
     message = state.get("gateway_message", {})
-    channel = _normalize_channel(message.get("channel") or state.get("incoming_channel") or "webchat")
+    channel = normalize_channel(message.get("channel") or state.get("incoming_channel") or "webchat")
     sender_id = str(message.get("sender_id") or state.get("incoming_sender_id") or "")
     chat_id = str(message.get("chat_id") or state.get("incoming_chat_id") or sender_id)
     workspace_id = str(message.get("workspace_id") or state.get("incoming_workspace_id") or "")
@@ -326,6 +326,7 @@ def session_router_agent(state):
         "workspace_id": workspace_id,
         "is_group": is_group,
         "state": {
+            **previous_state,
             "last_text": message.get("text") or task_content or state.get("user_query", ""),
             "last_run_id": state.get("run_id", ""),
             "history": history,
@@ -519,7 +520,7 @@ def notification_dispatch_agent(state):
     call_number = state["notification_dispatch_calls"]
     initialize_db()
 
-    channel = _normalize_channel(state.get("notification_channel") or "console")
+    channel = normalize_channel(state.get("notification_channel") or "console")
     recipient = str(state.get("notification_recipient") or "")
     content = (
         state.get("notification_message")

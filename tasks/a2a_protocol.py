@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime
 
-from superagent.persistence import insert_artifact, insert_message, upsert_agent_card, upsert_task
+from kendr.persistence import insert_artifact, insert_message, upsert_agent_card, upsert_task
 
 
 def _utc_timestamp() -> str:

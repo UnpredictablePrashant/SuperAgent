@@ -6,7 +6,7 @@ from contextlib import redirect_stdout
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from superagent.cli import main
+from kendr.cli import main
 from tasks.setup_config_store import get_setup_component_snapshot, save_component_values
 
 

@@ -9,8 +9,8 @@ from datetime import UTC, datetime
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from superagent.persistence import initialize_db, insert_heartbeat_event, insert_monitor_event, upsert_monitor_rule
-from superagent.setup import build_setup_snapshot
+from kendr.persistence import initialize_db, insert_heartbeat_event, insert_monitor_event, upsert_monitor_rule
+from kendr.setup import build_setup_snapshot
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.file_memory import bootstrap_file_memory, run_memory_maintenance
@@ -95,7 +95,7 @@ def heartbeat_agent(state):
     state = bootstrap_file_memory(state)
     state["heartbeat_agent_calls"] = state.get("heartbeat_agent_calls", 0) + 1
     call_number = state["heartbeat_agent_calls"]
-    service_name = state.get("heartbeat_service_name") or "superagent-daemon"
+    service_name = state.get("heartbeat_service_name") or "kendr-daemon"
     snapshot = build_setup_snapshot(state.get("available_agent_cards", []))
     configured_services = [name for name, item in snapshot.get("services", {}).items() if item.get("configured")]
     disabled_agents = list((snapshot.get("disabled_agents") or {}).keys())[:10]

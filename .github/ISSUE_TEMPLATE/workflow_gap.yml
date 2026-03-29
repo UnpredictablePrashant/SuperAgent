@@ -1,5 +1,5 @@
 name: Workflow gap
-description: Suggest a targeted improvement to one of the recommended SuperAgent workflows.
+description: Suggest a targeted improvement to one of the recommended Kendr workflows.
 title: "[Workflow]: "
 labels:
   - enhancement

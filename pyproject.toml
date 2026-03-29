@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "superagent-runtime"
+name = "kendr-runtime"
 version = "0.1.0"
 description = "Plugin-driven multi-agent runtime and orchestration CLI"
 readme = "README.md"
@@ -13,6 +13,7 @@ dependencies = [
   "langchain",
   "langchain-openai",
   "openai",
+  "charset-normalizer>=3,<4",
   "python-dotenv",
   "beautifulsoup4",
   "pypdf",
@@ -31,11 +32,11 @@ dev = [
 ]
 
 [project.scripts]
-superagent = "superagent.cli:main"
+kendr = "kendr.cli:main"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["superagent", "tasks", "mcp_servers"]
+include = ["kendr*", "tasks*", "mcp_servers*", "plugin_templates*"]
 exclude = ["tests", "docs", "output", "logs"]

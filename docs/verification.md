@@ -38,7 +38,7 @@ python scripts/bootstrap_local_state.py
 
 Bootstrap creates local runtime folders and a usable `.env` with:
 
-- `SUPERAGENT_WORKING_DIR=output/workspace`
+- `KENDR_WORKING_DIR=output/workspace`
 - `QDRANT_URL=http://127.0.0.1:6333`
 
 Container services still override `QDRANT_URL` to `http://qdrant:6333` inside Docker Compose.

@@ -15,8 +15,8 @@ from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.coding_tasks import _extract_output_text
 from tasks.file_memory import bootstrap_file_memory, update_planning_file
 from tasks.planning_tasks import build_plan_approval_prompt, normalize_plan_data, plan_as_markdown
-from tasks.research_infra import llm_json, llm_text
-from tasks.utils import OUTPUT_DIR, log_task_update, model_selection_for_agent, write_text_file
+from tasks.research_infra import llm_json, llm_text, serp_search
+from tasks.utils import OUTPUT_DIR, log_task_update, model_selection_for_agent, write_text_file, resolve_output_path
 
 
 DEFAULT_DEEP_RESEARCH_MODEL = os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research")
@@ -117,6 +117,30 @@ def _artifact_file(run_dir: str, filename: str) -> str:
     return f"{run_dir.rstrip('/')}/{filename.lstrip('/')}"
 
 
+def _normalize_output_relative_path(path_value: str) -> str:
+    value = str(path_value or "").strip()
+    prefix = f"{OUTPUT_DIR}/"
+    if value.startswith(prefix):
+        return value[len(prefix):]
+    return value
+
+
+def _resolve_existing_output_path(path_value: str) -> str:
+    if not str(path_value or "").strip():
+        return ""
+    candidate = Path(str(path_value))
+    if candidate.is_absolute() and candidate.exists():
+        return str(candidate)
+    normalized = _normalize_output_relative_path(str(path_value))
+    resolved = resolve_output_path(normalized)
+    if Path(resolved).exists():
+        return resolved
+    resolved_fallback = resolve_output_path(str(path_value))
+    if Path(resolved_fallback).exists():
+        return resolved_fallback
+    return resolved
+
+
 def _source_label(url: str) -> str:
     parsed = urlparse(url)
     host = parsed.netloc or "source"
@@ -125,6 +149,240 @@ def _source_label(url: str) -> str:
         return host
     parts = [item for item in path.split("/") if item][:2]
     return f"{host}/{'/'.join(parts)}"
+
+
+def _collect_local_drive_evidence(state: dict, *, max_items: int = 25) -> list[dict]:
+    summaries = state.get("local_drive_document_summaries") or []
+    if not isinstance(summaries, list):
+        return []
+    entries = []
+    for item in summaries[:max_items]:
+        if not isinstance(item, dict):
+            continue
+        entries.append(
+            {
+                "source_type": "local_drive",
+                "path": str(item.get("path", "")).strip(),
+                "file_name": str(item.get("file_name", "")).strip(),
+                "type": str(item.get("type", "")).strip(),
+                "char_count": int(item.get("char_count", 0) or 0),
+                "summary": str(item.get("summary", "")).strip(),
+                "error": str(item.get("error", "")).strip(),
+            }
+        )
+    return entries
+
+
+def _collect_google_search_evidence(query: str, *, num: int = 10) -> dict:
+    try:
+        payload = serp_search(query, num=num)
+    except Exception as exc:
+        return {"results": [], "error": str(exc)}
+    results = []
+    for item in payload.get("organic_results", [])[:num]:
+        results.append(
+            {
+                "title": str(item.get("title", "")).strip(),
+                "url": str(item.get("link", "")).strip(),
+                "snippet": str(item.get("snippet", "")).strip(),
+                "source": str(item.get("source", "")).strip(),
+                "date": str(item.get("date", "")).strip(),
+            }
+        )
+    return {"results": results, "raw": payload, "error": ""}
+
+
+def _format_evidence_bank_markdown(
+    *,
+    objective: str,
+    local_entries: list[dict],
+    search_results: dict,
+    web_research_text: str,
+    web_sources: list[dict],
+    insufficiency_note: str,
+) -> str:
+    lines = ["# Evidence Bank", "", "## Objective", objective.strip(), ""]
+    if insufficiency_note:
+        lines.extend(["## Data Sufficiency Note", insufficiency_note.strip(), ""])
+    lines.append("## Local Drive Sources")
+    if local_entries:
+        for entry in local_entries:
+            label = entry.get("file_name") or entry.get("path") or "unknown"
+            lines.append(f"- File: {label}")
+            if entry.get("path"):
+                lines.append(f"  - Path: {entry['path']}")
+            if entry.get("type"):
+                lines.append(f"  - Type: {entry['type']}")
+            if entry.get("char_count"):
+                lines.append(f"  - Characters: {entry['char_count']}")
+            if entry.get("error"):
+                lines.append(f"  - Extraction error: {entry['error']}")
+            if entry.get("summary"):
+                lines.append(f"  - Summary: {entry['summary']}")
+    else:
+        lines.append("- No local-drive sources were found.")
+    lines.append("")
+
+    lines.append("## Web Search Results (Google via SerpAPI)")
+    results = search_results.get("results", []) if isinstance(search_results, dict) else []
+    if results:
+        for item in results:
+            title = item.get("title") or "Untitled"
+            url = item.get("url") or ""
+            snippet = item.get("snippet") or ""
+            lines.append(f"- {title}")
+            if url:
+                lines.append(f"  - URL: {url}")
+            if snippet:
+                lines.append(f"  - Snippet: {snippet}")
+    else:
+        error = ""
+        if isinstance(search_results, dict):
+            error = str(search_results.get("error", "")).strip()
+        if error:
+            lines.append(f"- Search unavailable: {error}")
+        else:
+            lines.append("- No search results were collected.")
+    lines.append("")
+
+    lines.append("## Web Research Notes")
+    lines.append(web_research_text.strip() or "No web research notes generated.")
+    lines.append("")
+    lines.append("## Web Research Source Ledger")
+    if web_sources:
+        for item in web_sources:
+            lines.append(f"- [{item['id']}] {item['label']} - {item['url']}")
+    else:
+        lines.append("- No web sources extracted.")
+    lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _write_absolute_text_file(path_value: str, content: str) -> None:
+    path = Path(path_value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _run_long_document_addendum(
+    state: dict,
+    *,
+    objective: str,
+    call_number: int,
+    artifact_dir: str,
+) -> dict:
+    compiled_path = _resolve_existing_output_path(state.get("long_document_compiled_path", ""))
+    if not compiled_path or not Path(compiled_path).exists():
+        summary = "Addendum requested but compiled document was not found. Skipping addendum."
+        state["draft_response"] = summary
+        state["_skip_review_once"] = True
+        return publish_agent_output(
+            state,
+            "long_document_agent",
+            summary,
+            f"long_document_addendum_{call_number}",
+            recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
+        )
+
+    attempts = int(state.get("long_document_addendum_attempts", 0) or 0) + 1
+    max_attempts = int(state.get("long_document_addendum_max_attempts", 1) or 1)
+    state["long_document_addendum_attempts"] = attempts
+    if attempts > max_attempts:
+        summary = f"Addendum requested but max attempts ({max_attempts}) reached. Skipping."
+        state["draft_response"] = summary
+        state["long_document_addendum_requested"] = False
+        state["long_document_addendum_completed"] = True
+        state["_skip_review_once"] = True
+        return publish_agent_output(
+            state,
+            "long_document_agent",
+            summary,
+            f"long_document_addendum_{call_number}",
+            recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
+        )
+
+    instructions = str(state.get("long_document_addendum_instructions") or objective).strip()
+    evidence_excerpt = (
+        str(state.get("long_document_evidence_bank_excerpt") or "").strip()
+        or _read_text_file(state.get("long_document_evidence_bank_path", ""), "")
+    )
+    compiled_excerpt = _trim_text(_read_text_file(compiled_path, 12000), 12000)
+    words_target = _safe_int(state.get("long_document_addendum_words"), 1200, 400, 5000)
+
+    log_task_update(
+        "Long Document",
+        f"Generating addendum (attempt {attempts + 1}) targeting ~{words_target} words.",
+    )
+
+    prompt = f"""
+You are drafting a focused addendum to a long-form financial advisory report.
+Use the reviewer feedback and evidence bank to add missing analysis without rewriting the full report.
+
+Primary objective:
+{objective}
+
+Reviewer feedback / required additions:
+{instructions}
+
+Evidence bank excerpt:
+{_trim_text(evidence_excerpt, 6000)}
+
+Excerpt from the existing report:
+{compiled_excerpt}
+
+Write an addendum of about {words_target} words that:
+- Directly addresses the missing market dynamics and geographic insights.
+- Cites gaps explicitly where data is unavailable.
+- Includes a short "Addendum Takeaways" list.
+"""
+    addendum_text = llm_text(prompt).strip()
+    if not addendum_text:
+        addendum_text = "Addendum could not be generated from the available evidence."
+    log_task_update(
+        "Long Document",
+        f"Addendum draft complete: {len(addendum_text.split())} words, {len(addendum_text)} chars.",
+    )
+
+    addendum_title = "## Addendum: Reviewer Follow-ups"
+    addendum_body = f"{addendum_title}\n\n{addendum_text}\n"
+    compiled_existing = _read_text_file(compiled_path, "")
+    compiled_new = f"{compiled_existing.rstrip()}\n\n{addendum_body}"
+    _write_absolute_text_file(compiled_path, compiled_new)
+
+    addendum_filename = _artifact_file(artifact_dir, f"long_document_addendum_{attempts}.md")
+    write_text_file(addendum_filename, addendum_body)
+
+    manifest_path = _resolve_existing_output_path(state.get("long_document_manifest_path", ""))
+    if manifest_path and Path(manifest_path).exists():
+        try:
+            manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+        if isinstance(manifest, dict):
+            manifest["addendum_file"] = f"{OUTPUT_DIR}/{addendum_filename}"
+            manifest["addendum_attempts"] = attempts
+            _write_absolute_text_file(manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False))
+
+    state["long_document_addendum_requested"] = False
+    state["long_document_addendum_completed"] = True
+    state["long_document_addendum_path"] = f"{OUTPUT_DIR}/{addendum_filename}"
+    state["_skip_review_once"] = True
+    if bool(state.get("long_document_addendum_force_no_review", True)):
+        state["skip_reviews"] = True
+    summary = (
+        "Addendum generated and appended to compiled report.\n"
+        f"- Compiled markdown: {compiled_path}\n"
+        f"- Addendum file: {OUTPUT_DIR}/{addendum_filename}\n"
+    )
+    state["draft_response"] = summary
+    log_task_update("Long Document", "Addendum appended to compiled report.", summary)
+    return publish_agent_output(
+        state,
+        "long_document_agent",
+        summary,
+        f"long_document_addendum_{call_number}",
+        recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
+    )
 
 
 def _normalize_url(raw: str) -> str:
@@ -660,6 +918,7 @@ def _format_section_prompt(
     coherence_context_md: str,
     source_ledger_md: str,
     research_text: str,
+    evidence_bank_md: str = "",
 ) -> str:
     continuity = "\n".join(f"- {item}" for item in continuity_notes[-8:]) or "- No prior continuity notes."
     key_questions = "\n".join(f"- {item}" for item in section.get("key_questions", [])) or "- None provided."
@@ -686,6 +945,9 @@ Markdown coherence anchors:
 
 Extracted source ledger for this section:
 {source_ledger_md}
+
+Pre-collected evidence bank (cross-section reference):
+{evidence_bank_md or "No evidence bank provided."}
 
 Write a section draft of about {words_target} words.
 Requirements:
@@ -792,7 +1054,96 @@ def long_document_agent(state):
         objective,
     )
 
+    client = OpenAI(api_key=api_key)
+    collect_sources_first = bool(state.get("long_document_collect_sources_first", True))
+
     artifact_dir = f"long_document_runs/long_document_run_{call_number}"
+
+    if bool(state.get("long_document_addendum_requested", False)):
+        return _run_long_document_addendum(
+            state,
+            objective=objective,
+            call_number=call_number,
+            artifact_dir=artifact_dir,
+        )
+
+    evidence_bank_md = ""
+    evidence_sources: list[dict] = []
+    evidence_excerpt = ""
+    if collect_sources_first:
+        if not state.get("long_document_sources_collected", False):
+            log_task_update("Long Document", "Collecting evidence bank before section planning.")
+            local_entries = _collect_local_drive_evidence(state)
+            insufficiency_note = ""
+            if state.get("local_drive_insufficient"):
+                insufficiency_note = (
+                    f"Only {state.get('local_drive_selected_file_count', 0)} local files were found. "
+                    "Proceeding with web research to fill gaps."
+                )
+            search_results = _collect_google_search_evidence(objective, num=int(state.get("long_document_search_results", 10) or 10))
+            evidence_instructions = str(
+                state.get(
+                    "long_document_evidence_instructions",
+                    (
+                        "Collect a comprehensive evidence bank with source-backed facts and benchmarks. "
+                        "Prefer primary sources, provide concrete numbers, and include URLs for every major claim. "
+                        "Focus on company facts, market size/growth, competitors, funding benchmarks, "
+                        "and relevant investor profile signals."
+                    ),
+                )
+            ).strip()
+            evidence_query_lines = [
+                f"Objective: {objective}",
+                "Local drive rollup summary:",
+                _trim_text(state.get('local_drive_rollup_summary', ''), 2000),
+                "Local drive file list:",
+                *[f"- {Path(entry.get('path') or entry.get('file_name') or '').name}" for entry in local_entries[:12]],
+                "Task: Build a source-backed evidence bank with URLs and cite them explicitly.",
+            ]
+            evidence_pass = _run_research_pass(
+                client,
+                query="\n".join([line for line in evidence_query_lines if line.strip()]),
+                model=research_model,
+                instructions=evidence_instructions,
+                max_tool_calls=max_tool_calls,
+                max_output_tokens=max_output_tokens_int,
+                poll_interval_seconds=poll_interval_seconds,
+                max_wait_seconds=max_wait_seconds,
+            )
+            web_research_text = str(evidence_pass.get("output_text", "")).strip()
+            evidence_sources = _extract_source_entries(evidence_pass, max_sources=60)
+            evidence_bank_md = _format_evidence_bank_markdown(
+                objective=objective,
+                local_entries=local_entries,
+                search_results=search_results,
+                web_research_text=web_research_text,
+                web_sources=evidence_sources,
+                insufficiency_note=insufficiency_note,
+            )
+            evidence_payload = {
+                "objective": objective,
+                "local_drive_entries": local_entries,
+                "search_results": search_results.get("results", []) if isinstance(search_results, dict) else [],
+                "search_error": search_results.get("error") if isinstance(search_results, dict) else "",
+                "web_research": evidence_pass,
+                "web_sources": evidence_sources,
+                "insufficiency_note": insufficiency_note,
+            }
+            evidence_md_filename = _artifact_file(artifact_dir, "evidence_bank.md")
+            evidence_json_filename = _artifact_file(artifact_dir, "evidence_bank.json")
+            write_text_file(evidence_md_filename, evidence_bank_md)
+            write_text_file(evidence_json_filename, json.dumps(evidence_payload, indent=2, ensure_ascii=False))
+            state["long_document_sources_collected"] = True
+            state["long_document_evidence_bank_path"] = f"{OUTPUT_DIR}/{evidence_md_filename}"
+            state["long_document_evidence_bank_json_path"] = f"{OUTPUT_DIR}/{evidence_json_filename}"
+            evidence_excerpt = _trim_text(evidence_bank_md, 18000)
+            state["long_document_evidence_bank_excerpt"] = evidence_excerpt
+            state["long_document_evidence_sources"] = evidence_sources
+        else:
+            evidence_bank_md = _read_text_file(state.get("long_document_evidence_bank_path", ""), "")
+            evidence_excerpt = state.get("long_document_evidence_bank_excerpt", "") or _trim_text(evidence_bank_md, 18000)
+            evidence_sources = state.get("long_document_evidence_sources", []) or []
+
     approved_outline = state.get("long_document_outline", {})
     if not isinstance(approved_outline, dict):
         approved_outline = {}
@@ -804,9 +1155,20 @@ def long_document_agent(state):
 
     if needs_outline_approval:
         outline_objective = objective
+        if evidence_excerpt:
+            outline_objective = (
+                f"{objective}\n\nEvidence bank highlights (pre-collected sources):\n"
+                f"{_trim_text(evidence_excerpt, 4000)}"
+            )
         feedback = str(state.get("long_document_plan_feedback", "") or "").strip()
         if feedback:
-            outline_objective = f"{objective}\n\nUser requested these section-plan changes:\n{feedback}"
+            outline_objective = (
+                f"{objective}\n\nUser requested these section-plan changes:\n{feedback}"
+            )
+            if evidence_excerpt:
+                outline_objective = (
+                    f"{outline_objective}\n\nEvidence bank highlights:\n{_trim_text(evidence_excerpt, 4000)}"
+                )
         outline = _build_outline(outline_objective, title=title, section_count=section_count, section_pages=section_pages)
         outline_md = _outline_markdown(outline, fallback_title=title)
         subplan_data = _long_document_subplan(outline, objective=objective, target_pages=target_pages, research_model=research_model)
@@ -871,7 +1233,6 @@ def long_document_agent(state):
         execution_note="Long-document subplan approved. Executing sections one by one.",
     )
 
-    client = OpenAI(api_key=api_key)
     continuity_notes: list[str] = []
     section_outputs: list[dict] = []
     coherence_context_md = _coherence_base_context(state, objective)
@@ -891,34 +1252,46 @@ def long_document_agent(state):
             f"Researching section {index}/{len(outline.get('sections', []))}: {section_title}",
         )
 
-        query_lines = [
-            f"Global objective: {objective}",
-            f"Section {index} title: {section_title}",
-            f"Section objective: {section_objective}",
-            "Key questions:",
-            *[f"- {item}" for item in section_questions[:12]],
-            "Continuity notes from previous sections:",
-            *[f"- {item}" for item in continuity_notes[-10:]],
-            "Markdown coherence anchors:",
-            _trim_text(coherence_context_md, 4000),
-        ]
-        research_pass = _run_research_pass(
-            client,
-            query="\n".join(query_lines),
-            model=research_model,
-            instructions=research_instructions,
-            max_tool_calls=max_tool_calls,
-            max_output_tokens=max_output_tokens_int,
-            poll_interval_seconds=poll_interval_seconds,
-            max_wait_seconds=max_wait_seconds,
-        )
+        if collect_sources_first and evidence_excerpt:
+            research_pass = {
+                "response_id": "evidence_bank",
+                "status": "evidence_bank",
+                "elapsed_seconds": 0,
+                "output_text": evidence_excerpt,
+                "raw": {"evidence_bank_path": state.get("long_document_evidence_bank_path", "")},
+            }
+            research_output = evidence_excerpt
+            section_sources = list(evidence_sources)
+            source_ledger_md = _source_ledger_markdown(section_sources)
+        else:
+            query_lines = [
+                f"Global objective: {objective}",
+                f"Section {index} title: {section_title}",
+                f"Section objective: {section_objective}",
+                "Key questions:",
+                *[f"- {item}" for item in section_questions[:12]],
+                "Continuity notes from previous sections:",
+                *[f"- {item}" for item in continuity_notes[-10:]],
+                "Markdown coherence anchors:",
+                _trim_text(coherence_context_md, 4000),
+            ]
+            research_pass = _run_research_pass(
+                client,
+                query="\n".join(query_lines),
+                model=research_model,
+                instructions=research_instructions,
+                max_tool_calls=max_tool_calls,
+                max_output_tokens=max_output_tokens_int,
+                poll_interval_seconds=poll_interval_seconds,
+                max_wait_seconds=max_wait_seconds,
+            )
 
-        research_output = str(research_pass.get("output_text", "")).strip()
-        if not research_output:
-            research_output = "Research output was empty. Use only explicitly supported claims and call out uncertainty."
+            research_output = str(research_pass.get("output_text", "")).strip()
+            if not research_output:
+                research_output = "Research output was empty. Use only explicitly supported claims and call out uncertainty."
 
-        section_sources = _extract_source_entries(research_pass)
-        source_ledger_md = _source_ledger_markdown(section_sources)
+            section_sources = _extract_source_entries(research_pass)
+            source_ledger_md = _source_ledger_markdown(section_sources)
 
         write_text_file(
             _artifact_file(artifact_dir, f"section_{index:02d}/research.json"),
@@ -937,22 +1310,43 @@ def long_document_agent(state):
             coherence_context_md=coherence_context_md,
             source_ledger_md=source_ledger_md,
             research_text=research_output,
+            evidence_bank_md=evidence_excerpt,
+        )
+        log_task_update(
+            "Long Document",
+            f"Drafting section {index}/{len(outline.get('sections', []))}: {section_title}",
         )
         section_text = llm_text(section_prompt).strip()
         if not section_text:
             section_text = f"{section_title}\n\nNo section text was generated."
+        section_word_count = len(section_text.split())
+        log_task_update(
+            "Long Document",
+            f"Draft complete for section {index}: {section_word_count} words, {len(section_text)} chars.",
+        )
         existing_tables = _extract_markdown_tables(section_text)
         existing_flowcharts = _extract_mermaid_blocks(section_text)
         generated_visuals: dict[str, Any] = {"tables": [], "flowcharts": [], "notes": ""}
         if not (existing_tables and existing_flowcharts):
+            log_task_update("Long Document", f"Generating visuals for section {index}.")
             generated_visuals = _generate_visual_assets(section_title, section_text, research_output)
+        else:
+            log_task_update("Long Document", f"Using visuals already embedded in section {index}.")
         visual_assets = _normalize_visual_assets(existing_tables, existing_flowcharts, generated_visuals)
         section_text = _append_generated_visuals(section_text, visual_assets)
         section_text = _append_verified_references(section_text, section_sources)
+        log_task_update(
+            "Long Document",
+            f"Section {index} visuals: {len(visual_assets.get('tables', []))} tables, {len(visual_assets.get('flowcharts', []))} flowcharts.",
+        )
 
         section_md_filename = _artifact_file(artifact_dir, f"section_{index:02d}/section.md")
         visual_assets_json_filename = _artifact_file(artifact_dir, f"section_{index:02d}/visual_assets.json")
         visual_assets_md_filename = _artifact_file(artifact_dir, f"section_{index:02d}/visual_assets.md")
+        log_task_update(
+            "Long Document",
+            f"Writing section {index} artifacts under {OUTPUT_DIR}/{_artifact_file(artifact_dir, f'section_{index:02d}')}",
+        )
         write_text_file(section_md_filename, section_text)
         write_text_file(visual_assets_json_filename, json.dumps(visual_assets, indent=2, ensure_ascii=False))
         write_text_file(visual_assets_md_filename, _render_visual_assets_md(visual_assets) + "\n")
@@ -968,6 +1362,10 @@ def long_document_agent(state):
         note = _section_continuity_note(section_title, section_text)
         continuity_notes.append(f"{section_title}:\n{note}")
         write_text_file(_artifact_file(artifact_dir, f"section_{index:02d}/continuity.txt"), note)
+        log_task_update(
+            "Long Document",
+            f"Continuity note saved for section {index}.",
+        )
         bridge_md = (
             f"# Section {index} Coherence Bridge\n\n"
             f"## Section\n{section_title}\n\n"
@@ -982,6 +1380,10 @@ def long_document_agent(state):
             + _trim_text(bridge_md, 2000)
         )
         write_text_file(_artifact_file(artifact_dir, "long_document_coherence_live.md"), coherence_context_md)
+        log_task_update(
+            "Long Document",
+            f"Section {index} coherence bridge updated.",
+        )
 
         section_outputs.append(
             {
@@ -1022,6 +1424,10 @@ def long_document_agent(state):
             ],
         }
         write_text_file(_artifact_file(artifact_dir, "long_document_progress.json"), json.dumps(progress_payload, indent=2, ensure_ascii=False))
+        log_task_update(
+            "Long Document",
+            f"Progress updated: {index}/{len(outline.get('sections', []))} sections completed.",
+        )
         state["draft_response"] = (
             f"Long document in progress: completed section {index}/{len(outline.get('sections', []))} "
             f"({section_title}). References extracted this section: {len(section_sources)}. "
@@ -1078,6 +1484,8 @@ Section continuity notes:
                 "references_json_file": f"{OUTPUT_DIR}/{references_json_filename}",
                 "visual_index_markdown_file": f"{OUTPUT_DIR}/{visual_index_md_filename}",
                 "visual_index_json_file": f"{OUTPUT_DIR}/{visual_index_json_filename}",
+                "evidence_bank_file": state.get("long_document_evidence_bank_path", ""),
+                "evidence_bank_json_file": state.get("long_document_evidence_bank_json_path", ""),
             },
             indent=2,
             ensure_ascii=False,
@@ -1095,6 +1503,7 @@ Section continuity notes:
         f"- Compiled markdown: {OUTPUT_DIR}/{compiled_filename}\n"
         f"- References: {OUTPUT_DIR}/{references_md_filename}\n"
         f"- Visual index: {OUTPUT_DIR}/{visual_index_md_filename}\n"
+        f"- Evidence bank: {state.get('long_document_evidence_bank_path', 'n/a')}\n"
         f"- Visual assets generated: {total_tables} tables, {total_flowcharts} flowcharts\n"
         f"- Manifest: {OUTPUT_DIR}/{manifest_filename}\n"
         "\nExecutive summary:\n"

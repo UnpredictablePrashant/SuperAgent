@@ -15,7 +15,7 @@ Start from `.env.example`.
 Required for the core runtime:
 
 - `OPENAI_API_KEY`
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 
 Recommended:
 
@@ -26,8 +26,8 @@ Recommended:
 - `QDRANT_URL`
 - `QDRANT_COLLECTION`
 - `RESEARCH_USER_AGENT`
-- `SUPERAGENT_HOME`
-- `SUPERAGENT_PLUGIN_PATHS`
+- `KENDR_HOME`
+- `KENDR_PLUGIN_PATHS`
 
 Workflow-specific or optional:
 
@@ -83,29 +83,29 @@ python3 scripts/bootstrap_local_state.py
 Inspect setup:
 
 ```bash
-superagent setup status
-superagent setup components
+kendr setup status
+kendr setup components
 ```
 
 Set values in the local setup store:
 
 ```bash
-superagent setup set core_runtime SUPERAGENT_WORKING_DIR /absolute/path/to/workdir
-superagent setup set openai OPENAI_API_KEY sk-...
-superagent setup set openai OPENAI_MODEL_GENERAL gpt-4.1-mini
+kendr setup set core_runtime KENDR_WORKING_DIR /absolute/path/to/workdir
+kendr setup set openai OPENAI_API_KEY sk-...
+kendr setup set openai OPENAI_MODEL_GENERAL gpt-4.1-mini
 ```
 
 Open the setup UI:
 
 ```bash
-superagent setup ui
+kendr setup ui
 ```
 
 Export stored values as dotenv lines:
 
 ```bash
-superagent setup export-env
-superagent setup export-env --include-secrets
+kendr setup export-env
+kendr setup export-env --include-secrets
 ```
 
 ## Running Locally
@@ -113,26 +113,26 @@ superagent setup export-env --include-secrets
 Basic run:
 
 ```bash
-superagent run --current-folder "Create a short research brief on OpenAI."
+kendr run --current-folder "Create a short research brief on OpenAI."
 ```
 
 Gateway:
 
 ```bash
-superagent gateway
+kendr gateway
 ```
 
 Daemon:
 
 ```bash
-superagent daemon
-superagent daemon --once
+kendr daemon
+kendr daemon --once
 ```
 
 Setup UI:
 
 ```bash
-superagent setup ui
+kendr setup ui
 ```
 
 ## Docker Stack
@@ -165,10 +165,10 @@ Docker is optional for local CLI use, but useful when you want the fuller Qdrant
 Basic command checks:
 
 ```bash
-superagent --help
-superagent agents list
-superagent plugins list
-superagent setup status
+kendr --help
+kendr agents list
+kendr plugins list
+kendr setup status
 ```
 
 Repository verification entrypoints:

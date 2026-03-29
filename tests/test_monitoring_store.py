@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from superagent.persistence import (
+from kendr.persistence import (
     initialize_db,
     insert_heartbeat_event,
     insert_monitor_event,
@@ -54,7 +54,7 @@ class MonitoringStoreTests(unittest.TestCase):
             insert_heartbeat_event(
                 {
                     "heartbeat_id": "hb_1",
-                    "service_name": "superagent-daemon",
+                    "service_name": "kendr-daemon",
                     "timestamp": "2026-03-18T00:10:00+00:00",
                     "status": "ok",
                     "message": "healthy",

@@ -17,7 +17,7 @@ COMPILE_TARGETS = [
     "app.py",
     "gateway_server.py",
     "setup_ui.py",
-    "superagent",
+    "kendr",
     "tasks",
     "mcp_servers",
     "tests",
@@ -203,11 +203,11 @@ def _run_docker(strict: bool) -> None:
             raise SystemExit(message)
         print(message)
         return
-    _run([docker, "build", "-t", "superagent-verify", "."], label="docker build")
+    _run([docker, "build", "-t", "kendr-verify", "."], label="docker build")
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="SuperAgent repository verification entrypoint.")
+    parser = argparse.ArgumentParser(description="Kendr repository verification entrypoint.")
     parser.add_argument(
         "phases",
         nargs="*",

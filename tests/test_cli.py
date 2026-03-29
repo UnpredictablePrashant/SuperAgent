@@ -4,13 +4,13 @@ import os
 import unittest
 import argparse
 from contextlib import redirect_stdout
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-import superagent.cli as cli
-from superagent.cli import main
+import kendr.cli as cli
+from kendr.cli import main
 
 
 class CliSmokeTests(unittest.TestCase):
@@ -109,9 +109,11 @@ class CliSmokeTests(unittest.TestCase):
                 cli._clear_transient_status_line()
 
         output = stderr.getvalue()
-        self.assertEqual(output.count("\n"), 1)
         self.assertIn("\r", output)
-        self.assertIn("[run] status=running active_agent=worker_agent steps=1", output)
+        self.assertIn("[run]\n", output)
+        self.assertIn("|- status: running", output)
+        self.assertIn("|- agent: worker_agent", output)
+        self.assertIn("`- step: 1", output)
 
     def test_emit_status_transient_uses_stdout_tty_fallback(self):
         class _FakeStderr(io.StringIO):
@@ -139,7 +141,8 @@ class CliSmokeTests(unittest.TestCase):
                 cli._clear_transient_status_line()
 
         rendered = cli._ANSI_ESCAPE_RE.sub("", stderr.getvalue())
-        self.assertIn("\r[run] waiting for completion... 17s elapsed", rendered)
+        self.assertIn("\r[run] |- waiting: 17s elapsed", rendered)
+        self.assertIn("still chewing through the task", rendered)
 
     def test_run_progress_message_includes_active_task_summary(self):
         message = cli._build_run_progress_message(
@@ -155,9 +158,10 @@ class CliSmokeTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("active_agent=local_drive_agent", message)
-        self.assertIn("steps=2", message)
-        self.assertIn("task=Scan local-drive documents and extract the funding signals", message)
+        self.assertIn("[run]\n", message)
+        self.assertIn("|- agent: local_drive_agent", message)
+        self.assertIn("|- step: 2", message)
+        self.assertIn("`- task: Scan local-drive documents and extract the funding signals", message)
 
     def test_run_progress_message_surfaces_pending_approval(self):
         message = cli._build_run_progress_message(
@@ -176,31 +180,56 @@ class CliSmokeTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("awaiting=plan_approval", message)
-        self.assertIn("scope=root_plan", message)
+        self.assertIn("|- awaiting: plan_approval @ root_plan", message)
+
+    def test_run_progress_message_includes_plan_overview(self):
+        message = cli._build_run_progress_message(
+            {
+                "status": "running",
+                "active_agent": "planner_agent",
+                "step_count": 3,
+                "summary_json": json.dumps(
+                    {
+                        "active_task": "Execute the next planned step with local_drive_agent.",
+                        "plan_steps": [
+                            {"id": "step-1", "title": "Ingest local files", "agent": "local_drive_agent"},
+                            {"id": "step-2", "title": "Analyze financials", "agent": "financial_mis_analysis_agent"},
+                            {"id": "step-3", "title": "Draft report", "agent": "report_agent"},
+                        ],
+                        "plan_step_index": 1,
+                        "plan_step_total": 3,
+                    }
+                ),
+            }
+        )
+
+        self.assertIn("|- major: 2/3", message)
+        self.assertIn("|- current: Analyze financials", message)
+        self.assertIn("|- done: Ingest local files", message)
+        self.assertIn("|- remaining: Draft report", message)
 
     def test_main_without_command_prints_help(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             exit_code = main([])
         self.assertEqual(exit_code, 0)
-        self.assertIn("usage: superagent", buffer.getvalue())
+        self.assertIn("usage: kendr", buffer.getvalue())
 
     def test_help_topic(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             exit_code = main(["help", "setup"])
         self.assertEqual(exit_code, 0)
-        self.assertIn("usage: superagent setup", buffer.getvalue())
+        self.assertIn("usage: kendr setup", buffer.getvalue())
 
     def test_status_json(self):
         with (
-            patch("superagent.cli._gateway_ready", return_value=True),
-            patch("superagent.cli._listener_pids_for_port", return_value=[1234]),
-            patch("superagent.cli._configured_working_dir", return_value="/tmp/work"),
-            patch("superagent.cli._resolve_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._gateway_ready", return_value=True),
+            patch("kendr.cli._listener_pids_for_port", return_value=[1234]),
+            patch("kendr.cli._configured_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._resolve_working_dir", return_value="/tmp/work"),
             patch(
-                "superagent.cli.setup_overview",
+                "kendr.cli.setup_overview",
                 return_value={
                     "components": [
                         {"enabled": True, "filled_fields": 2, "total_fields": 2},
@@ -246,27 +275,27 @@ class CliSmokeTests(unittest.TestCase):
 
     def test_workdir_set_and_clear(self):
         with (
-            patch("superagent.cli.save_component_values") as save_values,
-            patch("superagent.cli._resolve_working_dir", return_value="/tmp/superagent-workdir"),
+            patch("kendr.cli.save_component_values") as save_values,
+            patch("kendr.cli._resolve_working_dir", return_value="/tmp/kendr-workdir"),
         ):
             buffer = io.StringIO()
             with redirect_stdout(buffer):
                 exit_code = main(["workdir", "set", "rumki"])
             self.assertEqual(exit_code, 0)
             self.assertIn("Working directory set to", buffer.getvalue())
-            save_values.assert_called_with("core_runtime", {"SUPERAGENT_WORKING_DIR": "/tmp/superagent-workdir"})
+            save_values.assert_called_with("core_runtime", {"KENDR_WORKING_DIR": "/tmp/kendr-workdir"})
 
             buffer = io.StringIO()
             with redirect_stdout(buffer):
                 exit_code = main(["workdir", "clear"])
             self.assertEqual(exit_code, 0)
-            self.assertIn("Cleared SUPERAGENT_WORKING_DIR", buffer.getvalue())
-            self.assertEqual(save_values.call_args_list[-1].args, ("core_runtime", {"SUPERAGENT_WORKING_DIR": ""}))
+            self.assertIn("Cleared KENDR_WORKING_DIR", buffer.getvalue())
+            self.assertEqual(save_values.call_args_list[-1].args, ("core_runtime", {"KENDR_WORKING_DIR": ""}))
 
     def test_gateway_restart(self):
         with (
-            patch("superagent.cli._terminate_gateway_on_port", return_value=1),
-            patch("superagent.cli._start_gateway_process") as start_gateway,
+            patch("kendr.cli._terminate_gateway_on_port", return_value=1),
+            patch("kendr.cli._start_gateway_process") as start_gateway,
         ):
             buffer = io.StringIO()
             with redirect_stdout(buffer):
@@ -275,12 +304,43 @@ class CliSmokeTests(unittest.TestCase):
             self.assertIn("Gateway restarted", buffer.getvalue())
             start_gateway.assert_called_once()
 
+    def test_start_gateway_process_cleans_stale_listener_before_launch(self):
+        fake_process = Mock()
+        fake_process.poll.return_value = None
+        with (
+            patch("kendr.cli._gateway_ready", side_effect=[False, False, True, True]),
+            patch("kendr.cli._listener_pids_for_port", side_effect=[[4321], []]),
+            patch("kendr.cli._terminate_gateway_on_port", return_value=1) as terminate_gateway,
+            patch("kendr.cli._wait_for_listener_shutdown", return_value=True) as wait_shutdown,
+            patch("kendr.cli.subprocess.Popen", return_value=fake_process) as popen,
+        ):
+            cli._start_gateway_process()
+
+        terminate_gateway.assert_called_once()
+        wait_shutdown.assert_called_once()
+        popen.assert_called_once()
+
+    def test_start_gateway_process_failure_points_to_background_start_and_log(self):
+        fake_process = Mock()
+        fake_process.poll.return_value = 3
+        with (
+            patch("kendr.cli._gateway_ready", return_value=False),
+            patch("kendr.cli._listener_pids_for_port", return_value=[]),
+            patch("kendr.cli.subprocess.Popen", return_value=fake_process),
+        ):
+            with self.assertRaises(SystemExit) as exc:
+                cli._start_gateway_process()
+
+        message = str(exc.exception)
+        self.assertIn("kendr gateway start", message)
+        self.assertIn("gateway.log", message)
+
     def test_run_superrag_chat_requires_session(self):
         with (
-            patch("superagent.cli._configured_working_dir", return_value="/tmp/work"),
-            patch("superagent.cli._resolve_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._configured_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._resolve_working_dir", return_value="/tmp/work"),
             patch(
-                "superagent.cli._workflow_setup_snapshot",
+                "kendr.cli._workflow_setup_snapshot",
                 return_value={"available_agents": ["superrag_agent"], "agents": {"superrag_agent": {"missing_services": []}}},
             ),
         ):
@@ -291,8 +351,8 @@ class CliSmokeTests(unittest.TestCase):
 
     def test_run_os_command_requires_explicit_privileged_approval(self):
         with (
-            patch("superagent.cli._configured_working_dir", return_value="/tmp/work"),
-            patch("superagent.cli._resolve_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._configured_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._resolve_working_dir", return_value="/tmp/work"),
         ):
             with self.assertRaises(SystemExit) as exc:
                 main(["run", "--os-command", "Get-Location", "Show the working directory"])
@@ -301,8 +361,8 @@ class CliSmokeTests(unittest.TestCase):
 
     def test_setup_oauth_no_browser_outputs_url(self):
         with (
-            patch("superagent.cli._setup_ui_ready", return_value=True),
-            patch("superagent.cli._oauth_missing_env", return_value=[]),
+            patch("kendr.cli._setup_ui_ready", return_value=True),
+            patch("kendr.cli._oauth_missing_env", return_value=[]),
         ):
             buffer = io.StringIO()
             with redirect_stdout(buffer):
@@ -332,12 +392,12 @@ class CliSmokeTests(unittest.TestCase):
             return _FakeResponse(json.dumps({"run_id": "run_test", "final_output": "ok", "last_agent": "local_drive_agent"}))
 
         with (
-            patch("superagent.cli._gateway_ready", return_value=True),
-            patch("superagent.cli._configured_working_dir", return_value="/tmp/work"),
-            patch("superagent.cli._resolve_working_dir", return_value="/tmp/work"),
-            patch("superagent.cli._http_json_get", return_value=[]),
-            patch("superagent.cli._validate_run_workflows", return_value={}),
-            patch("superagent.cli.urllib.request.urlopen", side_effect=_fake_urlopen),
+            patch("kendr.cli._gateway_ready", return_value=True),
+            patch("kendr.cli._configured_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._resolve_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._http_json_get", return_value=[]),
+            patch("kendr.cli._validate_run_workflows", return_value={}),
+            patch("kendr.cli.urllib.request.urlopen", side_effect=_fake_urlopen),
         ):
             buffer = io.StringIO()
             with redirect_stdout(buffer):
@@ -380,15 +440,15 @@ class CliSmokeTests(unittest.TestCase):
             return _FakeResponse(json.dumps({"run_id": "run_code", "final_output": "ok", "last_agent": "coding_agent"}))
 
         with (
-            patch("superagent.cli._gateway_ready", return_value=True),
-            patch("superagent.cli._configured_working_dir", return_value="/tmp/work"),
-            patch("superagent.cli._resolve_working_dir", return_value="/tmp/work"),
-            patch("superagent.cli._http_json_get", return_value=[]),
+            patch("kendr.cli._gateway_ready", return_value=True),
+            patch("kendr.cli._configured_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._resolve_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._http_json_get", return_value=[]),
             patch(
-                "superagent.cli._workflow_setup_snapshot",
+                "kendr.cli._workflow_setup_snapshot",
                 return_value={"available_agents": ["coding_agent", "master_coding_agent", "deep_research_agent"], "agents": {}},
             ),
-            patch("superagent.cli.urllib.request.urlopen", side_effect=_fake_urlopen),
+            patch("kendr.cli.urllib.request.urlopen", side_effect=_fake_urlopen),
         ):
             buffer = io.StringIO()
             with redirect_stdout(buffer):
@@ -469,13 +529,13 @@ class CliSmokeTests(unittest.TestCase):
                 return True
 
         with (
-            patch("superagent.cli._gateway_ready", return_value=True),
-            patch("superagent.cli._configured_working_dir", return_value="/tmp/work"),
-            patch("superagent.cli._resolve_working_dir", return_value="/tmp/work"),
-            patch("superagent.cli._http_json_get", return_value=[]),
-            patch("superagent.cli._load_cli_session", return_value={}),
-            patch("superagent.cli._save_cli_session"),
-            patch("superagent.cli.urllib.request.urlopen", side_effect=_fake_urlopen),
+            patch("kendr.cli._gateway_ready", return_value=True),
+            patch("kendr.cli._configured_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._resolve_working_dir", return_value="/tmp/work"),
+            patch("kendr.cli._http_json_get", return_value=[]),
+            patch("kendr.cli._load_cli_session", return_value={}),
+            patch("kendr.cli._save_cli_session"),
+            patch("kendr.cli.urllib.request.urlopen", side_effect=_fake_urlopen),
             patch("builtins.input", side_effect=["Last 3 fiscal years plus TTM"]),
             patch.object(cli.sys, "stdin", _FakeStdin()),
         ):
@@ -504,7 +564,7 @@ class CliSmokeTests(unittest.TestCase):
         candidate = self._resume_candidate()
         buffer = io.StringIO()
         with (
-            patch("superagent.cli.discover_resume_candidates", return_value=[candidate]),
+            patch("kendr.cli.discover_resume_candidates", return_value=[candidate]),
             redirect_stdout(buffer),
         ):
             exit_code = main(["resume", "--inspect", "--json", "/tmp/work"])
@@ -533,8 +593,8 @@ class CliSmokeTests(unittest.TestCase):
 
         buffer = io.StringIO()
         with (
-            patch("superagent.cli.discover_resume_candidates", return_value=[candidate]),
-            patch("superagent.AgentRuntime", _FakeRuntime),
+            patch("kendr.cli.discover_resume_candidates", return_value=[candidate]),
+            patch("kendr.AgentRuntime", _FakeRuntime),
             redirect_stdout(buffer),
         ):
             exit_code = main(["resume", "--json", "/tmp/work"])
@@ -553,7 +613,7 @@ class CliSmokeTests(unittest.TestCase):
 
         buffer = io.StringIO()
         with (
-            patch("superagent.cli.discover_resume_candidates", return_value=[candidate]),
+            patch("kendr.cli.discover_resume_candidates", return_value=[candidate]),
             patch.object(cli.sys, "stdin", _FakeStdin()),
             redirect_stdout(buffer),
         ):

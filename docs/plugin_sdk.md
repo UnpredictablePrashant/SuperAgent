@@ -1,6 +1,6 @@
 # Plugin SDK
 
-SuperAgent supports external plugins as simple Python modules discovered from plugin search paths.
+Kendr supports external plugins as simple Python modules discovered from plugin search paths.
 
 This page defines the versioned contract for external contributors.
 
@@ -12,13 +12,13 @@ Stable SDK surface in `1.0`:
 - `register(registry)` as the default plugin entry point
 - plugin manifest metadata via `PLUGIN`
 - registration through:
-  - `superagent.types.AgentDefinition`
-  - `superagent.types.ProviderDefinition`
-  - `superagent.types.ChannelDefinition`
-  - `superagent.types.PluginManifest`
+  - `kendr.types.AgentDefinition`
+  - `kendr.types.ProviderDefinition`
+  - `kendr.types.ChannelDefinition`
+  - `kendr.types.PluginManifest`
 - runtime registry visibility through:
-  - `superagent plugins list`
-  - `superagent agents list`
+  - `kendr plugins list`
+  - `kendr agents list`
   - `GET /registry/plugins`
   - `GET /registry/agents`
 
@@ -34,11 +34,11 @@ If you build against the stable SDK surface only, your plugin should keep workin
 
 ## Search Paths
 
-SuperAgent discovers external plugins from:
+Kendr discovers external plugins from:
 
 - `./plugins`
-- `~/.superagent/plugins`
-- any path listed in `SUPERAGENT_PLUGIN_PATHS`
+- `~/.kendr/plugins`
+- any path listed in `KENDR_PLUGIN_PATHS`
 
 Current stable discovery model:
 
@@ -60,17 +60,17 @@ Use these in your manifest so contributors and operators can see what your plugi
 
 You can declare `PLUGIN` as either:
 
-- a `superagent.types.PluginManifest`
+- a `kendr.types.PluginManifest`
 - a plain `dict`
 
 Recommended fields:
 
 ```python
-from superagent.types import PluginManifest
+from kendr.types import PluginManifest
 
 PLUGIN = PluginManifest(
     name="acme.example",
-    description="Example SuperAgent plugin.",
+    description="Example Kendr plugin.",
     version="0.1.0",
     sdk_version="1.0",
     runtime_api="registry-v1",
@@ -87,7 +87,7 @@ Manifest expectations:
 
 - `name`: globally unique plugin id
 - `version`: plugin version
-- `sdk_version`: SuperAgent SDK contract version
+- `sdk_version`: Kendr SDK contract version
 - `runtime_api`: registry/runtime contract family
 - `entry_point`: callable invoked with `registry`
 - `capabilities`: high-level plugin shapes such as `agent`, `provider`, `channel`
@@ -150,7 +150,7 @@ For contributors:
 
 - pin to `sdk_version="1.0"` and `runtime_api="registry-v1"`
 - avoid importing from `tasks.*` unless you are intentionally coupling to repo internals
-- treat `superagent.discovery`, `superagent.runtime`, and setup internals as implementation detail
+- treat `kendr.discovery`, `kendr.runtime`, and setup internals as implementation detail
 - expose your own compatibility note in `metadata["compatible_core"]`
 
 For maintainers:
@@ -164,17 +164,17 @@ For maintainers:
 Recommended plugin test loop:
 
 1. place the plugin under a temporary folder
-2. point `SUPERAGENT_PLUGIN_PATHS` at that folder
-3. call `superagent.discovery.build_registry()`
+2. point `KENDR_PLUGIN_PATHS` at that folder
+3. call `kendr.discovery.build_registry()`
 4. assert your plugin, agents, providers, or channels were registered
 
 Minimal example:
 
 ```python
 import os
-from superagent.discovery import build_registry
+from kendr.discovery import build_registry
 
-os.environ["SUPERAGENT_PLUGIN_PATHS"] = "/path/to/my/plugins"
+os.environ["KENDR_PLUGIN_PATHS"] = "/path/to/my/plugins"
 registry = build_registry()
 
 assert "acme.example" in registry.plugins
@@ -184,8 +184,8 @@ assert "my_agent" in registry.agents
 You can also validate the discovery surface from the CLI:
 
 ```bash
-superagent plugins list --json
-superagent agents list --plugin acme.example --json
+kendr plugins list --json
+kendr agents list --plugin acme.example --json
 ```
 
 ## What A Safe Plugin Should Avoid

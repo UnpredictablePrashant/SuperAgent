@@ -1,6 +1,6 @@
 # LLM Feature Delivery Guide
 
-This guide defines the architecture and delivery rules that GPT or any other LLM must follow when adding a new feature to SuperAgent.
+This guide defines the architecture and delivery rules that GPT or any other LLM must follow when adding a new feature to Kendr.
 
 The purpose of this guide is to stop feature drift, prevent undocumented changes, and ensure new work is embedded properly into the product.
 
@@ -72,7 +72,7 @@ If the feature is an agent:
 
 If the feature is a provider or channel:
 
-- register it in `superagent/discovery.py`
+- register it in `kendr/discovery.py`
 - document how the runtime knows it is available
 
 ### 4. Setup Awareness
@@ -217,7 +217,7 @@ A feature is complete only if:
 ## Copy-Paste Prompt For Any New Feature
 
 ```text
-You are implementing a new feature in the SuperAgent repository.
+You are implementing a new feature in the Kendr repository.
 
 Follow the repository's LLM Feature Delivery Guide exactly.
 
@@ -258,7 +258,7 @@ Deliverables:
 ## Copy-Paste Prompt For Reviewing A Proposed Feature Before Coding
 
 ```text
-Review this proposed SuperAgent feature before implementation.
+Review this proposed Kendr feature before implementation.
 
 Your job:
 1. Validate whether the feature fits the current product thesis.

@@ -45,7 +45,7 @@ def authorization_process_text(target_hint: str = "") -> str:
         "3. Record authorization evidence (ticket ID, contract ID, or signed approval reference).\n"
         "4. Run with explicit CLI authorization fields before scanning.\n"
         "CLI example:\n"
-        "superagent run --security-authorized --security-target-url https://example.com --security-authorization-note 'Ticket SEC-123 approved by owner' 'perform defensive security assessment'"
+        "kendr run --security-authorized --security-target-url https://example.com --security-authorization-note 'Ticket SEC-123 approved by owner' 'perform defensive security assessment'"
     )
 
 

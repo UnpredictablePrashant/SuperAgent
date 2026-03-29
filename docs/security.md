@@ -1,6 +1,6 @@
 # Security
 
-SuperAgent should be treated as a governed intelligence workspace, not as unrestricted automation.
+Kendr should be treated as a governed intelligence workspace, not as unrestricted automation.
 
 ## Product Security Posture
 
@@ -52,7 +52,7 @@ Before running security assessment workflows:
 Example:
 
 ```bash
-superagent run \
+kendr run \
   --security-authorized \
   --security-target-url https://example.com \
   --security-authorization-note "SEC-123 approved by security owner" \

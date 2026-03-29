@@ -4,7 +4,7 @@ import unittest
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from superagent.discovery import build_registry
+from kendr.discovery import build_registry
 
 
 class RegistryDiscoveryTests(unittest.TestCase):

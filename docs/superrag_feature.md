@@ -2,7 +2,7 @@
 
 Status: Stable core workflow.
 
-`superrag_agent` is one of SuperAgent's primary product workflows. It provides a session-based RAG pipeline that can ingest mixed sources and then serve chat retrieval over that indexed knowledge.
+`superrag_agent` is one of Kendr's primary product workflows. It provides a session-based RAG pipeline that can ingest mixed sources and then serve chat retrieval over that indexed knowledge.
 
 ## Supported Sources
 
@@ -24,7 +24,7 @@ Status: Stable core workflow.
 Build a new session from local files + URLs:
 
 ```bash
-superagent run "build my superRAG knowledge base" \
+kendr run "build my superRAG knowledge base" \
   --superrag-mode build \
   --superrag-new-session \
   --superrag-session-title "finance-kb" \
@@ -35,7 +35,7 @@ superagent run "build my superRAG knowledge base" \
 Build from database URL and store schema knowledge:
 
 ```bash
-superagent run "index db" \
+kendr run "index db" \
   --superrag-mode build \
   --superrag-session finance_db \
   --superrag-db-url "postgresql://user:pass@host:5432/dbname" \
@@ -45,7 +45,7 @@ superagent run "index db" \
 Chat with an existing session:
 
 ```bash
-superagent run "ask rag" \
+kendr run "ask rag" \
   --superrag-mode chat \
   --superrag-session finance_db \
   --superrag-chat "What are the top revenue drivers in the indexed data?"
@@ -54,7 +54,7 @@ superagent run "ask rag" \
 Switch sessions:
 
 ```bash
-superagent run "switch rag session" \
+kendr run "switch rag session" \
   --superrag-mode switch \
   --superrag-session finance_db
 ```
@@ -62,7 +62,7 @@ superagent run "switch rag session" \
 List sessions:
 
 ```bash
-superagent run "list rag sessions" --superrag-mode list
+kendr run "list rag sessions" --superrag-mode list
 ```
 
 ## Gateway Payload Keys

@@ -1,4 +1,4 @@
-from superagent.setup_ui import main
+from kendr.setup_ui import main
 
 
 if __name__ == "__main__":

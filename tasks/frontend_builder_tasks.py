@@ -13,7 +13,7 @@ from tasks.privileged_control import (
     build_privileged_policy,
     path_allowed,
 )
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_file_action, log_task_update, normalize_llm_text, write_text_file
 
 
 AGENT_METADATA = {
@@ -34,7 +34,7 @@ AGENT_METADATA = {
 
 
 def _strip_code_fences(text: str) -> str:
-    stripped = (text or "").strip()
+    stripped = normalize_llm_text(text).strip()
     if stripped.startswith("```") and stripped.endswith("```"):
         lines = stripped.splitlines()
         if len(lines) >= 2:
@@ -59,13 +59,20 @@ Use modern patterns, proper TypeScript types, and clean component structure.
     return _strip_code_fences(raw).strip() + "\n"
 
 
-def _write_file(root: Path, relative_path: str, content: str, policy: dict) -> str:
+def _write_file(root: Path, relative_path: str, content: str, policy: dict, *, overwrite: bool = True) -> tuple[str, bool]:
     target = root / relative_path
     if not path_allowed(str(target), policy.get("allowed_paths", [])):
         raise PermissionError(f"Write blocked: {target} outside allowed scope.")
     target.parent.mkdir(parents=True, exist_ok=True)
+    if not overwrite and target.exists():
+        try:
+            if target.read_text(encoding="utf-8").strip():
+                return str(target), False
+        except Exception:
+            return str(target), False
     target.write_text(content, encoding="utf-8")
-    return str(target)
+    log_file_action("wrote", str(target))
+    return str(target), True
 
 
 def _resolve_frontend_dir(tech_stack: dict) -> str:
@@ -113,6 +120,7 @@ def frontend_builder_agent(state):
 
     privileged_policy = build_privileged_policy(state)
     log_task_update("Frontend Builder", f"Frontend implementation pass #{call_number} started.")
+    preserve_existing = bool(state.get("scaffold_template_used", False))
 
     created_files: list[str] = []
     frontend_dir = _resolve_frontend_dir(tech_stack)
@@ -133,8 +141,15 @@ def frontend_builder_agent(state):
         f"Use fetch or axios. Include auth token handling. Export typed functions like getUsers(), createUser(), etc.",
         context,
     )
-    path = _write_file(project_root, f"{frontend_dir}/lib/api.ts", api_client_content, privileged_policy)
-    created_files.append(path)
+    path, written = _write_file(
+        project_root,
+        f"{frontend_dir}/lib/api.ts",
+        api_client_content,
+        privileged_policy,
+        overwrite=not preserve_existing,
+    )
+    if written:
+        created_files.append(path)
 
     # 2. TypeScript types
     types_content = _generate_file(
@@ -142,8 +157,15 @@ def frontend_builder_agent(state):
         "Include request/response types matching the API design.",
         context,
     )
-    path = _write_file(project_root, f"{frontend_dir}/types/index.ts", types_content, privileged_policy)
-    created_files.append(path)
+    path, written = _write_file(
+        project_root,
+        f"{frontend_dir}/types/index.ts",
+        types_content,
+        privileged_policy,
+        overwrite=not preserve_existing,
+    )
+    if written:
+        created_files.append(path)
 
     # 3. Layouts
     for layout in layouts:
@@ -154,13 +176,15 @@ def frontend_builder_agent(state):
             f"Use {css_framework or 'CSS modules'} for styling. Include responsive design.",
             context,
         )
-        path = _write_file(
+        path, written = _write_file(
             project_root,
             f"{frontend_dir}/components/{layout_name}.tsx",
             layout_content,
             privileged_policy,
+            overwrite=not preserve_existing,
         )
-        created_files.append(path)
+        if written:
+            created_files.append(path)
 
     # 4. Pages
     for page in pages:
@@ -181,8 +205,15 @@ def frontend_builder_agent(state):
         else:
             page_dir = f"{frontend_dir}/pages"
             file_name = f"{page_name}.tsx"
-        path = _write_file(project_root, f"{page_dir}/{file_name}", page_content, privileged_policy)
-        created_files.append(path)
+        path, written = _write_file(
+            project_root,
+            f"{page_dir}/{file_name}",
+            page_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+        if written:
+            created_files.append(path)
 
     # 5. UI Components
     for comp in components:
@@ -193,13 +224,15 @@ def frontend_builder_agent(state):
             f"Use {css_framework or 'CSS'} for styling. Include TypeScript props interface.",
             context,
         )
-        path = _write_file(
+        path, written = _write_file(
             project_root,
             f"{frontend_dir}/components/{comp_name}.tsx",
             comp_content,
             privileged_policy,
+            overwrite=not preserve_existing,
         )
-        created_files.append(path)
+        if written:
+            created_files.append(path)
 
     # 6. App root / routing
     app_content = _generate_file(
@@ -209,10 +242,23 @@ def frontend_builder_agent(state):
         context,
     )
     if "next" in framework:
-        path = _write_file(project_root, f"{frontend_dir}/app/layout.tsx", app_content, privileged_policy)
+        path, written = _write_file(
+            project_root,
+            f"{frontend_dir}/app/layout.tsx",
+            app_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
     else:
-        path = _write_file(project_root, f"{frontend_dir}/App.tsx", app_content, privileged_policy)
-    created_files.append(path)
+        path, written = _write_file(
+            project_root,
+            f"{frontend_dir}/App.tsx",
+            app_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+    if written:
+        created_files.append(path)
 
     # 7. Global styles
     styles_content = _generate_file(
@@ -221,8 +267,15 @@ def frontend_builder_agent(state):
         context,
     )
     ext = ".css"
-    path = _write_file(project_root, f"{frontend_dir}/index{ext}" if "next" not in framework else f"{frontend_dir}/app/globals.css", styles_content, privileged_policy)
-    created_files.append(path)
+    path, written = _write_file(
+        project_root,
+        f"{frontend_dir}/index{ext}" if "next" not in framework else f"{frontend_dir}/app/globals.css",
+        styles_content,
+        privileged_policy,
+        overwrite=not preserve_existing,
+    )
+    if written:
+        created_files.append(path)
 
     # Summary
     summary = (

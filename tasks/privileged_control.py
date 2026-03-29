@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from superagent.persistence import insert_privileged_audit_event
+from kendr.persistence import insert_privileged_audit_event
 
 
 _SUSPECT_SECRET_PATTERNS = [
@@ -82,7 +82,7 @@ def _list_from_any(value) -> list[str]:
 
 def build_privileged_policy(state: dict) -> dict:
     working_directory = str(state.get("working_directory", "")).strip()
-    allowed_paths = _list_from_any(state.get("privileged_allowed_paths") or os.getenv("SUPERAGENT_ALLOWED_PATHS", ""))
+    allowed_paths = _list_from_any(state.get("privileged_allowed_paths") or os.getenv("KENDR_ALLOWED_PATHS", ""))
     if working_directory and working_directory not in allowed_paths:
         allowed_paths.insert(0, working_directory)
     normalized_allowed_paths = []
@@ -93,21 +93,21 @@ def build_privileged_policy(state: dict) -> dict:
             continue
 
     policy = {
-        "privileged_mode": _truthy(state.get("privileged_mode", os.getenv("SUPERAGENT_PRIVILEGED_MODE", False))),
+        "privileged_mode": _truthy(state.get("privileged_mode", os.getenv("KENDR_PRIVILEGED_MODE", False))),
         "approved": _truthy(state.get("privileged_approved", False)),
         "approval_note": str(state.get("privileged_approval_note", "")).strip(),
-        "require_approvals": _truthy(state.get("privileged_require_approvals", os.getenv("SUPERAGENT_REQUIRE_APPROVALS", True))),
-        "read_only": _truthy(state.get("privileged_read_only", os.getenv("SUPERAGENT_READ_ONLY_MODE", False))),
-        "allow_root": _truthy(state.get("privileged_allow_root", os.getenv("SUPERAGENT_ALLOW_ROOT", False))),
+        "require_approvals": _truthy(state.get("privileged_require_approvals", os.getenv("KENDR_REQUIRE_APPROVALS", True))),
+        "read_only": _truthy(state.get("privileged_read_only", os.getenv("KENDR_READ_ONLY_MODE", False))),
+        "allow_root": _truthy(state.get("privileged_allow_root", os.getenv("KENDR_ALLOW_ROOT", False))),
         "allow_destructive": _truthy(
-            state.get("privileged_allow_destructive", os.getenv("SUPERAGENT_ALLOW_DESTRUCTIVE", False))
+            state.get("privileged_allow_destructive", os.getenv("KENDR_ALLOW_DESTRUCTIVE", False))
         ),
-        "enable_backup": _truthy(state.get("privileged_enable_backup", os.getenv("SUPERAGENT_ENABLE_BACKUPS", True))),
+        "enable_backup": _truthy(state.get("privileged_enable_backup", os.getenv("KENDR_ENABLE_BACKUPS", True))),
         "allowed_paths": normalized_allowed_paths,
-        "allowed_domains": _list_from_any(state.get("privileged_allowed_domains") or os.getenv("SUPERAGENT_ALLOWED_DOMAINS", "")),
+        "allowed_domains": _list_from_any(state.get("privileged_allowed_domains") or os.getenv("KENDR_ALLOWED_DOMAINS", "")),
         "kill_switch_file": str(
             state.get("kill_switch_file")
-            or os.getenv("SUPERAGENT_KILL_SWITCH_FILE", os.path.join("output", "SUPERAGENT_STOP"))
+            or os.getenv("KENDR_KILL_SWITCH_FILE", os.path.join("output", "KENDR_STOP"))
         ).strip(),
     }
     return policy

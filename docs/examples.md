@@ -10,7 +10,7 @@ For a longer command list, see [Extended CLI Examples](../SampleTasks.md).
 ### Deep Research
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --research-model o4-mini-deep-research \
   --research-instructions "Cite concrete sources and call out uncertainty." \
   "Do deep research on Stripe's enterprise strategy, current moat, and main risks."
@@ -19,7 +19,7 @@ superagent run --current-folder \
 ### Local-Drive Intelligence
 
 ```bash
-superagent run \
+kendr run \
   --drive="D:/xyz/folder" \
   "Review this folder, summarize the important files, and produce an executive-ready intelligence brief."
 ```
@@ -27,7 +27,7 @@ superagent run \
 ### superRAG Build
 
 ```bash
-superagent run \
+kendr run \
   --superrag-mode build \
   --superrag-new-session \
   --superrag-session-title "product_ops_kb" \
@@ -39,7 +39,7 @@ superagent run \
 ### superRAG Chat
 
 ```bash
-superagent run \
+kendr run \
   --superrag-mode chat \
   --superrag-session product_ops_kb \
   --superrag-chat "What are the main operating risks and where are they sourced from?"
@@ -48,7 +48,7 @@ superagent run \
 ### Coding Project Builder
 
 ```bash
-superagent run --current-folder --max-steps 30 \
+kendr run --current-folder --max-steps 30 \
   --coding-context-file README.md \
   --coding-instructions "Prefer FastAPI, pytest, docs, and CI verification commands." \
   "Use master_coding_agent to design and deliver a production-ready internal tools API with tests, docs, CI, and deployment files."
@@ -57,7 +57,7 @@ superagent run --current-folder --max-steps 30 \
 ### Local Command Execution
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --os-command "Get-ChildItem" \
   --os-shell powershell \
   --target-os windows \
@@ -71,35 +71,35 @@ superagent run --current-folder \
 ### Research Brief
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   "Create an intelligence brief on Stripe: business model, products, competitors, recent strategy moves, and top risks."
 ```
 
 ### People And Organization Mapping
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   "Research Satya Nadella's recent public interviews and connect themes to Microsoft product priorities."
 ```
 
 ### Deal Advisory
 
 ```bash
-superagent run \
+kendr run \
   "Identify India-based B2B SaaS startups likely in Series A/B range, then provide a screened shortlist with rationale."
 ```
 
 ### Research Proposal And Prior Art
 
 ```bash
-superagent run \
+kendr run \
   "Review this proposal topic: low-cost edge AI for crop disease detection; summarize prior art, key papers, and novelty gaps."
 ```
 
 ### Authorized Defensive Security Review
 
 ```bash
-superagent run \
+kendr run \
   --security-authorized \
   --security-target-url https://example.com \
   --security-authorization-note "SEC-123 approved by owner" \
@@ -110,14 +110,14 @@ superagent run \
 ### Travel Planning
 
 ```bash
-superagent run \
+kendr run \
   "Plan best travel options from Bangalore to Singapore next month with likely flight windows and routing advice."
 ```
 
 ### Long Document
 
 ```bash
-superagent run \
+kendr run \
   --max-steps 180 \
   --long-document \
   --long-document-pages 50 \
@@ -134,7 +134,7 @@ superagent run \
 ### Master Coding Agent
 
 ```bash
-superagent run --max-steps 30 \
+kendr run --max-steps 30 \
   "Use master_coding_agent to design and deliver a complete production-ready SaaS starter: API, auth, database migrations, CI, tests, docs, and deployment instructions."
 ```
 

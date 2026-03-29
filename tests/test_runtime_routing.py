@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from superagent.discovery import build_registry
-from superagent.runtime import AgentRuntime
+from kendr.discovery import build_registry
+from kendr.runtime import AgentRuntime
 from tasks.a2a_protocol import append_task, make_task
 
 
@@ -24,7 +24,7 @@ class RuntimeRoutingTests(unittest.TestCase):
 
     def test_execute_agent_publishes_active_task_to_session_record_before_handler_runs(self):
         with (
-            patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
             patch("tasks.a2a_protocol.upsert_agent_card"),
             patch("tasks.a2a_protocol.insert_message"),
             patch("tasks.a2a_protocol.upsert_task"),
@@ -52,11 +52,11 @@ class RuntimeRoutingTests(unittest.TestCase):
             try:
                 with (
                     patch.object(runtime, "_write_session_record", side_effect=_capture_write),
-                    patch("superagent.runtime.append_daily_memory_note"),
-                    patch("superagent.runtime.append_session_event"),
-                    patch("superagent.runtime.record_work_note"),
-                    patch("superagent.runtime.log_task_update"),
-                    patch("superagent.runtime.insert_agent_execution"),
+                    patch("kendr.runtime.append_daily_memory_note"),
+                    patch("kendr.runtime.append_session_event"),
+                    patch("kendr.runtime.record_work_note"),
+                    patch("kendr.runtime.log_task_update"),
+                    patch("kendr.runtime.insert_agent_execution"),
                 ):
                     runtime._execute_agent(state, "worker_agent")
             finally:
@@ -69,7 +69,7 @@ class RuntimeRoutingTests(unittest.TestCase):
 
     def test_active_task_summary_uses_agent_activity_label_for_generic_dispatch(self):
         with (
-            patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
             patch("tasks.a2a_protocol.upsert_agent_card"),
             patch("tasks.a2a_protocol.insert_message"),
             patch("tasks.a2a_protocol.upsert_task"),
@@ -96,7 +96,7 @@ class RuntimeRoutingTests(unittest.TestCase):
             "summary_text": "worker_agent only",
         }
 
-        with patch("superagent.runtime.build_setup_snapshot", return_value=snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", return_value=snapshot):
             runtime = AgentRuntime(registry)
             state = runtime.apply_runtime_setup({})
 
@@ -104,11 +104,11 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual([card["agent_name"] for card in state["available_agent_cards"]], ["worker_agent"])
 
     def test_explicit_deep_research_request_routes_to_planner_first(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Do deep research on OpenAI's enterprise strategy with citations.")
 
-            with patch("superagent.runtime.llm.invoke") as mock_invoke:
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
                 routed_state = runtime.orchestrator_agent(state)
 
         self.assertEqual(routed_state["next_agent"], "planner_agent")
@@ -119,7 +119,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(task["recipient"], "planner_agent")
 
     def test_reviewer_approval_finishes_when_no_planned_steps_remain(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Do deep research on battery recycling market trends.")
             state["last_agent"] = "reviewer_agent"
@@ -136,7 +136,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(routed_state["final_output"], "Research completed.")
 
     def test_planned_step_dispatch_includes_step_context_for_review(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Create a funding report from local files.")
             state["plan_ready"] = True
@@ -168,7 +168,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         )
 
     def test_reviewer_revision_limit_raises_after_too_many_retries(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Create a funding report from local files.")
             state["plan_ready"] = True
@@ -185,13 +185,36 @@ class RuntimeRoutingTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 runtime.orchestrator_agent(state)
 
+    def test_extension_handler_generation_routes_to_agent_factory_when_enabled(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Process mixed local-drive files.")
+            state["plan_ready"] = True
+            state["plan_steps"] = []
+            state["review_pending"] = False
+            state["last_agent"] = "local_drive_agent"
+            state["extension_handler_generation_requested"] = True
+            state["extension_handler_generation_dispatched"] = False
+            state["local_drive_unknown_extensions"] = [".abc"]
+            state["agent_factory_request"] = "Create handler for .abc."
+            state["missing_capability"] = "File extension handling: .abc"
+
+            routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "agent_factory_agent")
+        self.assertTrue(routed_state.get("extension_handler_generation_dispatched"))
+        self.assertTrue(routed_state.get("a2a", {}).get("tasks"))
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "agent_factory_agent")
+        self.assertEqual(task["intent"], "extension-handler-generation")
+
     def test_superrag_request_routes_to_planner_first(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Build a superRAG session from these URLs and chat with that data.")
             state["superrag_urls"] = ["https://example.com"]
 
-            with patch("superagent.runtime.llm.invoke") as mock_invoke:
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
                 routed_state = runtime.orchestrator_agent(state)
 
         self.assertEqual(routed_state["next_agent"], "planner_agent")
@@ -201,8 +224,34 @@ class RuntimeRoutingTests(unittest.TestCase):
         task = routed_state["a2a"]["tasks"][-1]
         self.assertEqual(task["recipient"], "planner_agent")
 
+    def test_stuck_agent_message_classifies_missing_state_contract_errors(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Analyze local documents.")
+            state["_consecutive_failures"] = {
+                "document_ingestion_agent": {
+                    "count": 3,
+                    "last_error": "document_ingestion_agent requires 'document_paths' or 'doc_paths'.",
+                }
+            }
+            message = runtime._stuck_agent_message(state, "document_ingestion_agent")
+        self.assertIn("input-contract mismatch", message)
+
+    def test_stuck_agent_message_classifies_missing_module_errors(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Build a MERN app.")
+            state["_consecutive_failures"] = {
+                "project_blueprint_agent": {
+                    "count": 3,
+                    "last_error": "No module named 'plugin_templates'",
+                }
+            }
+            message = runtime._stuck_agent_message(state, "project_blueprint_agent")
+        self.assertIn("packaging/import issue", message)
+
     def test_explicit_os_command_routes_to_os_agent(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Run a local command to inspect the repository.")
             state["os_command"] = "Get-Location"
@@ -215,7 +264,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(task["recipient"], "os_agent")
 
     def test_local_drive_request_routes_to_planner_first(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state(
                 "Create a deep analysis report from local files.",
@@ -233,7 +282,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(task["recipient"], "planner_agent")
 
     def test_plan_waiting_for_approval_pauses_execution(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Build a competitive market brief.")
             state["last_agent"] = "planner_agent"
@@ -251,7 +300,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertIn("approve", routed_state["final_output"].lower())
 
     def test_build_initial_state_approves_pending_plan_from_session(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             prior_state = {
                 "last_plan": "Summary: test plan",
@@ -264,6 +313,8 @@ class RuntimeRoutingTests(unittest.TestCase):
                 "pending_user_question": "Reply approve to continue.",
                 "plan_waiting_for_approval": True,
                 "plan_approval_status": "pending",
+                "blueprint_json": {"project_name": "new-project", "tech_stack": {"framework": "fastapi"}},
+                "project_root": "/tmp/new-project",
             }
             state = runtime.build_initial_state("approve", channel_session={"state": prior_state})
 
@@ -272,9 +323,11 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(state["plan_approval_status"], "approved")
         self.assertEqual(state["current_objective"], "Build a pricing strategy memo.")
         self.assertEqual(state["pending_user_input_kind"], "")
+        self.assertEqual(state["blueprint_json"], prior_state["blueprint_json"])
+        self.assertEqual(state["project_root"], prior_state["project_root"])
 
     def test_build_initial_state_revisions_pending_plan_from_session(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             prior_state = {
                 "last_plan": "Summary: test plan",
@@ -296,7 +349,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertIn("Plan revision instructions", state["current_objective"])
 
     def test_build_initial_state_approves_pending_long_document_subplan(self):
-        with patch("superagent.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             prior_state = {
                 "last_plan": "Summary: test plan",
@@ -319,20 +372,93 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(state["long_document_plan_status"], "approved")
         self.assertTrue(state["long_document_execute_from_saved_outline"])
 
+    def test_build_initial_state_does_not_reuse_failed_approved_plan_for_fresh_run(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            prior_state = {
+                "last_plan": "Summary: stale plan",
+                "last_plan_data": {"summary": "stale", "steps": [{"id": "step-1", "agent": "document_ingestion_agent", "task": "Do stale work"}]},
+                "last_plan_steps": [{"id": "step-1", "agent": "document_ingestion_agent", "task": "Do stale work"}],
+                "last_plan_step_index": 0,
+                "last_objective": "Old failed objective.",
+                "last_status": "failed",
+                "plan_waiting_for_approval": False,
+                "plan_approval_status": "approved",
+                "failure_checkpoint": {
+                    "agent": "document_ingestion_agent",
+                    "step_index": 0,
+                    "task_content": "Do stale work",
+                    "can_resume": True,
+                },
+            }
+            query = "Analyze Twenty4 Jewelry from the latest drive documents."
+            state = runtime.build_initial_state(query, channel_session={"state": prior_state})
+
+        self.assertEqual(state["current_objective"], query)
+        self.assertEqual(state["plan_steps"], [])
+        self.assertFalse(state["plan_ready"])
+        self.assertFalse(state["resume_requested"])
+        self.assertEqual(state["plan_approval_status"], "not_started")
+
+    def test_build_initial_state_restores_failed_plan_only_for_explicit_resume_request(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            prior_state = {
+                "last_plan": "Summary: stale plan",
+                "last_plan_data": {"summary": "stale", "steps": [{"id": "step-1", "agent": "worker_agent", "task": "Recover work"}]},
+                "last_plan_steps": [{"id": "step-1", "agent": "worker_agent", "task": "Recover work"}],
+                "last_plan_step_index": 0,
+                "last_objective": "Old failed objective.",
+                "last_status": "failed",
+                "plan_waiting_for_approval": False,
+                "plan_approval_status": "approved",
+                "failure_checkpoint": {
+                    "agent": "worker_agent",
+                    "step_index": 0,
+                    "task_content": "Recover work",
+                    "can_resume": True,
+                },
+            }
+            state = runtime.build_initial_state("resume the failed run", channel_session={"state": prior_state})
+
+        self.assertEqual(state["plan_steps"], prior_state["last_plan_steps"])
+        self.assertTrue(state["plan_ready"])
+        self.assertTrue(state["resume_requested"])
+        self.assertTrue(state["resume_ready"])
+        self.assertEqual(state["current_objective"], "Recover work")
+
+    def test_session_payload_uses_stable_current_step_number_across_agent_state_changes(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Build a funding report from local files.")
+            state["effective_steps"] = 1
+            state["agent_history"] = [{"agent": "channel_gateway_agent", "status": "completed"}]
+            state["last_agent"] = "channel_gateway_agent"
+
+            started_payload = runtime._session_payload(state, status="running", active_agent="reviewer_agent")
+
+            state["effective_steps"] = 2
+            state["agent_history"].append({"agent": "reviewer_agent", "status": "completed"})
+            state["last_agent"] = "reviewer_agent"
+            completed_payload = runtime._session_payload(state, status="running", active_agent="reviewer_agent")
+
+        self.assertEqual(started_payload["step_count"], 2)
+        self.assertEqual(completed_payload["step_count"], 2)
+
     def test_run_query_accepts_working_directory_in_state_overrides(self):
         runtime = AgentRuntime(build_registry())
 
         with TemporaryDirectory() as tmp:
             mock_app = SimpleNamespace(invoke=lambda state: {**state, "final_output": "ok"})
             with (
-                patch("superagent.runtime.initialize_db"),
-                patch("superagent.runtime.insert_run"),
-                patch("superagent.runtime.update_run"),
-                patch("superagent.runtime.reset_text_file"),
-                patch("superagent.runtime.write_text_file"),
-                patch("superagent.runtime.append_daily_memory_note"),
-                patch("superagent.runtime.append_long_term_memory"),
-                patch("superagent.runtime.close_session_memory"),
+                patch("kendr.runtime.initialize_db"),
+                patch("kendr.runtime.insert_run"),
+                patch("kendr.runtime.update_run"),
+                patch("kendr.runtime.reset_text_file"),
+                patch("kendr.runtime.write_text_file"),
+                patch("kendr.runtime.append_daily_memory_note"),
+                patch("kendr.runtime.append_long_term_memory"),
+                patch("kendr.runtime.close_session_memory"),
                 patch.object(runtime, "_write_session_record"),
                 patch.object(runtime, "_is_agent_available", return_value=True),
                 patch.object(runtime, "build_workflow", return_value=mock_app),
@@ -345,6 +471,41 @@ class RuntimeRoutingTests(unittest.TestCase):
 
         self.assertEqual(result.get("working_directory"), str(Path(tmp).resolve()))
         self.assertEqual(result.get("final_output"), "ok")
+
+    def test_execute_agent_skips_reviewer_for_channel_gateway_agent(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+            patch("kendr.runtime.append_daily_memory_note"),
+            patch("kendr.runtime.append_session_event"),
+            patch("kendr.runtime.record_work_note"),
+            patch("kendr.runtime.log_task_update"),
+            patch("kendr.runtime.insert_agent_execution"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("hello")
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="channel_gateway_agent",
+                    intent="channel-ingest-normalization",
+                    content="Normalize payload",
+                ),
+            )
+
+            original_handler = runtime.registry.agents["channel_gateway_agent"].handler
+            runtime.registry.agents["channel_gateway_agent"].handler = lambda current_state: {**current_state, "draft_response": "normalized"}
+            try:
+                with patch.object(runtime, "_write_session_record"):
+                    result = runtime._execute_agent(state, "channel_gateway_agent")
+            finally:
+                runtime.registry.agents["channel_gateway_agent"].handler = original_handler
+
+        self.assertFalse(result.get("review_pending", True))
 
 
 if __name__ == "__main__":

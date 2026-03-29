@@ -1,4 +1,4 @@
-from superagent.gateway_server import main
+from kendr.gateway_server import main
 
 
 if __name__ == "__main__":

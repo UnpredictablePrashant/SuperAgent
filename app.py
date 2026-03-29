@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from superagent import AgentRuntime, build_registry
-from superagent.cli import main as cli_main
+from kendr import AgentRuntime, build_registry
+from kendr.cli import main as cli_main
 
 
 REGISTRY = build_registry()

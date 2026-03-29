@@ -1,20 +1,25 @@
 import json
+import math
 import os
 from pathlib import Path
 
-from superagent.domain.local_drive import (
-    discover_local_drive_files as _discover_local_drive_files,
+from kendr.domain.local_drive import (
+    extension_handler_registry as _extension_handler_registry,
     maybe_search_memory as _maybe_search_memory,
     maybe_upsert_memory as _maybe_upsert_memory,
     merge_documents as _merge_documents,
     normalize_extension_set as _normalize_extension_set,
     resolve_paths as _resolve_paths,
+    route_files_by_handler as _route_files_by_handler,
     safe_slug as _safe_slug,
+    scan_local_drive_tree as _scan_local_drive_tree,
     textual_sources_for_memory as _textual_sources_for_memory,
+    unknown_extensions_from_manifest as _unknown_extensions_from_manifest,
 )
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.research_infra import (
+    IMAGE_FILE_EXTENSIONS,
     build_evidence_bundle,
     crawl_urls,
     evidence_text,
@@ -49,9 +54,13 @@ AGENT_METADATA = {
         ],
         "output_keys": [
             "local_drive_files",
+            "local_drive_manifest",
             "local_drive_documents",
             "local_drive_document_summaries",
             "local_drive_summary_bank",
+            "local_drive_handler_registry",
+            "local_drive_handler_routes",
+            "local_drive_unknown_extensions",
             "document_summary",
             "draft_response",
         ],
@@ -75,6 +84,82 @@ def _write_agent_artifacts(agent_name: str, call_number: int, text_output: str, 
             _safe_json_filename(agent_name, call_number),
             json.dumps(structured_output, indent=2, ensure_ascii=False),
         )
+
+
+def _collect_ocr_candidate_paths(state: dict) -> list[str]:
+    base_directory = (
+        state.get("ocr_working_directory")
+        or state.get("local_drive_working_directory")
+        or state.get("working_directory")
+    )
+    candidates: list[str] = []
+
+    explicit_paths = state.get("ocr_image_paths") or state.get("image_paths") or []
+    candidates.extend(_resolve_paths(explicit_paths, base_directory))
+
+    routed = state.get("local_drive_handler_routes", {})
+    if isinstance(routed, dict):
+        routed_images = routed.get("ocr_agent", []) if isinstance(routed.get("ocr_agent"), list) else []
+        candidates.extend(_resolve_paths(routed_images, base_directory))
+
+    manifest = state.get("local_drive_manifest", {}) if isinstance(state.get("local_drive_manifest"), dict) else {}
+    manifest_selected = manifest.get("selected_files") if isinstance(manifest.get("selected_files"), list) else []
+    candidates.extend(_resolve_paths(manifest_selected, base_directory))
+
+    drive_files = state.get("local_drive_files") if isinstance(state.get("local_drive_files"), list) else []
+    candidates.extend(_resolve_paths(drive_files, base_directory))
+
+    drive_documents = state.get("local_drive_documents") if isinstance(state.get("local_drive_documents"), list) else []
+    for item in drive_documents:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "") or "").strip()
+        if path:
+            candidates.extend(_resolve_paths([path], base_directory))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw_path in candidates:
+        path = str(raw_path or "").strip()
+        if not path:
+            continue
+        suffix = Path(path).suffix.lower()
+        if suffix not in IMAGE_FILE_EXTENSIONS:
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+    return deduped
+
+
+def _load_extension_handler_overrides(state: dict) -> dict[str, str]:
+    raw = (
+        state.get("local_drive_extension_handler_registry")
+        or state.get("local_drive_extension_handlers")
+        or {}
+    )
+    if isinstance(raw, dict):
+        return {
+            str(key): str(value)
+            for key, value in raw.items()
+            if str(key).strip() and str(value).strip()
+        }
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return {}
+        if isinstance(parsed, dict):
+            return {
+                str(key): str(value)
+                for key, value in parsed.items()
+                if str(key).strip() and str(value).strip()
+            }
+    return {}
 
 
 def access_control_agent(state):
@@ -177,30 +262,236 @@ def document_ingestion_agent(state):
     _, task_content, _ = begin_agent_session(state, "document_ingestion_agent")
     state["document_ingestion_calls"] = state.get("document_ingestion_calls", 0) + 1
     call_number = state["document_ingestion_calls"]
-
+    base_directory = (
+        state.get("document_working_directory")
+        or state.get("local_drive_working_directory")
+        or state.get("working_directory")
+    )
+    objective = state.get("current_objective") or state.get("user_query", "")
     raw_paths = state.get("document_paths") or state.get("doc_paths") or []
-    paths = _resolve_paths(raw_paths, state.get("document_working_directory"))
+    paths = _resolve_paths(raw_paths, base_directory)
     if not paths and task_content and Path(task_content).exists():
-        paths = [task_content]
+        paths = _resolve_paths([task_content], base_directory)
+    handler_routes = state.get("local_drive_handler_routes", {})
+    routed_document_paths = []
+    has_document_routing = False
+    ingestion_source = "explicit_document_paths"
+    if isinstance(handler_routes, dict):
+        has_document_routing = "document_ingestion_agent" in handler_routes
+        raw_routed = handler_routes.get("document_ingestion_agent", [])
+        if isinstance(raw_routed, list):
+            routed_document_paths = _resolve_paths(
+                raw_routed,
+                state.get("local_drive_working_directory") or state.get("working_directory"),
+            )
+    if not paths and routed_document_paths:
+        paths = routed_document_paths
+        ingestion_source = "local_drive_handler_routes"
     if not paths:
-        raise ValueError("document_ingestion_agent requires 'document_paths' or 'doc_paths'.")
+        manifest = state.get("local_drive_manifest", {}) if isinstance(state.get("local_drive_manifest"), dict) else {}
+        fallback_paths = state.get("local_drive_files") or manifest.get("selected_files") or []
+        if has_document_routing:
+            fallback_paths = []
+        if fallback_paths:
+            paths = _resolve_paths(
+                fallback_paths,
+                state.get("local_drive_working_directory") or state.get("working_directory"),
+            )
+            ingestion_source = "local_drive_files"
 
-    documents = parse_documents(paths)
+    if not paths:
+        raw_roots = (
+            state.get("local_drive_paths")
+            or state.get("knowledge_drive_paths")
+            or state.get("drive_paths")
+            or []
+        )
+        roots = _resolve_paths(raw_roots, state.get("local_drive_working_directory") or state.get("working_directory"))
+        if roots:
+            scan = _scan_local_drive_tree(
+                roots,
+                recursive=bool(state.get("local_drive_recursive", True)),
+                include_hidden=bool(state.get("local_drive_include_hidden", False)),
+                max_files=max(1, min(int(state.get("local_drive_max_files", 200)), 1000)),
+                allowed_extensions=_normalize_extension_set(state.get("local_drive_extensions")),
+            )
+            selected_files = list(scan.get("selected_files") or [])
+            if selected_files:
+                state["local_drive_manifest"] = scan
+                state["local_drive_files"] = selected_files
+                paths = selected_files
+                ingestion_source = "on_demand_local_drive_scan"
+
+    documents = []
+    attempted_paths: list[str] = []
+    if paths:
+        attempted_paths = list(paths)
+        documents = parse_documents(
+            paths,
+            continue_on_error=True,
+            ocr_images=bool(state.get("local_drive_enable_image_ocr", True)),
+            ocr_instruction=state.get("local_drive_ocr_instruction"),
+        )
+    elif isinstance(state.get("local_drive_documents"), list) and state.get("local_drive_documents"):
+        documents = state.get("local_drive_documents", [])
+        ingestion_source = "local_drive_documents"
+    elif isinstance(state.get("documents"), list) and state.get("documents"):
+        documents = state.get("documents", [])
+        ingestion_source = "state_documents"
+    else:
+        for item in state.get("local_drive_document_summaries", []) or []:
+            if not isinstance(item, dict):
+                continue
+            summary_text = str(item.get("summary", "") or "").strip()
+            if not summary_text:
+                continue
+            documents.append(
+                {
+                    "path": str(item.get("path", "") or ""),
+                    "text": summary_text,
+                    "metadata": {
+                        "type": str(item.get("type", "") or "summary"),
+                        "derived_from": "local_drive_document_summaries",
+                    },
+                }
+            )
+        if documents:
+            ingestion_source = "local_drive_document_summaries"
+
+    if not documents:
+        if has_document_routing and not routed_document_paths:
+            summary = (
+                "No documents were routed to document_ingestion_agent from local-drive extension handling. "
+                "Skipped document ingestion and continued without blocking the workflow."
+            )
+            _write_agent_artifacts("document_ingestion_agent", call_number, summary, [])
+            state["documents"] = []
+            state["document_summary"] = summary
+            state["document_ingestion_skipped"] = True
+            state["document_ingestion_skip_reason"] = "no_document_routes"
+            state["draft_response"] = summary
+            return publish_agent_output(
+                state,
+                "document_ingestion_agent",
+                summary,
+                f"document_ingestion_result_{call_number}",
+                recipients=["orchestrator_agent", "worker_agent", "reviewer_agent"],
+            )
+        raise ValueError(
+            "document_ingestion_agent requires document_paths/doc_paths or prior local-drive outputs "
+            "(local_drive_files/local_drive_documents/local_drive_document_summaries)."
+        )
+
+    if not attempted_paths:
+        for item in documents:
+            if not isinstance(item, dict):
+                continue
+            candidate_path = str(item.get("path", "") or "").strip()
+            if candidate_path:
+                attempted_paths.append(candidate_path)
+
+    successful_files: list[str] = []
+    failed_files: list[dict] = []
+    for item in documents:
+        if not isinstance(item, dict):
+            continue
+        path_value = str(item.get("path", "") or "").strip() or "(unknown)"
+        metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        error_value = str(metadata.get("error", "") or "").strip()
+        if error_value:
+            failed_files.append({"path": path_value, "error": error_value})
+        else:
+            successful_files.append(path_value)
+
+    raw_requested_roots = (
+        state.get("local_drive_paths")
+        or state.get("knowledge_drive_paths")
+        or state.get("drive_paths")
+        or state.get("document_root_paths")
+        or []
+    )
+    requested_roots = _resolve_paths(raw_requested_roots, base_directory)
+
+    def _path_within_root(path_value: str, root_value: str) -> bool:
+        try:
+            normalized_path = os.path.normcase(os.path.abspath(path_value))
+            normalized_root = os.path.normcase(os.path.abspath(root_value))
+            return os.path.commonpath([normalized_path, normalized_root]) == normalized_root
+        except Exception:
+            return False
+
+    coverage_rows: list[dict] = []
+    for root in requested_roots:
+        matched = [item for item in attempted_paths if _path_within_root(item, root)]
+        coverage_rows.append(
+            {
+                "root": root,
+                "matched_files": matched,
+                "matched_count": len(matched),
+            }
+        )
+    uncovered_roots = [row["root"] for row in coverage_rows if not row["matched_files"]]
+    coverage_status = "covered" if coverage_rows and not uncovered_roots else "partial" if coverage_rows else "not_specified"
+
     prompt = f"""
 You are a document ingestion and extraction agent.
 
 Objective:
-{state.get("current_objective") or state.get("user_query", "")}
+{objective}
 
 Documents:
 {json.dumps(documents, indent=2, ensure_ascii=False)[:25000]}
 
 Summarize the important facts, entities, dates, metrics, and unanswered questions.
 """
-    summary = llm_text(prompt)
+    narrative_summary = llm_text(prompt)
+
+    confirmation_lines = [
+        "Document Ingestion Confirmation",
+        f"- Objective: {objective or 'not provided'}",
+        f"- Ingestion source: {ingestion_source}",
+        f"- Requested root path(s): {', '.join(requested_roots) if requested_roots else 'none provided'}",
+        f"- Files attempted: {len(attempted_paths)}",
+        f"- Files parsed successfully: {len(successful_files)}",
+        f"- Files with extraction errors: {len(failed_files)}",
+        f"- Path coverage status: {coverage_status}",
+    ]
+    if coverage_rows:
+        confirmation_lines.append("")
+        confirmation_lines.append("Path Coverage")
+        for row in coverage_rows:
+            confirmation_lines.append(f"- {row['root']}: {row['matched_count']} matched file(s)")
+    if successful_files:
+        confirmation_lines.append("")
+        confirmation_lines.append("Sample Parsed Files")
+        for item in successful_files[: min(10, len(successful_files))]:
+            confirmation_lines.append(f"- {item}")
+    if failed_files:
+        confirmation_lines.append("")
+        confirmation_lines.append("Files With Extraction Errors")
+        for item in failed_files[: min(20, len(failed_files))]:
+            confirmation_lines.append(f"- {item['path']} | error={item['error']}")
+    if uncovered_roots:
+        confirmation_lines.append("")
+        confirmation_lines.append("Uncovered Requested Roots")
+        for root in uncovered_roots:
+            confirmation_lines.append(f"- {root}")
+
+    summary = "\n".join(confirmation_lines + ["", "Findings", narrative_summary])
     _write_agent_artifacts("document_ingestion_agent", call_number, summary, documents)
     state["documents"] = documents
     state["document_summary"] = summary
+    state["document_ingestion_source"] = ingestion_source
+    state["document_ingestion_report"] = {
+        "requested_roots": requested_roots,
+        "coverage": coverage_rows,
+        "coverage_status": coverage_status,
+        "attempted_files": attempted_paths,
+        "successful_files": successful_files,
+        "failed_files": failed_files,
+        "ingestion_source": ingestion_source,
+    }
+    state["document_ingestion_confirmed"] = bool(attempted_paths) and bool(successful_files)
     state["draft_response"] = summary
     if state.get("document_index_to_memory", True):
         _maybe_upsert_memory(state, _textual_sources_for_memory(state))
@@ -246,25 +537,129 @@ def local_drive_agent(state):
     ocr_instruction = state.get("local_drive_ocr_instruction")
     objective = state.get("current_objective") or state.get("user_query", "")
 
-    files = _discover_local_drive_files(
+    manifest = _scan_local_drive_tree(
         roots,
         recursive=recursive,
         include_hidden=include_hidden,
         max_files=max_files,
         allowed_extensions=allowed_extensions,
     )
+    files = list(manifest.get("selected_files") or [])
     if not files:
         raise ValueError("local_drive_agent found no supported files in the selected path(s).")
 
+    # Determine whether the local-drive corpus is likely insufficient for long-form output.
+    target_pages = 0
+    try:
+        target_pages = int(state.get("long_document_pages") or state.get("report_target_pages") or 0)
+    except Exception:
+        target_pages = 0
+    wants_long_document = bool(state.get("local_drive_force_long_document", False) or state.get("long_document_mode", False) or target_pages)
+    min_files_override = 0
+    try:
+        min_files_override = int(state.get("local_drive_min_files_for_long_document") or 0)
+    except Exception:
+        min_files_override = 0
+    if wants_long_document:
+        if target_pages <= 0:
+            target_pages = 50
+        min_files_required = min_files_override or max(2, math.ceil(target_pages / 25))
+    else:
+        min_files_required = 0
+    local_drive_insufficient = bool(wants_long_document and min_files_required > 0 and len(files) < min_files_required)
+    state["local_drive_sufficiency_threshold"] = min_files_required
+    state["local_drive_selected_file_count"] = len(files)
+    state["local_drive_insufficient"] = local_drive_insufficient
+    if local_drive_insufficient:
+        state["local_drive_insufficient_files_preview"] = files[:10]
+
+    handler_overrides = _load_extension_handler_overrides(state)
+    handler_registry = _extension_handler_registry(handler_overrides)
+    handler_routes = _route_files_by_handler(files, registry=handler_registry)
+    unknown_extensions = _unknown_extensions_from_manifest(manifest, registry=handler_registry)
+
+    routed_document_paths = list(handler_routes.get("document_ingestion_agent") or [])
+    routed_ocr_paths = list(handler_routes.get("ocr_agent") or [])
+    routed_excel_paths = list(handler_routes.get("excel_agent") or [])
+    state["local_drive_handler_registry"] = handler_registry
+    state["local_drive_handler_routes"] = handler_routes
+    state["local_drive_unknown_extensions"] = unknown_extensions
+    state["document_paths"] = routed_document_paths
+    if routed_ocr_paths:
+        state["ocr_image_paths"] = routed_ocr_paths
+        if not state.get("image_paths"):
+            state["image_paths"] = list(routed_ocr_paths)
+    else:
+        state["ocr_image_paths"] = []
+    if routed_excel_paths:
+        state["excel_file_paths"] = routed_excel_paths
+        if not str(state.get("excel_file_path", "")).strip():
+            state["excel_file_path"] = routed_excel_paths[0]
+    else:
+        state["excel_file_paths"] = []
+
+    auto_generate_handlers = bool(state.get("local_drive_auto_generate_extension_handlers", False))
+    if auto_generate_handlers and unknown_extensions:
+        signature = "|".join(unknown_extensions)
+        already_dispatched = bool(state.get("extension_handler_generation_dispatched", False)) and (
+            str(state.get("extension_handler_generation_signature", "")).strip() == signature
+        )
+        if already_dispatched:
+            state["extension_handler_generation_requested"] = False
+            state["extension_handler_generation_signature"] = signature
+            log_task_update(
+                "Local Drive",
+                "Unsupported extensions already processed for dynamic handler generation.",
+                f"extensions: {', '.join(unknown_extensions)}",
+            )
+        else:
+            capability_list = ", ".join(unknown_extensions)
+            example_files = []
+            file_entries = manifest.get("files") if isinstance(manifest.get("files"), list) else []
+            for item in file_entries:
+                if not isinstance(item, dict):
+                    continue
+                ext = str(item.get("extension", "") or "").strip().lower()
+                if ext in unknown_extensions:
+                    example_files.append(str(item.get("path", "")).strip())
+            example_files = [item for item in example_files if item][:6]
+            state["extension_handler_generation_requested"] = True
+            state["extension_handler_generation_dispatched"] = False
+            state["extension_handler_generation_signature"] = signature
+            state["missing_capability"] = f"File extension handling: {capability_list}"
+            state["requested_missing_capability"] = state["missing_capability"]
+            state["agent_factory_request"] = (
+                "Create a file-extension ingestion agent capability for unsupported local-drive file types. "
+                f"Unsupported extensions: {capability_list}. "
+                f"Example paths: {', '.join(example_files) if example_files else 'none provided'}."
+            )
+            log_task_update(
+                "Local Drive",
+                "Unsupported extensions detected; queued optional extension-handler generation request.",
+                f"extensions: {capability_list}",
+            )
+    elif not unknown_extensions:
+        state["extension_handler_generation_requested"] = False
+        state["extension_handler_generation_dispatched"] = False
+        state["extension_handler_generation_signature"] = ""
+
     log_task_update(
         "Local Drive",
-        f"Local drive pass #{call_number} started. Processing {len(files)} file(s).",
+        (
+            f"Local drive pass #{call_number} started. "
+            f"Processing {len(files)} selected file(s) from {manifest.get('file_count', 0)} discovered files."
+        ),
         "\n".join(files[:20]),
     )
 
     documents = []
     document_summaries = []
     for index, file_path in enumerate(files, start=1):
+        log_task_update(
+            "Local Drive",
+            f"[{index}/{len(files)}] Scanning file.",
+            file_path,
+        )
         parsed = parse_documents(
             [file_path],
             continue_on_error=True,
@@ -275,6 +670,19 @@ def local_drive_agent(state):
 
         parsed_text = str(parsed.get("text", "") or "").strip()
         metadata = parsed.get("metadata", {}) if isinstance(parsed.get("metadata"), dict) else {}
+        extraction_error = str(metadata.get("error", "") or "").strip()
+        if extraction_error:
+            log_task_update(
+                "Local Drive",
+                f"[{index}/{len(files)}] Skipped unreadable file.",
+                f"{file_path}\nreason: {extraction_error}",
+            )
+        else:
+            log_task_update(
+                "Local Drive",
+                f"[{index}/{len(files)}] Parsed file successfully.",
+                f"{file_path}\ncharacters: {len(parsed_text)}",
+            )
         document_type = str(metadata.get("type", Path(file_path).suffix.lstrip(".").lower() or "unknown"))
         if parsed_text:
             prompt = f"""
@@ -366,7 +774,11 @@ Input:
     catalog_lines = [
         "Catalog Summary",
         f"- Roots: {', '.join(roots)}",
-        f"- Files discovered: {len(files)}",
+        f"- Recursive scan: {'yes' if recursive else 'no'}",
+        f"- Folders discovered: {manifest.get('folder_count', 0)}",
+        f"- Files discovered: {manifest.get('file_count', 0)}",
+        f"- Files selected for processing: {manifest.get('selected_file_count', 0)}",
+        f"- Files excluded from processing: {manifest.get('excluded_file_count', 0)}",
         f"- Documents summarized: {len(document_summaries)}",
         f"- Extraction issues: {len(extraction_issues)}",
         "",
@@ -387,7 +799,71 @@ Input:
         for name in extraction_issues[:10]:
             catalog_lines.append(f"- {name}")
 
+    handler_counts = {
+        agent_name: len(agent_paths)
+        for agent_name, agent_paths in sorted(handler_routes.items())
+    }
+    catalog_lines.extend(["", "Extension Handler Routing"])
+    if handler_counts:
+        for agent_name, count in handler_counts.items():
+            catalog_lines.append(f"- {agent_name}: {count} file(s)")
+    else:
+        catalog_lines.append("- no routed files")
+    if unknown_extensions:
+        catalog_lines.append(f"- unknown_extensions: {', '.join(unknown_extensions)}")
+    else:
+        catalog_lines.append("- unknown_extensions: none")
+    if auto_generate_handlers:
+        catalog_lines.append("- auto_generate_handlers: enabled")
+    else:
+        catalog_lines.append("- auto_generate_handlers: disabled")
+
+    manifest_preview = {
+        "folder_count": manifest.get("folder_count", 0),
+        "file_count": manifest.get("file_count", 0),
+        "selected_file_count": manifest.get("selected_file_count", 0),
+        "excluded_file_count": manifest.get("excluded_file_count", 0),
+        "truncated": bool(manifest.get("truncated", False)),
+        "folders": (manifest.get("folders") or [])[:8],
+        "files": (manifest.get("files") or [])[:12],
+    }
+
+    catalog_lines.extend(
+        [
+            "",
+            "Structured Manifest",
+            "- A full per-entry filesystem manifest with metadata for each scanned file and folder was produced in the JSON artifact.",
+            f"- Manifest entries: {manifest.get('entry_count', 0)} total",
+            f"- Manifest preview folders: {min(len(manifest_preview['folders']), manifest.get('folder_count', 0))}",
+            f"- Manifest preview files: {min(len(manifest_preview['files']), manifest.get('file_count', 0))}",
+            json.dumps(manifest_preview, indent=2, ensure_ascii=False),
+        ]
+    )
+
     final_summary = "\n".join(catalog_lines + ["", "Rollup Findings", rollup_summary])
+
+    if local_drive_insufficient and not state.get("local_drive_insufficient_approved", False) and not state.get("local_drive_insufficient_prompted", False):
+        preview_names = [Path(item).name for item in files[:6]]
+        preview_block = "\n".join(f"- {name}" for name in preview_names) if preview_names else "- (no files listed)"
+        prompt_lines = [
+            "Local-drive scan completed, but the available files look insufficient for the requested long-form report.",
+            f"- Target pages: {target_pages}",
+            f"- Files found: {len(files)}",
+            f"- Suggested minimum files for this scope: {min_files_required}",
+            "",
+            "Files found (preview):",
+            preview_block,
+            "",
+            "Do you want to continue anyway using web research and the available files, or stop and add more documents?",
+            "Reply `continue` to proceed, or reply with changes / add more files to stop and revise.",
+        ]
+        prompt = "\n".join(prompt_lines)
+        state["pending_user_input_kind"] = "drive_data_sufficiency"
+        state["approval_pending_scope"] = "drive_data_sufficiency"
+        state["pending_user_question"] = prompt
+        state["draft_response"] = prompt
+        state["_skip_review_once"] = True
+        state["local_drive_insufficient_prompted"] = True
 
     payload = {
         "roots": roots,
@@ -396,6 +872,10 @@ Input:
         "allowed_extensions": sorted(allowed_extensions),
         "image_ocr_enabled": image_ocr_enabled,
         "files": files,
+        "manifest": manifest,
+        "handler_registry": handler_registry,
+        "handler_routes": handler_routes,
+        "unknown_extensions": unknown_extensions,
         "documents": [
             {
                 "path": item.get("path", ""),
@@ -417,6 +897,7 @@ Input:
     _write_agent_artifacts("local_drive_agent", call_number, final_summary, payload)
 
     state["local_drive_files"] = files
+    state["local_drive_manifest"] = manifest
     state["local_drive_documents"] = documents
     state["local_drive_document_summaries"] = document_summaries
     state["local_drive_summary_bank"] = {item["path"]: item["summary"] for item in document_summaries}
@@ -441,14 +922,61 @@ def ocr_agent(state):
     _, task_content, _ = begin_agent_session(state, "ocr_agent")
     state["ocr_calls"] = state.get("ocr_calls", 0) + 1
     call_number = state["ocr_calls"]
-    paths = _resolve_paths(state.get("ocr_image_paths") or state.get("image_paths") or [], state.get("ocr_working_directory"))
+    paths = _collect_ocr_candidate_paths(state)
     if not paths and task_content and Path(task_content).exists():
-        paths = [task_content]
+        task_path = str(Path(task_content).resolve())
+        if Path(task_path).suffix.lower() in IMAGE_FILE_EXTENSIONS:
+            paths = [task_path]
     if not paths:
-        raise ValueError("ocr_agent requires 'ocr_image_paths' or 'image_paths'.")
+        summary = (
+            "No image files were found for OCR. "
+            "Skipped OCR step and continued without blocking the workflow."
+        )
+        _write_agent_artifacts("ocr_agent", call_number, summary, [])
+        state["ocr_results"] = []
+        state["ocr_summary"] = summary
+        state["ocr_skipped"] = True
+        state["ocr_skip_reason"] = "no_image_paths"
+        state["draft_response"] = summary
+        log_task_update("OCR Agent", f"OCR pass #{call_number} skipped: no image files detected.")
+        return publish_agent_output(
+            state,
+            "ocr_agent",
+            summary,
+            f"ocr_result_{call_number}",
+            recipients=["orchestrator_agent", "worker_agent", "reviewer_agent"],
+        )
 
     log_task_update("OCR Agent", f"OCR pass #{call_number} started.", "\n".join(paths))
-    results = [openai_ocr_image(path, state.get("ocr_instruction")) for path in paths]
+    results = []
+    failed_files = []
+    successful_files = []
+    for index, path in enumerate(paths, start=1):
+        log_task_update(
+            "OCR Agent",
+            f"[{index}/{len(paths)}] Running OCR.",
+            path,
+        )
+        try:
+            item = openai_ocr_image(path, state.get("ocr_instruction"))
+            item["error"] = ""
+            results.append(item)
+            successful_files.append(path)
+            log_task_update(
+                "OCR Agent",
+                f"[{index}/{len(paths)}] OCR extracted text.",
+                f"{path}\ncharacters: {len(str(item.get('text', '') or ''))}",
+            )
+        except Exception as exc:
+            error_text = str(exc)
+            failed_files.append({"path": path, "error": error_text})
+            results.append({"path": path, "text": "", "error": error_text, "raw": {}})
+            log_task_update(
+                "OCR Agent",
+                f"[{index}/{len(paths)}] OCR skipped unreadable image.",
+                f"{path}\nreason: {error_text}",
+            )
+
     prompt = f"""
 You are an OCR review agent.
 Summarize the extracted text, tables, and notable fields from these OCR results.
@@ -457,9 +985,19 @@ OCR Results:
 {json.dumps(results, indent=2, ensure_ascii=False)[:25000]}
 """
     summary = llm_text(prompt)
+    if failed_files:
+        summary = (
+            f"{summary}\n\nOCR file handling summary:\n"
+            f"- Attempted: {len(paths)}\n"
+            f"- Succeeded: {len(successful_files)}\n"
+            f"- Skipped: {len(failed_files)}"
+        )
     _write_agent_artifacts("ocr_agent", call_number, summary, results)
     state["ocr_results"] = results
     state["ocr_summary"] = summary
+    state["ocr_failed_files"] = failed_files
+    state["ocr_successful_files"] = successful_files
+    state["ocr_skipped"] = False
     state["draft_response"] = summary
     return publish_agent_output(
         state,

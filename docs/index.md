@@ -1,13 +1,13 @@
-# SuperAgent Docs
+# Kendr Docs
 
-SuperAgent is a multi-agent intelligence workspace for evidence-driven research, document ingestion, and persistent knowledge workflows.
+Kendr is a multi-agent intelligence workspace for evidence-driven research, document ingestion, and persistent knowledge workflows.
 
 This is the main public docs landing page. If you are new to the project, start with install, verification, and the five recommended workflow entry points before going deeper into architecture or internal surfaces.
 
 ## Start Here
 
 - [Quickstart](quickstart.md)
-  Fast path from install to first `superagent run`.
+  Fast path from install to first `kendr run`.
 - [Install](install.md)
   Local install, environment setup, Docker, and verification commands.
 - [Verification](verification.md)

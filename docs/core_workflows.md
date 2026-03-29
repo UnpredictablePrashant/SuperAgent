@@ -1,6 +1,6 @@
 # Core Workflows
 
-These are the five productized entry points for SuperAgent in the current codebase.
+These are the five productized entry points for Kendr in the current codebase.
 
 Use them in this order if you are validating the repo end to end:
 
@@ -21,12 +21,12 @@ Use this when you want OpenAI's web-grounded deep research path instead of the l
 ### Minimum Setup
 
 - `OPENAI_API_KEY`
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 
 ### Demo
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --research-model o4-mini-deep-research \
   --research-instructions "Cite concrete sources and call out uncertainty." \
   "Do deep research on battery recycling market structure, current leaders, and investment risks."
@@ -53,12 +53,12 @@ Use this when the evidence is already on disk and you want file-by-file summariz
 ### Minimum Setup
 
 - `OPENAI_API_KEY`
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 
 ### Demo
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --drive ./docs \
   --drive-max-files 25 \
   "Review this folder, summarize the key files, and produce an executive-ready intelligence brief."
@@ -87,14 +87,14 @@ Use this when you want a persistent session-based knowledge system over local fi
 
 - `OPENAI_API_KEY`
 - reachable `QDRANT_URL`
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 
 ### Demo
 
 Build:
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --superrag-mode build \
   --superrag-new-session \
   --superrag-session-title "product_ops_kb" \
@@ -106,7 +106,7 @@ superagent run --current-folder \
 Chat:
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --superrag-mode chat \
   --superrag-session product_ops_kb \
   --superrag-chat "What are the main operating risks and where are they sourced from?"
@@ -134,13 +134,13 @@ Use this for end-to-end project delivery: architecture, approval-ready blueprint
 
 ### Minimum Setup
 
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 - `OPENAI_API_KEY` or local `codex` CLI on `PATH`
 
 ### Demo
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --max-steps 30 \
   --coding-context-file README.md \
   --coding-instructions "Prefer FastAPI, pytest, docs, and CI verification commands." \
@@ -172,7 +172,7 @@ Use this for controlled local shell execution with explicit approval, privileged
 
 ### Minimum Setup
 
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 - explicit operator approval per run
 
 ### Demo
@@ -180,7 +180,7 @@ Use this for controlled local shell execution with explicit approval, privileged
 Windows PowerShell example:
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --os-command "Get-ChildItem" \
   --os-shell powershell \
   --target-os windows \
@@ -192,7 +192,7 @@ superagent run --current-folder \
 POSIX example:
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --os-command "ls -la" \
   --os-shell bash \
   --target-os linux \

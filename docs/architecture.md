@@ -1,6 +1,6 @@
 # Architecture
 
-SuperAgent is built as a setup-aware multi-agent runtime with dynamic discovery, gated routing, durable artifacts, and reusable memory.
+Kendr is built as a setup-aware multi-agent runtime with dynamic discovery, gated routing, durable artifacts, and reusable memory.
 
 ## Runtime Flow
 
@@ -17,31 +17,31 @@ At a high level, a run goes through these stages:
 
 ## Key Modules
 
-- [`superagent/runtime.py`](../superagent/runtime.py)
+- [`kendr/runtime.py`](../kendr/runtime.py)
   Dynamic orchestration runtime and routing loop.
-- [`superagent/orchestration/state.py`](../superagent/orchestration/state.py)
+- [`kendr/orchestration/state.py`](../kendr/orchestration/state.py)
   Shared runtime-state typing and pause/resume state helpers.
-- [`superagent/discovery.py`](../superagent/discovery.py)
+- [`kendr/discovery.py`](../kendr/discovery.py)
   Discovery of built-in agents, external plugins, providers, and channels.
-- [`superagent/registry.py`](../superagent/registry.py)
+- [`kendr/registry.py`](../kendr/registry.py)
   Runtime registry for agents, providers, channels, and plugins.
-- [`superagent/cli.py`](../superagent/cli.py)
+- [`kendr/cli.py`](../kendr/cli.py)
   Main command surface.
-- [`superagent/gateway_server.py`](../superagent/gateway_server.py)
+- [`kendr/gateway_server.py`](../kendr/gateway_server.py)
   Lightweight HTTP gateway and dashboard surface.
-- [`superagent/http/`](../superagent/http/)
+- [`kendr/http/`](../kendr/http/)
   HTTP-facing session-key and resume helpers shared by CLI and gateway surfaces.
-- [`superagent/setup/`](../superagent/setup/)
+- [`kendr/setup/`](../kendr/setup/)
   Setup-aware integration detection surface used by runtime and setup UI.
-- [`superagent/setup/catalog.py`](../superagent/setup/catalog.py)
+- [`kendr/setup/catalog.py`](../kendr/setup/catalog.py)
   Canonical integration declaration source for setup fields, discovery metadata, docs links, and routing contracts.
-- [`superagent/providers/`](../superagent/providers/)
+- [`kendr/providers/`](../kendr/providers/)
   Provider and OAuth access helpers used by communication and ingestion agents.
-- [`superagent/domain/`](../superagent/domain/)
+- [`kendr/domain/`](../kendr/domain/)
   Shared domain workflow logic extracted from large agent modules by responsibility.
 - [`tasks/a2a_protocol.py`](../tasks/a2a_protocol.py)
   Internal task/message/artifact protocol.
-- [`superagent/persistence/`](../superagent/persistence/)
+- [`kendr/persistence/`](../kendr/persistence/)
   Durable SQLite persistence split by runtime, setup, and superRAG responsibilities.
 - [`tasks/sqlite_store.py`](../tasks/sqlite_store.py)
   Backward-compatible import shim for the legacy persistence path.
@@ -60,8 +60,8 @@ The registry layer does four things:
 Default external plugin search paths:
 
 - `./plugins`
-- `~/.superagent/plugins`
-- additional paths in `SUPERAGENT_PLUGIN_PATHS`
+- `~/.kendr/plugins`
+- additional paths in `KENDR_PLUGIN_PATHS`
 
 External plugins are simple Python modules that expose `register(registry)`.
 
@@ -69,9 +69,9 @@ See [Plugin SDK](plugin_sdk.md) for the versioned external contract and what is 
 
 ## Setup-Aware Routing
 
-SuperAgent does not route against the full theoretical surface by default.
+Kendr does not route against the full theoretical surface by default.
 
-`superagent/setup` and `tasks/setup_registry.py` detect:
+`kendr/setup` and `tasks/setup_registry.py` detect:
 
 - configured API providers
 - installed local tools
@@ -98,7 +98,7 @@ Planning is a first-class stage:
 
 ## Persistence And Outputs
 
-SuperAgent stores durable state in SQLite, including:
+Kendr stores durable state in SQLite, including:
 
 - runs
 - agent cards
@@ -129,7 +129,7 @@ This is the foundation for `superRAG`, local-drive reuse, and cross-document syn
 
 ## Services
 
-SuperAgent currently supports these service shapes:
+Kendr currently supports these service shapes:
 
 - CLI runtime
 - HTTP gateway

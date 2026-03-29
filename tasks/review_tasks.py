@@ -1,11 +1,11 @@
 import json
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output, recent_messages_for_agent
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_task_update, normalize_llm_text, write_text_file
 
 
 def _strip_code_fences(text: str) -> str:
-    stripped = text.strip()
+    stripped = normalize_llm_text(text).strip()
     if stripped.startswith("```") and stripped.endswith("```"):
         lines = stripped.splitlines()
         if len(lines) >= 2:
@@ -59,6 +59,18 @@ def reviewer_agent(state):
     allowed_next_agents = sorted(dict.fromkeys(available_agents))
     allowed_enum = "|".join(allowed_next_agents + ["finish"])
     allowed_text = ", ".join(allowed_next_agents) if allowed_next_agents else "worker_agent"
+    latest_structured_context = {}
+    if latest_agent == "local_drive_agent" and isinstance(state.get("local_drive_manifest"), dict):
+        manifest = state.get("local_drive_manifest", {})
+        latest_structured_context = {
+            "folder_count": manifest.get("folder_count", 0),
+            "file_count": manifest.get("file_count", 0),
+            "selected_file_count": manifest.get("selected_file_count", 0),
+            "excluded_file_count": manifest.get("excluded_file_count", 0),
+            "truncated": bool(manifest.get("truncated", False)),
+            "folders_preview": (manifest.get("folders") or [])[:5],
+            "files_preview": (manifest.get("files") or [])[:10],
+        }
     log_task_update(
         "Reviewer",
         f"Review pass #{state['reviewer_calls']} started. Auditing the latest step against the current objective.",
@@ -87,6 +99,9 @@ def reviewer_agent(state):
 
     Recent A2A messages for the reviewer:
     {a2a_context}
+
+    Relevant structured state for the latest agent:
+    {json.dumps(latest_structured_context, indent=2, ensure_ascii=False)}
 
     Current setup summary:
     {state.get("setup_summary", "")}

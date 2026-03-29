@@ -8,8 +8,13 @@ $VenvPython = Join-Path $VenvRoot 'Scripts\python.exe'
 $VenvScripts = Join-Path $VenvRoot 'Scripts'
 
 if (Test-Path $VenvPython) {
-    Write-Host '[uninstall] uninstalling superagent-runtime from .venv'
-    & $VenvPython -m pip uninstall -y superagent-runtime *> $null
+    Write-Host '[uninstall] uninstalling kendr-runtime from .venv'
+    & $VenvPython -m pip show kendr-runtime *> $null
+    if ($LASTEXITCODE -eq 0) {
+        & $VenvPython -m pip uninstall -y kendr-runtime *> $null
+    } else {
+        Write-Host '[uninstall] kendr-runtime is not installed in .venv; skipping package uninstall'
+    }
 } else {
     Write-Host '[uninstall] .venv not found; skipping package uninstall'
 }

@@ -7,14 +7,14 @@ from unittest.mock import patch
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from superagent.discovery import build_registry
-from superagent.recovery import (
+from kendr.discovery import build_registry
+from kendr.recovery import (
     RUN_MANIFEST_FILE,
     discover_resume_candidates,
     load_resume_candidate,
     write_recovery_files,
 )
-from superagent.runtime import AgentRuntime
+from kendr.runtime import AgentRuntime
 
 
 class RecoveryWorkflowTests(unittest.TestCase):
@@ -106,7 +106,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
             },
         }
         with TemporaryDirectory() as tmp:
-            with patch("superagent.runtime.build_setup_snapshot", return_value=self._fake_setup_snapshot()):
+            with patch("kendr.runtime.build_setup_snapshot", return_value=self._fake_setup_snapshot()):
                 runtime = AgentRuntime(build_registry())
                 state = runtime.build_initial_state(
                     "resume",
@@ -141,7 +141,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
             },
         }
         with TemporaryDirectory() as tmp:
-            with patch("superagent.runtime.build_setup_snapshot", return_value=self._fake_setup_snapshot()):
+            with patch("kendr.runtime.build_setup_snapshot", return_value=self._fake_setup_snapshot()):
                 runtime = AgentRuntime(build_registry())
                 state = runtime.build_initial_state(
                     "approve",

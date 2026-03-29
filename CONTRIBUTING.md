@@ -1,6 +1,6 @@
-# Contributing to SuperAgent
+# Contributing to Kendr
 
-SuperAgent is a Python-native, setup-aware multi-agent runtime focused on evidence-driven workflows.
+Kendr is a Python-native, setup-aware multi-agent runtime focused on evidence-driven workflows.
 
 The fastest way to contribute safely is to stay inside the product thesis that the repo already documents:
 

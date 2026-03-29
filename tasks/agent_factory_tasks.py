@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_task_update, normalize_llm_text, write_text_file
 
 
 GENERATED_AGENT_DIR = Path("tasks/generated_agents")
@@ -12,7 +12,7 @@ MANIFEST_PATH = GENERATED_AGENT_DIR / "manifest.json"
 
 
 def _strip_code_fences(text: str) -> str:
-    stripped = (text or "").strip()
+    stripped = normalize_llm_text(text).strip()
     if stripped.startswith("```") and stripped.endswith("```"):
         lines = stripped.splitlines()
         if len(lines) >= 2:

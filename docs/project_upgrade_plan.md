@@ -1,6 +1,6 @@
-# SuperAgent Upgrade Plan
+# Kendr Upgrade Plan
 
-This document is the execution plan for turning SuperAgent from a capable framework into a polished product.
+This document is the execution plan for turning Kendr from a capable framework into a polished product.
 
 The plan is intentionally phased. Do not start the next phase until the acceptance criteria for the current phase are met.
 
@@ -14,7 +14,7 @@ The plan is intentionally phased. Do not start the next phase until the acceptan
 
 ## Target Outcome
 
-By the end of this plan, SuperAgent should feel like:
+By the end of this plan, Kendr should feel like:
 
 - a clearly positioned multi-agent research and intelligence runtime
 - easy to install and understand
@@ -26,7 +26,7 @@ By the end of this plan, SuperAgent should feel like:
 
 ### Goal
 
-Define exactly what SuperAgent is, who it is for, and which workflows are first-class.
+Define exactly what Kendr is, who it is for, and which workflows are first-class.
 
 ### Deliverables
 
@@ -45,12 +45,12 @@ Define exactly what SuperAgent is, who it is for, and which workflows are first-
 ### GPT Prompt
 
 ```text
-You are working inside the SuperAgent repository.
+You are working inside the Kendr repository.
 
 Your job is to rewrite the project positioning before any further feature work happens.
 
 Tasks:
-1. Inspect README.md, SampleTasks.md, docs/, superagent/, and tasks/.
+1. Inspect README.md, SampleTasks.md, docs/, kendr/, and tasks/.
 2. Determine the strongest product thesis for the repo based on what is actually implemented today.
 3. Produce a concise positioning update centered on one primary identity:
    - multi-agent research runtime
@@ -97,7 +97,7 @@ Replace the monolithic documentation style with a product docs structure.
 ### GPT Prompt
 
 ```text
-You are improving the documentation architecture of SuperAgent.
+You are improving the documentation architecture of Kendr.
 
 Tasks:
 1. Audit README.md and docs/.
@@ -114,7 +114,7 @@ Tasks:
 3. Remove absolute local filesystem links and replace them with repo-relative references.
 4. Create a docs index that points to all major guides.
 5. Keep all claims grounded in the codebase.
-6. Add a short "first run" walkthrough using the actual `superagent` CLI.
+6. Add a short "first run" walkthrough using the actual `kendr` CLI.
 
 Constraints:
 - Do not delete important information; relocate and simplify it.
@@ -150,12 +150,12 @@ Break the runtime into maintainable product boundaries.
 ### GPT Prompt
 
 ```text
-You are refactoring SuperAgent for long-term maintainability.
+You are refactoring Kendr for long-term maintainability.
 
 Tasks:
 1. Inspect the largest files in the repository, especially:
-   - superagent/cli.py
-   - superagent/runtime.py
+   - kendr/cli.py
+   - kendr/runtime.py
    - tasks/sqlite_store.py
    - tasks/intelligence_tasks.py
    - tasks/superrag_tasks.py
@@ -207,10 +207,10 @@ Make every provider, channel, and optional tool follow one predictable lifecycle
 ### GPT Prompt
 
 ```text
-You are standardizing integration architecture in SuperAgent.
+You are standardizing integration architecture in Kendr.
 
 Tasks:
-1. Audit superagent/discovery.py, tasks/setup_registry.py, tasks/setup_config_store.py, .env.example, README.md, and SampleTasks.md.
+1. Audit kendr/discovery.py, tasks/setup_registry.py, tasks/setup_config_store.py, .env.example, README.md, and SampleTasks.md.
 2. Define and implement one integration lifecycle covering:
    - declaration
    - configuration
@@ -259,7 +259,7 @@ Make the default development and validation path reliable.
 ### GPT Prompt
 
 ```text
-You are hardening SuperAgent verification and CI.
+You are hardening Kendr verification and CI.
 
 Tasks:
 1. Audit requirements.txt, pyproject.toml, Makefile, scripts/, docker-compose.yml, and tests/.
@@ -314,7 +314,7 @@ Make a small number of workflows excellent instead of many workflows merely pres
 ### GPT Prompt
 
 ```text
-You are productizing the core SuperAgent workflows.
+You are productizing the core Kendr workflows.
 
 Primary workflows:
 - deep research
@@ -369,10 +369,10 @@ Turn the current plugin mechanism into a documented extension system.
 ### GPT Prompt
 
 ```text
-You are turning SuperAgent's plugin mechanism into a real extension SDK.
+You are turning Kendr's plugin mechanism into a real extension SDK.
 
 Tasks:
-1. Audit plugin_templates/, superagent/types.py, superagent/discovery.py, and registry/runtime integration points.
+1. Audit plugin_templates/, kendr/types.py, kendr/discovery.py, and registry/runtime integration points.
 2. Define a versioned plugin contract for external contributors.
 3. Add missing structure such as:
    - plugin manifest expectations
@@ -417,7 +417,7 @@ Make the project discoverable and credible from the outside.
 ### GPT Prompt
 
 ```text
-You are improving the public trust and visibility layer of SuperAgent.
+You are improving the public trust and visibility layer of Kendr.
 
 Tasks:
 1. Audit the repository for missing public-facing assets:
@@ -429,7 +429,7 @@ Tasks:
    - contribution guidance
 2. Add or improve the repo assets that make the project credible to new users.
 3. Create a release/readme/docs structure that communicates:
-   - what SuperAgent is
+   - what Kendr is
    - what it does well
    - how to install it
    - how to verify it
@@ -457,7 +457,7 @@ Deliverables:
 
 ## Definition Of Done
 
-SuperAgent is in a strong product state when:
+Kendr is in a strong product state when:
 
 - the README is clear and short
 - the docs are structured and truthful

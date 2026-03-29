@@ -1,6 +1,6 @@
 # SampleTasks
 
-This file shows practical entry points for the SuperAgent intelligence workspace.
+This file shows practical entry points for the Kendr intelligence workspace.
 
 If you are new to the repo, start with the stable workflows first:
 
@@ -17,9 +17,9 @@ Use the beta and experimental workflows only after the core stack is configured 
 ### Quick Sanity Check
 
 ```bash
-superagent --help
-superagent agents list
-superagent plugins list
+kendr --help
+kendr agents list
+kendr plugins list
 python scripts/verify.py smoke
 ```
 
@@ -27,10 +27,10 @@ python scripts/verify.py smoke
 
 Prerequisites:
 - `OPENAI_API_KEY`
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 
 ```bash
-superagent run "analyze this company and build a report"
+kendr run "analyze this company and build a report"
 ```
 
 Expected behavior:
@@ -44,10 +44,10 @@ Acceptance:
 
 Prerequisites:
 - `OPENAI_API_KEY`
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 
 ```bash
-superagent run \
+kendr run \
   --current-folder \
   --research-model o4-mini-deep-research \
   --research-instructions "Cite concrete sources and call out uncertainty." \
@@ -66,10 +66,10 @@ Acceptance:
 
 Prerequisites:
 - `OPENAI_API_KEY`
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 
 ```bash
-superagent run \
+kendr run \
   --drive="D:/xyz/folder" \
   "Review this folder, summarize the important files, and produce an executive-ready intelligence brief."
 ```
@@ -86,11 +86,11 @@ Acceptance:
 
 Prerequisites:
 - `OPENAI_API_KEY`
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 - reachable `QDRANT_URL`
 
 ```bash
-superagent run \
+kendr run \
   --superrag-mode build \
   --superrag-new-session \
   --superrag-session-title "product_ops_kb" \
@@ -100,7 +100,7 @@ superagent run \
 ```
 
 ```bash
-superagent run \
+kendr run \
   --superrag-mode chat \
   --superrag-session product_ops_kb \
   --superrag-chat "What are the main operating risks and where are they sourced from?"
@@ -117,11 +117,11 @@ Acceptance:
 ### Coding Project Builder (Beta)
 
 Prerequisites:
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 - `OPENAI_API_KEY` or local `codex` CLI on `PATH`
 
 ```bash
-superagent run \
+kendr run \
   --current-folder \
   --max-steps 30 \
   --coding-context-file README.md \
@@ -141,11 +141,11 @@ Acceptance:
 ### Local Command Execution (Beta)
 
 Prerequisites:
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 - explicit approval per run
 
 ```bash
-superagent run \
+kendr run \
   --current-folder \
   --os-command "Get-ChildItem" \
   --os-shell powershell \
@@ -166,9 +166,9 @@ Acceptance:
 ### Useful Flags
 
 ```bash
-superagent run --current-folder "analyze this company and build a report"
-superagent run --max-steps 12 "summarize key risks for a fintech startup"
-superagent run --json "build a short research brief on OpenAI"
+kendr run --current-folder "analyze this company and build a report"
+kendr run --max-steps 12 "summarize key risks for a fintech startup"
+kendr run --json "build a short research brief on OpenAI"
 ```
 
 ## Extended Case Studies
@@ -178,7 +178,7 @@ superagent run --json "build a short research brief on OpenAI"
 Goal: Produce a quick, source-backed brief on a company.
 
 ```bash
-superagent run "Create an intelligence brief on Stripe: business model, products, competitors, recent strategy moves, and top risks."
+kendr run "Create an intelligence brief on Stripe: business model, products, competitors, recent strategy moves, and top risks."
 ```
 
 Expected behavior:
@@ -191,7 +191,7 @@ Expected behavior:
 Goal: Map relationships between people, companies, and events.
 
 ```bash
-superagent run "Research Satya Nadella's recent public interviews and connect themes to Microsoft product priorities."
+kendr run "Research Satya Nadella's recent public interviews and connect themes to Microsoft product priorities."
 ```
 
 Expected behavior:
@@ -208,7 +208,7 @@ Prerequisites:
 - `SERP_API_KEY`
 
 ```bash
-superagent run "Identify India-based B2B SaaS startups likely in Series A/B range, then provide a screened shortlist with rationale."
+kendr run "Identify India-based B2B SaaS startups likely in Series A/B range, then provide a screened shortlist with rationale."
 ```
 
 Expected behavior:
@@ -225,7 +225,7 @@ Prerequisites:
 - `SERP_API_KEY`
 
 ```bash
-superagent run "Review this proposal topic: low-cost edge AI for crop disease detection; summarize prior art, key papers, and novelty gaps."
+kendr run "Review this proposal topic: low-cost edge AI for crop disease detection; summarize prior art, key papers, and novelty gaps."
 ```
 
 Expected behavior:
@@ -238,7 +238,7 @@ Expected behavior:
 Goal: Generate a defensive security findings summary.
 
 ```bash
-superagent run \
+kendr run \
   --security-authorized \
   --security-target-url https://example.com \
   --security-authorization-note "SEC-123 approved by owner" \
@@ -260,7 +260,7 @@ Prerequisites:
 - `SERP_API_KEY`
 
 ```bash
-superagent run "Plan best travel options from Bangalore to Singapore next month with likely flight windows and routing advice."
+kendr run "Plan best travel options from Bangalore to Singapore next month with likely flight windows and routing advice."
 ```
 
 Expected behavior:
@@ -272,7 +272,7 @@ Expected behavior:
 Goal: Run an explicit, authorized, defensive security assessment with deeper scan coverage.
 
 ```bash
-superagent run \
+kendr run \
   --security-authorized \
   --security-target-url https://example.com \
   --security-authorization-note "SEC-123 approved by owner" \
@@ -290,7 +290,7 @@ Expected behavior:
 Optional: disable auto-install for this run
 
 ```bash
-superagent run --no-auto-install-security-tools --security-authorized --security-target-url https://example.com --security-authorization-note "SEC-123 approved by owner" --security-scan-profile deep "Perform authorized defensive assessment."
+kendr run --no-auto-install-security-tools --security-authorized --security-target-url https://example.com --security-authorization-note "SEC-123 approved by owner" --security-scan-profile deep "Perform authorized defensive assessment."
 ```
 
 ### Case Study 8: Master Coding Agent (Detailed Long-Running Build) (Experimental)
@@ -299,10 +299,10 @@ Goal: Deliver a complete project blueprint and route implementation/setup work t
 
 Prerequisites:
 - `OPENAI_API_KEY` or local `codex` CLI on PATH
-- `SUPERAGENT_WORKING_DIR`
+- `KENDR_WORKING_DIR`
 
 ```bash
-superagent run --max-steps 30 "Use master_coding_agent to design and deliver a complete production-ready SaaS starter: API, auth, database migrations, CI, tests, docs, and deployment instructions."
+kendr run --max-steps 30 "Use master_coding_agent to design and deliver a complete production-ready SaaS starter: API, auth, database migrations, CI, tests, docs, and deployment instructions."
 ```
 
 Expected behavior:
@@ -315,7 +315,7 @@ Expected behavior:
 Goal: Build a deeply researched, coherent long-form report through staged chapter generation and final merge.
 
 ```bash
-superagent run \
+kendr run \
   --max-steps 180 \
   --long-document \
   --long-document-pages 50 \
@@ -343,7 +343,7 @@ Goal: Build a persistent session-based RAG system from mixed sources, then chat 
 Build from local files + URLs:
 
 ```bash
-superagent run \
+kendr run \
   --superrag-mode build \
   --superrag-new-session \
   --superrag-session-title "product_ops_kb" \
@@ -357,7 +357,7 @@ superagent run \
 Build from database URL (schema + sampled row knowledge):
 
 ```bash
-superagent run \
+kendr run \
   --superrag-mode build \
   --superrag-session ops_db_kb \
   --superrag-db-url "postgresql://user:pass@host:5432/appdb" \
@@ -368,7 +368,7 @@ superagent run \
 Build including OneDrive content (requires Microsoft Graph setup):
 
 ```bash
-superagent run \
+kendr run \
   --superrag-mode build \
   --superrag-session onedrive_ops_kb \
   --superrag-onedrive \
@@ -379,7 +379,7 @@ superagent run \
 Chat with an existing session:
 
 ```bash
-superagent run \
+kendr run \
   --superrag-mode chat \
   --superrag-session ops_db_kb \
   --superrag-chat "What are the top risk indicators and their source tables?" \
@@ -389,19 +389,19 @@ superagent run \
 Switch to a different session:
 
 ```bash
-superagent run --superrag-mode switch --superrag-session onedrive_ops_kb "Switch active superRAG session."
+kendr run --superrag-mode switch --superrag-session onedrive_ops_kb "Switch active superRAG session."
 ```
 
 Check one session status:
 
 ```bash
-superagent run --superrag-mode status --superrag-session ops_db_kb "Show superRAG status."
+kendr run --superrag-mode status --superrag-session ops_db_kb "Show superRAG status."
 ```
 
 List available superRAG sessions:
 
 ```bash
-superagent run --superrag-mode list "List my superRAG sessions."
+kendr run --superrag-mode list "List my superRAG sessions."
 ```
 
 Expected behavior:
@@ -415,25 +415,25 @@ Expected behavior:
 Inspect one agent:
 
 ```bash
-superagent agents show company_research_agent --json
+kendr agents show company_research_agent --json
 ```
 
 Run daemon once (monitor pass):
 
 ```bash
-superagent daemon --once
+kendr daemon --once
 ```
 
 Set current terminal folder as default working directory:
 
 ```bash
-superagent workdir here
+kendr workdir here
 ```
 
 Run gateway mode:
 
 ```bash
-superagent gateway
+kendr gateway
 ```
 
 ## Full Setup Configuration (Web + CLI)
@@ -441,54 +441,54 @@ superagent gateway
 Start setup UI:
 
 ```bash
-superagent setup ui
+kendr setup ui
 ```
 
 List every configurable component:
 
 ```bash
-superagent setup components
+kendr setup components
 ```
 
 Set a config value in local setup DB:
 
 ```bash
-superagent setup set openai OPENAI_API_KEY sk-...
-superagent setup set openai OPENAI_MODEL_GENERAL gpt-4.1-mini
-superagent setup set openai OPENAI_MODEL_CODING gpt-5.3-codex
+kendr setup set openai OPENAI_API_KEY sk-...
+kendr setup set openai OPENAI_MODEL_GENERAL gpt-4.1-mini
+kendr setup set openai OPENAI_MODEL_CODING gpt-5.3-codex
 ```
 
 Inspect one component:
 
 ```bash
-superagent setup show openai --json
+kendr setup show openai --json
 ```
 
 Disable or enable a component:
 
 ```bash
-superagent setup disable serpapi
-superagent setup enable serpapi
+kendr setup disable serpapi
+kendr setup enable serpapi
 ```
 
 Export DB settings as dotenv lines:
 
 ```bash
-superagent setup export-env
-superagent setup export-env --include-secrets
+kendr setup export-env
+kendr setup export-env --include-secrets
 ```
 
 Install auto-installable local components/tools:
 
 ```bash
-superagent setup install
-superagent setup install --yes
-superagent setup install --yes --only nmap zap dependency-check playwright
+kendr setup install
+kendr setup install --yes
+kendr setup install --yes --only nmap zap dependency-check playwright
 ```
 
 ## Notes
 
 - Agent routing is setup-aware: unconfigured integrations are filtered out automatically.
-- `superagent setup status` is the canonical way to inspect configuration gaps, health, and routing eligibility.
+- `kendr setup status` is the canonical way to inspect configuration gaps, health, and routing eligibility.
 - Every run writes logs and artifacts into `output/runs/<run_id>/` (including `execution.log` and `final_output.txt`).
-- Use `--json` when integrating `superagent` output into another app or pipeline.
+- Use `--json` when integrating `kendr` output into another app or pipeline.

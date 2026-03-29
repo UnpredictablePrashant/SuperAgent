@@ -15,7 +15,7 @@ class CliEntrypointSmokeTests(unittest.TestCase):
         env["PYTHONPATH"] = str(ROOT) if not env.get("PYTHONPATH") else f"{ROOT}{os.pathsep}{env['PYTHONPATH']}"
 
         result = subprocess.run(
-            [sys.executable, "-m", "superagent.cli", "--help"],
+            [sys.executable, "-m", "kendr.cli", "--help"],
             cwd=ROOT,
             env=env,
             capture_output=True,
@@ -24,7 +24,7 @@ class CliEntrypointSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn("usage: superagent", result.stdout.lower())
+        self.assertIn("usage: kendr", result.stdout.lower())
 
 
 if __name__ == "__main__":

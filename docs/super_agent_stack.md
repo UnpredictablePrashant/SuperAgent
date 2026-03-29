@@ -1,6 +1,6 @@
-# SuperAgent Core Intelligence Stack
+# Kendr Core Intelligence Stack
 
-SuperAgent is best understood today as a multi-agent intelligence workspace.
+Kendr is best understood today as a multi-agent intelligence workspace.
 
 This document covers the core stack behind that positioning: evidence gathering, document ingestion, memory indexing, and report-ready synthesis across people, companies, organizations, groups, and related entities.
 

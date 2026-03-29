@@ -7,7 +7,7 @@ An integration is only complete when the same contract is wired through every st
 ## Lifecycle Contract
 
 1. Declaration
-   Add the integration to [`superagent/setup/catalog.py`](../superagent/setup/catalog.py) with:
+   Add the integration to [`kendr/setup/catalog.py`](../kendr/setup/catalog.py) with:
    - stable `id`
    - title/category/description
    - setup fields
@@ -17,7 +17,7 @@ An integration is only complete when the same contract is wired through every st
    - detection inputs such as env vars, OAuth token store, local command, or health URL
 
 2. Configuration
-   Make sure the integration appears through `superagent setup components` via [`tasks/setup_config_store.py`](../tasks/setup_config_store.py).
+   Make sure the integration appears through `kendr setup components` via [`tasks/setup_config_store.py`](../tasks/setup_config_store.py).
    Required env keys must exist in [`.env.example`](../.env.example) when users are expected to set them directly.
 
 3. Setup Detection
@@ -58,6 +58,6 @@ An integration is only complete when the same contract is wired through every st
 
 - Does the integration have one canonical `id` across setup, detection, routing, and docs?
 - Can a user tell exactly what to configure from docs and `.env.example`?
-- Does `superagent setup status` explain why the integration is unavailable?
+- Does `kendr setup status` explain why the integration is unavailable?
 - Are dependent agents hidden from routing when the integration is missing or disabled?
 - Is there at least one regression test covering that behavior?

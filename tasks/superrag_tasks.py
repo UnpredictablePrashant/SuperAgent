@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from superagent.persistence import (
+from kendr.persistence import (
     get_superrag_session,
     insert_superrag_chat_message,
     insert_superrag_ingestion,
@@ -18,7 +18,7 @@ from superagent.persistence import (
     list_superrag_sessions,
     upsert_superrag_session,
 )
-from superagent.providers import get_microsoft_graph_access_token
+from kendr.providers import get_microsoft_graph_access_token
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.research_infra import (
@@ -280,7 +280,7 @@ def _format_eta(seconds: int) -> str:
 
 def _superrag_dependency_error(stage: str, exc: Exception) -> ValueError:
     return ValueError(
-        f"superRAG {stage} failed. Confirm OPENAI_API_KEY and a reachable QDRANT_URL, then re-run `superagent setup status`. Root cause: {exc}"
+        f"superRAG {stage} failed. Confirm OPENAI_API_KEY and a reachable QDRANT_URL, then re-run `kendr setup status`. Root cause: {exc}"
     )
 
 

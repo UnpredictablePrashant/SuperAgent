@@ -3,6 +3,7 @@
 STACK_TEMPLATE = {
     "name": "fastapi_postgres",
     "display_name": "FastAPI + PostgreSQL",
+    "template_dir": "project_templates/fastapi_postgres",
     "tech_stack": {
         "language": "python",
         "framework": "fastapi",

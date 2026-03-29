@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from superagent.discovery import build_registry
-from superagent.setup import build_setup_snapshot
+from kendr.discovery import build_registry
+from kendr.setup import build_setup_snapshot
 
 
 class SetupRegistryTests(unittest.TestCase):

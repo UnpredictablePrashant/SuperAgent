@@ -18,6 +18,6 @@ if (-not (Test-Command -Name 'py') -and -not (Test-Command -Name 'python')) {
     $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
 }
 
-Write-Host '[choco] running SuperAgent installer'
+Write-Host '[choco] running Kendr installer'
 powershell -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\install.ps1')
 

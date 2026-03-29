@@ -1,6 +1,6 @@
-# SuperAgent Product Overview
+# Kendr Product Overview
 
-SuperAgent is a multi-agent intelligence workspace for evidence-driven research, document ingestion, and persistent knowledge workflows.
+Kendr is a multi-agent intelligence workspace for evidence-driven research, document ingestion, and persistent knowledge workflows.
 
 The project already contains many agents and domain surfaces, but the strongest current product identity is narrower than the total code surface. The core story is:
 
@@ -8,7 +8,7 @@ The project already contains many agents and domain surfaces, but the strongest 
 - organize it through setup-aware routing and durable memory
 - turn it into reusable knowledge sessions and report-ready outputs
 
-## What SuperAgent Is Best At
+## What Kendr Is Best At
 
 - deep research on people, companies, markets, and document collections
 - local-drive intelligence across mixed files with OCR and per-document summaries
@@ -42,7 +42,7 @@ The project already contains many agents and domain surfaces, but the strongest 
 
 ## Scope Boundaries
 
-SuperAgent is not currently positioned as:
+Kendr is not currently positioned as:
 
 - a consumer personal assistant across messaging channels
 - a finished autonomous social-intelligence platform

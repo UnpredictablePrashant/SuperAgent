@@ -15,7 +15,7 @@ from tasks.privileged_control import (
     build_privileged_policy,
     path_allowed,
 )
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_file_action, log_task_update, normalize_llm_text, write_text_file
 
 
 AGENT_METADATA = {
@@ -39,7 +39,7 @@ AGENT_METADATA = {
 
 
 def _strip_code_fences(text: str) -> str:
-    stripped = (text or "").strip()
+    stripped = normalize_llm_text(text).strip()
     if stripped.startswith("```") and stripped.endswith("```"):
         lines = stripped.splitlines()
         if len(lines) >= 2:
@@ -69,14 +69,21 @@ Return ONLY the file content. No explanation, no markdown fences.
     return _strip_code_fences(raw).strip() + "\n"
 
 
-def _write_project_file(root: Path, relative_path: str, content: str, policy: dict) -> str:
+def _write_project_file(root: Path, relative_path: str, content: str, policy: dict, *, overwrite: bool = True) -> tuple[str, bool]:
     """Write a file into the project directory with policy checks."""
     target = root / relative_path
     if not path_allowed(str(target), policy.get("allowed_paths", [])):
         raise PermissionError(f"Write blocked: {target} outside allowed scope.")
     target.parent.mkdir(parents=True, exist_ok=True)
+    if not overwrite and target.exists():
+        try:
+            if target.read_text(encoding="utf-8").strip():
+                return str(target), False
+        except Exception:
+            return str(target), False
     target.write_text(content, encoding="utf-8")
-    return str(target)
+    log_file_action("wrote", str(target))
+    return str(target), True
 
 
 def _generate_docker_compose(docker_services: list[dict], project_name: str) -> str:
@@ -180,6 +187,7 @@ def database_architect_agent(state):
 
     privileged_policy = build_privileged_policy(state)
     log_task_update("DB Architect", f"Database architecture pass #{call_number} started.")
+    preserve_existing = bool(state.get("scaffold_template_used", False))
 
     created_files: list[str] = []
     tech_context = json.dumps({"tech_stack": tech_stack, "db_schema": db_schema}, indent=2, ensure_ascii=False)
@@ -187,8 +195,15 @@ def database_architect_agent(state):
     # 1. Generate docker-compose.yml for DB services
     if docker_services:
         compose_content = _generate_docker_compose(docker_services, project_name)
-        compose_path = _write_project_file(project_root, "docker-compose.yml", compose_content, privileged_policy)
-        created_files.append(compose_path)
+        compose_path, written = _write_project_file(
+            project_root,
+            "docker-compose.yml",
+            compose_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+        if written:
+            created_files.append(compose_path)
         log_task_update("DB Architect", "Generated docker-compose.yml for database services.")
 
     # 2. Generate ORM models
@@ -206,21 +221,58 @@ def database_architect_agent(state):
         schema_dir = "prisma" if "+" not in language else "backend/prisma"
         if (project_root / "frontend" / "prisma").parent.exists() and not (project_root / "backend").exists():
             schema_dir = "prisma"
-        path = _write_project_file(project_root, f"{schema_dir}/schema.prisma", schema_content, privileged_policy)
-        created_files.append(path)
+        path, written = _write_project_file(
+            project_root,
+            f"{schema_dir}/schema.prisma",
+            schema_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+        if written:
+            created_files.append(path)
         state["db_architect_models"] = [path]
     else:
         # Generate SQLAlchemy / other ORM models
         models_dir = "app/models" if "+" not in language else "backend/app/models"
-        models_content = _generate_code_file(
-            f"Generate {orm.upper()} ORM model classes for ALL tables in the schema. "
-            f"Include imports, base class, relationships, and column types. "
-            f"Framework: {framework}.",
-            tech_context,
-        )
-        path = _write_project_file(project_root, f"{models_dir}/models.py", models_content, privileged_policy)
-        created_files.append(path)
-        state["db_architect_models"] = [path]
+        if preserve_existing:
+            existing_models = list((project_root / models_dir).glob("*.py"))
+            if existing_models:
+                log_task_update("DB Architect", "Template models detected; skipping ORM model generation.")
+                state["db_architect_models"] = [str(p) for p in existing_models]
+            else:
+                models_content = _generate_code_file(
+                    f"Generate {orm.upper()} ORM model classes for ALL tables in the schema. "
+                    f"Include imports, base class, relationships, and column types. "
+                    f"Framework: {framework}.",
+                    tech_context,
+                )
+                path, written = _write_project_file(
+                    project_root,
+                    f"{models_dir}/models.py",
+                    models_content,
+                    privileged_policy,
+                    overwrite=not preserve_existing,
+                )
+                if written:
+                    created_files.append(path)
+                state["db_architect_models"] = [path]
+        else:
+            models_content = _generate_code_file(
+                f"Generate {orm.upper()} ORM model classes for ALL tables in the schema. "
+                f"Include imports, base class, relationships, and column types. "
+                f"Framework: {framework}.",
+                tech_context,
+            )
+            path, written = _write_project_file(
+                project_root,
+                f"{models_dir}/models.py",
+                models_content,
+                privileged_policy,
+                overwrite=not preserve_existing,
+            )
+            if written:
+                created_files.append(path)
+            state["db_architect_models"] = [path]
 
         # DB session/connection
         session_content = _generate_code_file(
@@ -229,8 +281,15 @@ def database_architect_agent(state):
             tech_context,
         )
         session_dir = "app/db" if "+" not in language else "backend/app/db"
-        path = _write_project_file(project_root, f"{session_dir}/session.py", session_content, privileged_policy)
-        created_files.append(path)
+        path, written = _write_project_file(
+            project_root,
+            f"{session_dir}/session.py",
+            session_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+        if written:
+            created_files.append(path)
 
     # 3. Generate migration files
     migration_tool = tech_stack.get("migration_tool", "")
@@ -241,16 +300,30 @@ def database_architect_agent(state):
             "Import the Base metadata and configure the target_metadata.",
             tech_context,
         )
-        path = _write_project_file(project_root, f"{alembic_dir}/env.py", env_content, privileged_policy)
-        created_files.append(path)
+        path, written = _write_project_file(
+            project_root,
+            f"{alembic_dir}/env.py",
+            env_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+        if written:
+            created_files.append(path)
 
         ini_content = _generate_code_file(
             "Generate an alembic.ini configuration file. Use sqlalchemy.url from environment variable DATABASE_URL.",
             tech_context,
         )
         ini_dir = "" if "+" not in language else "backend/"
-        path = _write_project_file(project_root, f"{ini_dir}alembic.ini", ini_content, privileged_policy)
-        created_files.append(path)
+        path, written = _write_project_file(
+            project_root,
+            f"{ini_dir}alembic.ini",
+            ini_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+        if written:
+            created_files.append(path)
         state["db_architect_migrations"] = [path]
     elif migration_tool == "prisma":
         state["db_architect_migrations"] = ["prisma migrate dev (run after containers start)"]
@@ -266,8 +339,15 @@ def database_architect_agent(state):
         )
         seed_dir = "scripts" if "+" not in language else "backend/scripts"
         (project_root / seed_dir).mkdir(parents=True, exist_ok=True)
-        path = _write_project_file(project_root, f"{seed_dir}/seed.py", seed_content, privileged_policy)
-        created_files.append(path)
+        path, written = _write_project_file(
+            project_root,
+            f"{seed_dir}/seed.py",
+            seed_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+        if written:
+            created_files.append(path)
         state["db_architect_seed_script"] = path
 
     # 5. Start database containers

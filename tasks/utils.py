@@ -109,6 +109,33 @@ def get_output_dir() -> str:
     return ACTIVE_OUTPUT_DIR
 
 
+def normalize_llm_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return str(value)
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text_value = item.get("text")
+                if text_value is None:
+                    text_value = item.get("content")
+                parts.append(str(text_value) if text_value is not None else str(item))
+                continue
+            parts.append(str(item))
+        return "\n".join(part for part in parts if part is not None)
+    return str(value)
+
+
 def resolve_output_path(filename: str | os.PathLike[str]) -> str:
     path = Path(filename)
     if path.is_absolute():
@@ -154,11 +181,16 @@ def log_task_update(task_name: str, message: str, content: str | None = None):
         logger.info(content.strip())
 
 
+def log_file_action(action: str, path: str) -> None:
+    logger.info(f"[files] {action}: {path}")
+
+
 def write_text_file(filename: str, content: str):
     filepath = resolve_output_path(filename)
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
+    log_file_action("wrote", filepath)
 
 
 def write_binary_file(filename: str, content: bytes):
@@ -166,6 +198,7 @@ def write_binary_file(filename: str, content: bytes):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "wb") as f:
         f.write(content)
+    log_file_action("wrote", filepath)
 
 
 def append_text_file(filename: str, content: str):

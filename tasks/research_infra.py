@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -58,9 +59,9 @@ def strip_code_fences(text: str) -> str:
     return stripped
 
 
-_LLM_MAX_RETRIES = int(os.getenv("SUPERAGENT_LLM_MAX_RETRIES", "3"))
-_LLM_BASE_DELAY = float(os.getenv("SUPERAGENT_LLM_BASE_DELAY", "2.0"))
-_LLM_MAX_DELAY = float(os.getenv("SUPERAGENT_LLM_MAX_DELAY", "30.0"))
+_LLM_MAX_RETRIES = int(os.getenv("KENDR_LLM_MAX_RETRIES", "3"))
+_LLM_BASE_DELAY = float(os.getenv("KENDR_LLM_BASE_DELAY", "2.0"))
+_LLM_MAX_DELAY = float(os.getenv("KENDR_LLM_MAX_DELAY", "30.0"))
 
 _TRANSIENT_ERROR_MARKERS = (
     "timeout", "timed out", "connection", "connect", "reset by peer",
@@ -488,6 +489,90 @@ def _extract_ppt_text(path: Path) -> tuple[str, dict]:
     raise ValueError(f"Unable to read legacy PPT file: {path}")
 
 
+def _extract_pdf_text(path: Path) -> tuple[str, dict]:
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(path))
+    text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    return text, {"type": "pdf", "reader": "pypdf", "pages": len(reader.pages)}
+
+
+def _extract_excel_text_via_pdf_fallback(
+    path: Path,
+    *,
+    source_type: str,
+    original_error: Exception | None = None,
+) -> tuple[str, dict]:
+    converter_binaries = ("soffice", "libreoffice")
+    attempts: list[str] = []
+    errors: list[str] = []
+
+    for binary in converter_binaries:
+        if not shutil.which(binary):
+            attempts.append(f"{binary}:not_installed")
+            continue
+
+        with tempfile.TemporaryDirectory(prefix="kendr_excel_pdf_") as temp_dir:
+            command = [binary, "--headless", "--convert-to", "pdf", "--outdir", temp_dir, str(path)]
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=180,
+                )
+            except Exception as exc:
+                attempts.append(f"{binary}:exception")
+                errors.append(f"{binary} execution failed: {exc}")
+                continue
+
+            if completed.returncode != 0:
+                attempts.append(f"{binary}:non_zero_exit")
+                stderr_text = (completed.stderr or "").strip()
+                stdout_text = (completed.stdout or "").strip()
+                errors.append(
+                    f"{binary} returned code {completed.returncode}. stderr={stderr_text[:240]} stdout={stdout_text[:240]}"
+                )
+                continue
+
+            attempts.append(f"{binary}:ok")
+            expected_pdf = Path(temp_dir) / f"{path.stem}.pdf"
+            pdf_candidates = sorted(Path(temp_dir).glob("*.pdf"))
+            if expected_pdf.exists():
+                pdf_candidates = [expected_pdf] + [candidate for candidate in pdf_candidates if candidate != expected_pdf]
+
+            if not pdf_candidates:
+                errors.append(f"{binary} succeeded but did not produce a PDF for {path.name}.")
+                continue
+
+            for pdf_path in pdf_candidates:
+                try:
+                    text, pdf_meta = _extract_pdf_text(pdf_path)
+                except Exception as exc:
+                    errors.append(f"Failed to parse fallback PDF {pdf_path.name}: {exc}")
+                    continue
+                if not text.strip():
+                    errors.append(f"Fallback PDF {pdf_path.name} had no extractable text.")
+                    continue
+                metadata = {
+                    "type": source_type,
+                    "reader": f"{binary}_pdf_fallback",
+                    "fallback_source": "pdf_conversion",
+                    "fallback_pdf_file": pdf_path.name,
+                    "fallback_pdf_pages": int(pdf_meta.get("pages", 0) or 0),
+                }
+                if original_error is not None:
+                    metadata["primary_extract_error"] = str(original_error)
+                return text, metadata
+
+    reason = "; ".join(errors) if errors else "no available converter or conversion output"
+    attempted = ", ".join(attempts) if attempts else "none"
+    raise ValueError(
+        f"Excel PDF fallback failed for {path.name}. attempts={attempted}. reason={reason}"
+    )
+
+
 def parse_document(path_str: str, *, ocr_images: bool = False, ocr_instruction: str | None = None) -> dict:
     path = Path(path_str)
     if not path.exists() or not path.is_file():
@@ -506,11 +591,8 @@ def parse_document(path_str: str, *, ocr_images: bool = False, ocr_instruction: 
         text = "\n".join(", ".join(row) for row in rows[:200])
         return {"path": str(path), "text": text, "metadata": {"type": "csv", "rows": len(rows)}}
     if suffix == ".pdf":
-        from pypdf import PdfReader
-
-        reader = PdfReader(str(path))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages)
-        return {"path": str(path), "text": text, "metadata": {"type": "pdf", "pages": len(reader.pages)}}
+        text, metadata = _extract_pdf_text(path)
+        return {"path": str(path), "text": text, "metadata": metadata}
     if suffix == ".docx":
         from docx import Document
 
@@ -521,10 +603,16 @@ def parse_document(path_str: str, *, ocr_images: bool = False, ocr_instruction: 
         text, metadata = _extract_doc_text(path)
         return {"path": str(path), "text": text, "metadata": metadata}
     if suffix in {".xlsx", ".xlsm"}:
-        text, metadata = _extract_xlsx_text(path)
+        try:
+            text, metadata = _extract_xlsx_text(path)
+        except Exception as exc:
+            text, metadata = _extract_excel_text_via_pdf_fallback(path, source_type=suffix.lstrip("."), original_error=exc)
         return {"path": str(path), "text": text, "metadata": metadata}
     if suffix == ".xls":
-        text, metadata = _extract_xls_text(path)
+        try:
+            text, metadata = _extract_xls_text(path)
+        except Exception as exc:
+            text, metadata = _extract_excel_text_via_pdf_fallback(path, source_type="xls", original_error=exc)
         return {"path": str(path), "text": text, "metadata": metadata}
     if suffix in {".pptx", ".pptm"}:
         text, metadata = _extract_pptx_text(path)

@@ -1,6 +1,6 @@
 # Security Policy
 
-SuperAgent includes privileged local-command execution and an authorized defensive security workflow, so responsible reporting matters.
+Kendr includes privileged local-command execution and an authorized defensive security workflow, so responsible reporting matters.
 
 Project security guidance lives here:
 

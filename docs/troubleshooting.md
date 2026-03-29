@@ -7,27 +7,27 @@ This guide covers the most common first-run and setup issues implied by the curr
 When something does not appear to route correctly, check setup first:
 
 ```bash
-superagent setup status
-superagent agents list
-superagent plugins list
+kendr setup status
+kendr agents list
+kendr plugins list
 ```
 
 The runtime filters unconfigured capabilities out of the available agent set.
 
 ## Working Directory Required
 
-SuperAgent needs a working directory for artifacts and intermediate state.
+Kendr needs a working directory for artifacts and intermediate state.
 
 If a run fails before execution, set one of:
 
 ```bash
-superagent workdir here
+kendr workdir here
 ```
 
 or:
 
 ```bash
-superagent run --current-folder "Create a short research brief on OpenAI."
+kendr run --current-folder "Create a short research brief on OpenAI."
 ```
 
 ## The Run Stops On A Plan
@@ -47,7 +47,7 @@ Likely causes:
 Check:
 
 - `.env`
-- `superagent setup status`
+- `kendr setup status`
 - [Integrations](integrations.md)
 
 ## Gateway Or Setup UI Is Not Reachable
@@ -60,8 +60,8 @@ Default ports:
 Start them explicitly if needed:
 
 ```bash
-superagent gateway
-superagent setup ui
+kendr gateway
+kendr setup ui
 ```
 
 ## Browser Features Do Not Work Fully
@@ -110,11 +110,11 @@ Treat the stable workflows as the best-supported path today.
 ## Useful Recovery Commands
 
 ```bash
-superagent --help
-superagent help run
-superagent help resume
-superagent setup status
-superagent daemon --once
+kendr --help
+kendr help run
+kendr help resume
+kendr setup status
+kendr daemon --once
 ```
 
 ## A Run Was Interrupted Or Looks Stuck
@@ -122,7 +122,7 @@ superagent daemon --once
 Start by inspecting the latest persisted run state:
 
 ```bash
-superagent resume --working-directory . --latest --inspect
+kendr resume --working-directory . --latest --inspect
 ```
 
 Common cases:
@@ -135,9 +135,9 @@ Common cases:
 Examples:
 
 ```bash
-superagent resume --output-folder ./output/runs/run_cli_123 --reply approve
-superagent resume --output-folder ./output/runs/run_cli_123 --force
-superagent resume --output-folder ./output/runs/run_cli_123 --branch "Continue with implementation."
+kendr resume --output-folder ./output/runs/run_cli_123 --reply approve
+kendr resume --output-folder ./output/runs/run_cli_123 --force
+kendr resume --output-folder ./output/runs/run_cli_123 --branch "Continue with implementation."
 ```
 
 For repository-level checks:

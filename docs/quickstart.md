@@ -1,19 +1,19 @@
 # Quickstart
 
-This guide gets you from a fresh checkout to your first successful SuperAgent run.
+This guide gets you from a fresh checkout to your first successful Kendr run.
 
 ## Prerequisites
 
 - Python 3.10 or newer
 - an `OPENAI_API_KEY`
-- a working directory where SuperAgent can write run artifacts
+- a working directory where Kendr can write run artifacts
 
 Recommended for the best first experience:
 
 - `SERP_API_KEY` for search-backed research workflows
 - Docker if you want the full Qdrant and MCP stack
 
-## 1. Install SuperAgent
+## 1. Install Kendr
 
 Linux or macOS:
 
@@ -46,41 +46,41 @@ Set at least:
 You can also inspect setup from the CLI:
 
 ```bash
-superagent setup status
-superagent setup components
+kendr setup status
+kendr setup components
 ```
 
 If you prefer a local UI for OAuth-backed providers:
 
 ```bash
-superagent setup ui
+kendr setup ui
 ```
 
 The setup UI runs on `http://127.0.0.1:8787` by default.
 
 ## 3. Choose A Working Directory
 
-SuperAgent needs a working directory for artifacts and intermediate outputs.
+Kendr needs a working directory for artifacts and intermediate outputs.
 
 Use the current folder:
 
 ```bash
-superagent workdir here
+kendr workdir here
 ```
 
 Or pass it per run:
 
 ```bash
-superagent run --current-folder "Create a short research brief on OpenAI."
+kendr run --current-folder "Create a short research brief on OpenAI."
 ```
 
 ## 4. Sanity Check
 
 ```bash
-superagent --help
-superagent agents list
-superagent plugins list
-superagent setup status
+kendr --help
+kendr agents list
+kendr plugins list
+kendr setup status
 python scripts/verify.py smoke
 ```
 
@@ -89,7 +89,7 @@ python scripts/verify.py smoke
 Use the actual CLI entrypoint:
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   "Create an intelligence brief on Stripe: business model, products, competitors, recent strategy moves, and top risks."
 ```
 
@@ -97,14 +97,14 @@ What to expect:
 
 - the runtime ensures the gateway path is available
 - the run may stop first on an approval-ready plan
-- after approval, SuperAgent executes the workflow and writes artifacts under `output/runs/<run_id>/`
+- after approval, Kendr executes the workflow and writes artifacts under `output/runs/<run_id>/`
 
 ## 6. Recommended Next Runs
 
 Deep research:
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --research-model o4-mini-deep-research \
   --research-instructions "Cite concrete sources and call out uncertainty." \
   "Do deep research on battery recycling market structure, current leaders, and investment risks."
@@ -113,7 +113,7 @@ superagent run --current-folder \
 Local-drive intelligence:
 
 ```bash
-superagent run \
+kendr run \
   --drive="D:/xyz/folder" \
   "Review this folder, summarize the important files, and produce an executive-ready intelligence brief."
 ```
@@ -121,7 +121,7 @@ superagent run \
 `superRAG` build:
 
 ```bash
-superagent run \
+kendr run \
   --superrag-mode build \
   --superrag-new-session \
   --superrag-session-title "product_ops_kb" \
@@ -133,7 +133,7 @@ superagent run \
 `superRAG` chat:
 
 ```bash
-superagent run \
+kendr run \
   --superrag-mode chat \
   --superrag-session product_ops_kb \
   --superrag-chat "What are the main operating risks and where are they sourced from?"
@@ -142,7 +142,7 @@ superagent run \
 Coding project builder:
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --max-steps 30 \
   --coding-context-file README.md \
   --coding-instructions "Prefer FastAPI, pytest, docs, and CI verification commands." \
@@ -152,7 +152,7 @@ superagent run --current-folder \
 Local command execution:
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   --os-command "Get-ChildItem" \
   --os-shell powershell \
   --target-os windows \
@@ -168,19 +168,19 @@ Every run now writes resumable state into its run folder under `output/runs/<run
 Inspect the latest saved run in a working directory:
 
 ```bash
-superagent resume --working-directory . --latest --inspect
+kendr resume --working-directory . --latest --inspect
 ```
 
 Resume directly from a run folder:
 
 ```bash
-superagent resume --output-folder ./output/runs/run_cli_123
+kendr resume --output-folder ./output/runs/run_cli_123
 ```
 
 Resume a paused approval step with an explicit reply:
 
 ```bash
-superagent resume \
+kendr resume \
   --output-folder ./output/runs/run_cli_123 \
   --reply approve
 ```
@@ -188,7 +188,7 @@ superagent resume \
 Start a new child run from a completed session's saved context:
 
 ```bash
-superagent resume \
+kendr resume \
   --output-folder ./output/runs/run_cli_123 \
   --branch \
   "Expand the report into an investor-facing memo."

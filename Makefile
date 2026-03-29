@@ -10,7 +10,7 @@ install: bootstrap
 	$(PYTHON) -m pip install -e ".[dev]"
 
 uninstall:
-	$(PYTHON) -m pip uninstall -y superagent-runtime
+	$(PYTHON) -m pip uninstall -y kendr-runtime
 
 compile:
 	$(PYTHON) scripts/verify.py compile

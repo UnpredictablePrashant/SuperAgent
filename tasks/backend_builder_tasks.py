@@ -13,7 +13,7 @@ from tasks.privileged_control import (
     build_privileged_policy,
     path_allowed,
 )
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_file_action, log_task_update, normalize_llm_text, write_text_file
 
 
 AGENT_METADATA = {
@@ -34,7 +34,7 @@ AGENT_METADATA = {
 
 
 def _strip_code_fences(text: str) -> str:
-    stripped = (text or "").strip()
+    stripped = normalize_llm_text(text).strip()
     if stripped.startswith("```") and stripped.endswith("```"):
         lines = stripped.splitlines()
         if len(lines) >= 2:
@@ -65,13 +65,20 @@ Ensure proper imports, error handling, and type annotations.
     return _strip_code_fences(raw).strip() + "\n"
 
 
-def _write_file(root: Path, relative_path: str, content: str, policy: dict) -> str:
+def _write_file(root: Path, relative_path: str, content: str, policy: dict, *, overwrite: bool = True) -> tuple[str, bool]:
     target = root / relative_path
     if not path_allowed(str(target), policy.get("allowed_paths", [])):
         raise PermissionError(f"Write blocked: {target} outside allowed scope.")
     target.parent.mkdir(parents=True, exist_ok=True)
+    if not overwrite and target.exists():
+        try:
+            if target.read_text(encoding="utf-8").strip():
+                return str(target), False
+        except Exception:
+            return str(target), False
     target.write_text(content, encoding="utf-8")
-    return str(target)
+    log_file_action("wrote", str(target))
+    return str(target), True
 
 
 def _read_file_safe(path: str) -> str:
@@ -106,6 +113,7 @@ def backend_builder_agent(state):
 
     privileged_policy = build_privileged_policy(state)
     log_task_update("Backend Builder", f"Backend implementation pass #{call_number} started.")
+    preserve_existing = bool(state.get("scaffold_template_used", False))
 
     created_files: list[str] = []
     backend_dir = _resolve_backend_dir(tech_stack)
@@ -131,8 +139,15 @@ def backend_builder_agent(state):
         f"Import and include all API route modules.",
         context, model_code,
     )
-    path = _write_file(project_root, f"{backend_dir}/main.py", main_content, privileged_policy)
-    created_files.append(path)
+    path, written = _write_file(
+        project_root,
+        f"{backend_dir}/main.py",
+        main_content,
+        privileged_policy,
+        overwrite=not preserve_existing,
+    )
+    if written:
+        created_files.append(path)
 
     # 2. Config module
     config_content = _generate_file(
@@ -141,8 +156,15 @@ def backend_builder_agent(state):
         f"Include DATABASE_URL, SECRET_KEY, and other vars from the blueprint.",
         context,
     )
-    path = _write_file(project_root, f"{backend_dir}/core/config.py", config_content, privileged_policy)
-    created_files.append(path)
+    path, written = _write_file(
+        project_root,
+        f"{backend_dir}/core/config.py",
+        config_content,
+        privileged_policy,
+        overwrite=not preserve_existing,
+    )
+    if written:
+        created_files.append(path)
 
     # 3. Security / Auth module
     auth_strategy = tech_stack.get("auth", "jwt")
@@ -153,8 +175,15 @@ def backend_builder_agent(state):
             f"Framework: {framework}.",
             context, model_code,
         )
-        path = _write_file(project_root, f"{backend_dir}/core/security.py", auth_content, privileged_policy)
-        created_files.append(path)
+        path, written = _write_file(
+            project_root,
+            f"{backend_dir}/core/security.py",
+            auth_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+        if written:
+            created_files.append(path)
 
     # 4. Schemas / DTOs
     schemas_content = _generate_file(
@@ -164,8 +193,15 @@ def backend_builder_agent(state):
         context, model_code,
     )
     schemas_dir = f"{backend_dir}/schemas" if "python" in str(tech_stack.get("language", "")).lower() else f"src/types"
-    path = _write_file(project_root, f"{schemas_dir}/schemas.py" if "python" in str(tech_stack.get("language", "")).lower() else f"{schemas_dir}/index.ts", schemas_content, privileged_policy)
-    created_files.append(path)
+    path, written = _write_file(
+        project_root,
+        f"{schemas_dir}/schemas.py" if "python" in str(tech_stack.get("language", "")).lower() else f"{schemas_dir}/index.ts",
+        schemas_content,
+        privileged_policy,
+        overwrite=not preserve_existing,
+    )
+    if written:
+        created_files.append(path)
 
     # 5. Route handlers - group by entity
     endpoints = api_design.get("endpoints", [])
@@ -189,8 +225,15 @@ def backend_builder_agent(state):
         )
         routes_dir = f"{backend_dir}/api/routes" if "python" in str(tech_stack.get("language", "")).lower() else "src/routes"
         ext = ".py" if "python" in str(tech_stack.get("language", "")).lower() else ".ts"
-        path = _write_file(project_root, f"{routes_dir}/{entity}{ext}", routes_content, privileged_policy)
-        created_files.append(path)
+        path, written = _write_file(
+            project_root,
+            f"{routes_dir}/{entity}{ext}",
+            routes_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+        if written:
+            created_files.append(path)
 
     # 6. Service layer
     for entity in sorted(entities):
@@ -202,8 +245,15 @@ def backend_builder_agent(state):
         )
         services_dir = f"{backend_dir}/services" if "python" in str(tech_stack.get("language", "")).lower() else "src/services"
         ext = ".py" if "python" in str(tech_stack.get("language", "")).lower() else ".ts"
-        path = _write_file(project_root, f"{services_dir}/{entity}_service{ext}", service_content, privileged_policy)
-        created_files.append(path)
+        path, written = _write_file(
+            project_root,
+            f"{services_dir}/{entity}_service{ext}",
+            service_content,
+            privileged_policy,
+            overwrite=not preserve_existing,
+        )
+        if written:
+            created_files.append(path)
 
     # 7. Dependencies / middleware
     deps_content = _generate_file(
@@ -213,8 +263,15 @@ def backend_builder_agent(state):
         context, model_code,
     )
     deps_file = f"{backend_dir}/api/deps.py" if "python" in str(tech_stack.get("language", "")).lower() else "src/middleware/index.ts"
-    path = _write_file(project_root, deps_file, deps_content, privileged_policy)
-    created_files.append(path)
+    path, written = _write_file(
+        project_root,
+        deps_file,
+        deps_content,
+        privileged_policy,
+        overwrite=not preserve_existing,
+    )
+    if written:
+        created_files.append(path)
 
     # Summary
     summary = (

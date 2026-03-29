@@ -38,7 +38,7 @@ services:
       - qdrant
     volumes:
       - .:/app
-    command: python -m superagent.cli daemon --poll-interval 30 --heartbeat-interval 300
+    command: python -m kendr.cli daemon --poll-interval 30 --heartbeat-interval 300
 
   gateway:
     build:
@@ -57,7 +57,7 @@ services:
       - .:/app
     ports:
       - "8790:8790"
-    command: python -m superagent.cli gateway
+    command: python -m kendr.cli gateway
 
   setup-ui:
     build:
@@ -76,7 +76,7 @@ services:
       - .:/app
     ports:
       - "8787:8787"
-    command: python -m superagent.cli setup ui
+    command: python -m kendr.cli setup ui
 
   research-mcp:
     build:

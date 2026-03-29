@@ -3,14 +3,14 @@ from typing import Any
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.file_memory import update_planning_file
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, logger, model_selection_for_agent, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_task_update, logger, model_selection_for_agent, normalize_llm_text, write_text_file
 
 
 NON_EXECUTABLE_PLAN_AGENTS = {"planner_agent"}
 
 
 def _strip_code_fences(text: str) -> str:
-    stripped = (text or "").strip()
+    stripped = normalize_llm_text(text).strip()
     if stripped.startswith("```") and stripped.endswith("```"):
         lines = stripped.splitlines()
         if len(lines) >= 2:
@@ -22,6 +22,18 @@ def _as_str_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _dedupe_str_list(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        item = str(value).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
 
 
 def _normalize_step(item: dict[str, Any], objective: str, index: int, parent_id: str = "") -> dict[str, Any]:
@@ -76,16 +88,93 @@ def _collect_model_assignments(steps: list[dict[str, Any]], prefix: str = "") ->
 
 def _collect_execution_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     execution_steps: list[dict[str, Any]] = []
-    for step in steps:
+    descendant_map: dict[str, list[str]] = {}
+
+    def _expand_dependencies(depends_on: list[str], *, exclude: set[str] | None = None) -> list[str]:
+        expanded: list[str] = []
+        excluded = exclude or set()
+        for dep in depends_on:
+            dep_id = str(dep).strip()
+            if not dep_id:
+                continue
+            replacements = descendant_map.get(dep_id)
+            if replacements:
+                expanded.extend(replacements)
+            else:
+                expanded.append(dep_id)
+        return [item for item in _dedupe_str_list(expanded) if item not in excluded]
+
+    def _should_chain_after_previous(previous_step: dict[str, Any] | None, current_step: dict[str, Any]) -> bool:
+        if not previous_step:
+            return False
+        previous_group = str(previous_step.get("parallel_group") or "").strip()
+        current_group = str(current_step.get("parallel_group") or "").strip()
+        if previous_group and previous_group == current_group:
+            return False
+        return True
+
+    def _visit(step: dict[str, Any], inherited_depends: list[str] | None = None) -> list[str]:
         if not isinstance(step, dict):
-            continue
+            return []
+        step_id = str(step.get("id") or "").strip()
         agent = str(step.get("agent") or "").strip()
+        child_steps = step.get("substeps", [])
+        normalized_depends = _dedupe_str_list(_as_str_list(step.get("depends_on", [])) or (inherited_depends or []))
+
+        if isinstance(child_steps, list) and child_steps:
+            descendant_ids: list[str] = []
+            parent_depends = normalized_depends
+            previous_child_leaf_id = ""
+            previous_child_step: dict[str, Any] | None = None
+            for child in child_steps:
+                if not isinstance(child, dict):
+                    continue
+                child_copy = dict(child)
+                child_depends = _as_str_list(child_copy.get("depends_on", []))
+                if child_depends:
+                    resolved_child_depends: list[str] = []
+                    for dep in child_depends:
+                        dep_id = str(dep).strip()
+                        if dep_id == step_id:
+                            resolved_child_depends.extend(parent_depends)
+                        else:
+                            resolved_child_depends.append(dep_id)
+                    child_copy["depends_on"] = _dedupe_str_list(resolved_child_depends)
+                else:
+                    if previous_child_leaf_id and _should_chain_after_previous(previous_child_step, child_copy):
+                        child_copy["depends_on"] = [previous_child_leaf_id]
+                    else:
+                        child_copy["depends_on"] = list(parent_depends)
+                child_descendants = _visit(child_copy, _as_str_list(child_copy.get("depends_on", [])))
+                if child_descendants:
+                    descendant_ids.extend(child_descendants)
+                    previous_child_leaf_id = child_descendants[-1]
+                    previous_child_step = child_copy
+            if step_id:
+                descendant_map[step_id] = descendant_ids
+            return descendant_ids
+
         if agent in NON_EXECUTABLE_PLAN_AGENTS:
-            child_steps = step.get("substeps", [])
-            if isinstance(child_steps, list) and child_steps:
-                execution_steps.extend(_collect_execution_steps(child_steps))
-            continue
-        execution_steps.append(step)
+            if step_id:
+                descendant_map[step_id] = []
+            return []
+
+        leaf_step = dict(step)
+        leaf_step["depends_on"] = normalized_depends
+        leaf_step["substeps"] = []
+        execution_steps.append(leaf_step)
+        if step_id:
+            descendant_map[step_id] = [step_id]
+        return [step_id] if step_id else []
+
+    for step in steps:
+        if isinstance(step, dict):
+            _visit(step)
+
+    for step in execution_steps:
+        step_id = str(step.get("id") or "").strip()
+        step["depends_on"] = _expand_dependencies(_as_str_list(step.get("depends_on", [])), exclude={step_id})
+
     return execution_steps
 
 
@@ -221,6 +310,7 @@ def _planning_context(state: dict, objective: str) -> str:
         "current_objective": state.get("current_objective", ""),
         "available_agents": state.get("available_agents", []),
         "local_drive_paths": state.get("local_drive_paths", []),
+        "local_drive_summary": str(state.get("local_drive_summary", "")).strip()[:6000],
         "long_document_mode": bool(state.get("long_document_mode", False)),
         "long_document_pages": int(state.get("long_document_pages", 0) or 0),
         "superrag_mode": state.get("superrag_mode", ""),
@@ -255,10 +345,10 @@ The user must review and approve the plan before execution starts.
 
 Requirements:
 - Prefer concrete agents from the available agent list.
-- Top-level steps are the actual execution units the runtime will run in order.
+- The runtime executes a flat list of the most specific executable steps.
 - Build a detailed top-level plan with explicit success criteria.
 - Add substeps for complex deliverables, especially long reports, multi-document outputs, or 50-page style requests.
-- If substeps are included, the parent step must still be independently executable by its assigned agent. Do not rely on substeps as hidden executable work.
+- If a step has substeps, treat the parent step as structural and make the substeps the real executable work. Do not rely on the parent wrapper step being dispatched separately.
 - If the request is ambiguous, ask clarification questions instead of guessing.
 - Do not assign planner_agent as a step agent in steps or substeps. Planning happens before execution.
 - Do not start execution. Only plan.
@@ -268,11 +358,15 @@ If the planning context contains "project_build_mode": true and a non-empty "blu
 this is a full project build. Use the following agent sequence for the plan steps:
   1. project_scaffold_agent -- Create directory structure, config files, entry points
   2. database_architect_agent -- Generate ORM models, migrations, Docker DB, seed data
-  3. backend_builder_agent -- Implement API routes, services, middleware, auth
-  4. frontend_builder_agent -- Implement pages, components, API client, styling (skip if no frontend in blueprint)
-  5. dependency_manager_agent -- Install all packages and validate lockfiles
-  6. project_verifier_agent -- Run linters, type checks, build, and dev server health check
-  7. devops_agent -- Generate production Dockerfile, docker-compose, CI/CD, nginx config
+  3. auth_security_agent -- Generate auth modules and security helpers (skip if auth is none or template already includes it)
+  4. backend_builder_agent -- Implement API routes, services, middleware
+  5. frontend_builder_agent -- Implement pages, components, API client, styling (skip if no frontend in blueprint)
+  6. dependency_manager_agent -- Install all packages and validate lockfiles (scan all package.json / requirements)
+  7. test_agent -- Generate and run tests (retry on failure)
+  8. security_scanner_agent -- Run npm audit / pip check or equivalent scans
+  9. devops_agent -- Generate production Dockerfile, docker-compose, CI/CD, nginx config
+ 10. project_verifier_agent -- Run linters, type checks, build, and dev server health check
+ 11. post_setup_agent -- Run safe post-setup commands (e.g., docker compose up)
 Each step's task field should reference the specific section of the blueprint it implements.
 The blueprint_json in the context contains the full technical architecture.
 
@@ -350,22 +444,35 @@ Return ONLY valid JSON in this schema:
         planning_status = "needs_clarification"
         execution_note = f"Plan version {plan_version} needs clarification."
     else:
-        approval_prompt = build_plan_approval_prompt(
-            plan_md,
-            scope_title=f"execution plan v{plan_version}",
-            storage_note=(
-                f"Stored in {OUTPUT_DIR}/planner_output.txt, {OUTPUT_DIR}/planner_output.json, "
-                "and the session planning memory."
-            ),
-        )
-        state["pending_user_question"] = approval_prompt
-        state["pending_user_input_kind"] = "plan_approval"
-        state["approval_pending_scope"] = "root_plan"
-        state["plan_waiting_for_approval"] = True
-        state["plan_approval_status"] = "pending"
-        state["draft_response"] = approval_prompt
-        planning_status = "awaiting_approval"
-        execution_note = f"Plan version {plan_version} generated and queued for approval."
+        auto_approve = bool(state.get("auto_approve")) or bool(state.get("auto_approve_plan"))
+        if auto_approve:
+            state["pending_user_question"] = ""
+            state["pending_user_input_kind"] = ""
+            state["approval_pending_scope"] = ""
+            state["plan_waiting_for_approval"] = False
+            state["plan_approval_status"] = "approved"
+            state["plan_ready"] = True
+            state["draft_response"] = plan_md
+            planning_status = "approved"
+            execution_note = f"Plan version {plan_version} auto-approved."
+            log_task_update("Planner", "Plan auto-approved; continuing to execution.")
+        else:
+            approval_prompt = build_plan_approval_prompt(
+                plan_md,
+                scope_title=f"execution plan v{plan_version}",
+                storage_note=(
+                    f"Stored in {OUTPUT_DIR}/planner_output.txt, {OUTPUT_DIR}/planner_output.json, "
+                    "and the session planning memory."
+                ),
+            )
+            state["pending_user_question"] = approval_prompt
+            state["pending_user_input_kind"] = "plan_approval"
+            state["approval_pending_scope"] = "root_plan"
+            state["plan_waiting_for_approval"] = True
+            state["plan_approval_status"] = "pending"
+            state["draft_response"] = approval_prompt
+            planning_status = "awaiting_approval"
+            execution_note = f"Plan version {plan_version} generated and queued for approval."
 
     write_text_file("planner_output.txt", plan_md + "\n")
     write_text_file("planner_output.json", json.dumps(plan_data, indent=2, ensure_ascii=False))

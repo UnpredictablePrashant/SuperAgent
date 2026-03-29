@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from superagent.types import AgentDefinition, PluginManifest
+from kendr.types import AgentDefinition, PluginManifest
 
 
 PLUGIN = PluginManifest(
@@ -12,7 +12,7 @@ PLUGIN = PluginManifest(
     capabilities=["agent"],
     metadata={
         "stable_surfaces": [
-            "superagent.types.AgentDefinition",
+            "kendr.types.AgentDefinition",
             "register(registry)",
         ],
         "notes": "Minimal single-file agent plugin template.",

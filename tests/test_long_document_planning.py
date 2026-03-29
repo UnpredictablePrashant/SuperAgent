@@ -4,8 +4,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from superagent.discovery import build_registry
-from superagent.runtime import AgentRuntime
+from kendr.discovery import build_registry
+from kendr.runtime import AgentRuntime
 from tasks.long_document_tasks import long_document_agent
 
 
@@ -17,7 +17,7 @@ class LongDocumentPlanningTests(unittest.TestCase):
             "setup_actions": [],
             "summary_text": "",
         }
-        with patch("superagent.runtime.build_setup_snapshot", return_value=fake_setup_snapshot):
+        with patch("kendr.runtime.build_setup_snapshot", return_value=fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Create a 50-page market structure report.")
             state["current_objective"] = "Create a 50-page market structure report."

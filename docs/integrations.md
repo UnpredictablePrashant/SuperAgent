@@ -1,11 +1,11 @@
 # Integrations
 
-SuperAgent routes against configured integrations, not against the full theoretical ecosystem.
+Kendr routes against configured integrations, not against the full theoretical ecosystem.
 
 The integration lifecycle is standardized across:
 
-- declaration in [`superagent/setup/catalog.py`](../superagent/setup/catalog.py)
-- configuration via `superagent setup ...` and [`.env.example`](../.env.example)
+- declaration in [`kendr/setup/catalog.py`](../kendr/setup/catalog.py)
+- configuration via `kendr setup ...` and [`.env.example`](../.env.example)
 - setup detection and health reporting in [`tasks/setup_registry.py`](../tasks/setup_registry.py)
 - routing eligibility through agent `requirements`
 - docs and tests
@@ -20,7 +20,7 @@ Each integration should provide one contract:
 
 | Stage | Source Of Truth |
 | --- | --- |
-| declaration | `superagent/setup/catalog.py` |
+| declaration | `kendr/setup/catalog.py` |
 | configuration fields | `tasks/setup_config_store.py` via the shared catalog |
 | health/detection | `tasks/setup_registry.py` |
 | routing eligibility | `AGENT_METADATA["requirements"]` |
@@ -66,7 +66,7 @@ The runtime currently registers these channels:
 The CLI exposes a web-based setup UI:
 
 ```bash
-superagent setup ui
+kendr setup ui
 ```
 
 OAuth-backed flows currently documented in the repo:
@@ -84,20 +84,20 @@ Manual or direct-token integrations:
 Useful setup commands:
 
 ```bash
-superagent setup status
-superagent setup components
-superagent setup show core_runtime --json
-superagent setup show openai --json
-superagent setup export-env
-superagent setup install --yes
+kendr setup status
+kendr setup components
+kendr setup show core_runtime --json
+kendr setup show openai --json
+kendr setup export-env
+kendr setup install --yes
 ```
 
 Concrete first-run baseline:
 
 ```bash
-superagent setup set core_runtime SUPERAGENT_WORKING_DIR /absolute/path/to/workdir
-superagent setup set openai OPENAI_API_KEY sk-...
-superagent setup status
+kendr setup set core_runtime KENDR_WORKING_DIR /absolute/path/to/workdir
+kendr setup set openai OPENAI_API_KEY sk-...
+kendr setup status
 ```
 
 ## Health And Routing
@@ -126,7 +126,7 @@ An agent should depend on integrations only through declared `requirements`. Mis
 - Required for the core runtime.
 - Minimum concrete setup:
   - `OPENAI_API_KEY`
-  - `SUPERAGENT_WORKING_DIR`
+  - `KENDR_WORKING_DIR`
 
 ### Google Workspace
 
@@ -151,15 +151,15 @@ An agent should depend on integrations only through declared `requirements`. Mis
 ### Qdrant
 
 - A `QDRANT_URL` alone is not enough.
-- `superagent setup status` checks reachability and keeps vector-dependent agents disabled until the service responds.
+- `kendr setup status` checks reachability and keeps vector-dependent agents disabled until the service responds.
 
 ## Plugin Discovery
 
 External plugins are loaded from:
 
 - `./plugins`
-- `~/.superagent/plugins`
-- any path listed in `SUPERAGENT_PLUGIN_PATHS`
+- `~/.kendr/plugins`
+- any path listed in `KENDR_PLUGIN_PATHS`
 
 Plugin files are simple Python modules that expose `register(registry)`.
 

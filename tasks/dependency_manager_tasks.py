@@ -76,40 +76,108 @@ def _detect_package_manager(tech_stack: dict, project_root: Path) -> list[str]:
     return managers
 
 
-def _install_python_deps(project_root: Path, policy: dict) -> tuple[bool, str]:
-    """Install Python dependencies."""
-    req_file = project_root / "requirements.txt"
-    if not req_file.exists():
-        # Try pyproject.toml with pip install -e .
-        if (project_root / "pyproject.toml").exists():
+_IGNORE_DIRS = {
+    "node_modules",
+    ".git",
+    ".venv",
+    "venv",
+    ".pytest_cache",
+    "__pycache__",
+    "dist",
+    "build",
+    ".next",
+}
+
+
+def _should_skip_path(path: Path) -> bool:
+    return any(part in _IGNORE_DIRS for part in path.parts)
+
+
+def _discover_node_package_dirs(project_root: Path, max_dirs: int = 25) -> list[Path]:
+    found: list[Path] = []
+    for pkg_path in project_root.rglob("package.json"):
+        if _should_skip_path(pkg_path):
+            continue
+        found.append(pkg_path.parent)
+        if len(found) >= max_dirs:
+            break
+    # de-duplicate and sort for stability
+    unique = sorted({p.resolve() for p in found}, key=lambda p: str(p))
+    return unique
+
+
+def _discover_python_dirs(project_root: Path, max_dirs: int = 10) -> list[Path]:
+    found: set[Path] = set()
+    for req in project_root.rglob("requirements.txt"):
+        if _should_skip_path(req):
+            continue
+        found.add(req.parent.resolve())
+        if len(found) >= max_dirs:
+            break
+    if len(found) < max_dirs:
+        for pyproject in project_root.rglob("pyproject.toml"):
+            if _should_skip_path(pyproject):
+                continue
+            found.add(pyproject.parent.resolve())
+            if len(found) >= max_dirs:
+                break
+    return sorted(found, key=lambda p: str(p))
+
+
+def _select_node_manager(pkg_dir: Path, default_manager: str) -> str:
+    if (pkg_dir / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (pkg_dir / "yarn.lock").exists():
+        return "yarn"
+    if (pkg_dir / "package-lock.json").exists():
+        return "npm"
+    return default_manager
+
+
+def _install_python_deps(project_root: Path, policy: dict, python_dirs: list[Path] | None = None) -> tuple[bool, str]:
+    """Install Python dependencies across discovered Python project roots."""
+    python_dirs = python_dirs if python_dirs is not None else _discover_python_dirs(project_root)
+    if not python_dirs:
+        return True, "No Python dependency file found. Skipped."
+
+    results: list[str] = []
+    all_ok = True
+    for py_dir in python_dirs:
+        req_file = py_dir / "requirements.txt"
+        if req_file.exists():
+            cmd = ["pip", "install", "-r", "requirements.txt"]
+        elif (py_dir / "pyproject.toml").exists():
             cmd = ["pip", "install", "-e", "."]
         else:
-            return True, "No Python dependency file found. Skipped."
-    else:
-        cmd = ["pip", "install", "-r", "requirements.txt"]
+            continue
 
-    command_str = " ".join(cmd)
-    try:
-        ensure_command_allowed(command_str, str(project_root), policy)
-    except Exception as exc:
-        return False, f"Blocked by policy: {exc}"
+        command_str = " ".join(cmd)
+        try:
+            ensure_command_allowed(command_str, str(py_dir), policy)
+        except Exception as exc:
+            results.append(f"[{py_dir.name}] Blocked: {exc}")
+            all_ok = False
+            continue
 
-    ok, stdout, stderr = _run_command(cmd, str(project_root), timeout=300)
-    output = stdout or stderr
-    return ok, output
+        log_task_update("Dep Manager", f"Running `{command_str}` in {py_dir}")
+        ok, stdout, stderr = _run_command(cmd, str(py_dir), timeout=300)
+        if ok:
+            results.append(f"[{py_dir.name}] Installed successfully.")
+        else:
+            results.append(f"[{py_dir.name}] Failed: {stderr or stdout}")
+            all_ok = False
+
+    return all_ok, "\n".join(results)
 
 
-def _install_node_deps(project_root: Path, manager: str, policy: dict) -> tuple[bool, str]:
-    """Install Node.js dependencies."""
-    # Find the directory with package.json
-    pkg_dirs = []
-    if (project_root / "package.json").exists():
-        pkg_dirs.append(project_root)
-    if (project_root / "frontend" / "package.json").exists():
-        pkg_dirs.append(project_root / "frontend")
-    if (project_root / "backend" / "package.json").exists():
-        pkg_dirs.append(project_root / "backend")
-
+def _install_node_deps(
+    project_root: Path,
+    manager: str,
+    policy: dict,
+    pkg_dirs: list[Path] | None = None,
+) -> tuple[bool, str]:
+    """Install Node.js dependencies across all package.json directories."""
+    pkg_dirs = pkg_dirs if pkg_dirs is not None else _discover_node_package_dirs(project_root)
     if not pkg_dirs:
         return True, "No package.json found. Skipped."
 
@@ -117,7 +185,8 @@ def _install_node_deps(project_root: Path, manager: str, policy: dict) -> tuple[
     all_ok = True
 
     for pkg_dir in pkg_dirs:
-        cmd = [manager, "install"]
+        chosen_manager = _select_node_manager(pkg_dir, manager)
+        cmd = [chosen_manager, "install"]
         command_str = " ".join(cmd)
         try:
             ensure_command_allowed(command_str, str(pkg_dir), policy)
@@ -126,6 +195,7 @@ def _install_node_deps(project_root: Path, manager: str, policy: dict) -> tuple[
             all_ok = False
             continue
 
+        log_task_update("Dep Manager", f"Running `{command_str}` in {pkg_dir}")
         ok, stdout, stderr = _run_command(cmd, str(pkg_dir), timeout=300)
         label = pkg_dir.name if pkg_dir != project_root else "root"
         if ok:
@@ -176,12 +246,27 @@ def dependency_manager_agent(state):
     managers = _detect_package_manager(tech_stack, project_root)
     install_logs: list[str] = []
     all_ok = True
+    node_dirs = _discover_node_package_dirs(project_root)
+    python_dirs = _discover_python_dirs(project_root)
+
+    if node_dirs:
+        log_task_update(
+            "Dep Manager",
+            f"Discovered {len(node_dirs)} Node package(s).",
+            "\n".join(f"- {path}" for path in node_dirs),
+        )
+    if python_dirs:
+        log_task_update(
+            "Dep Manager",
+            f"Discovered {len(python_dirs)} Python project(s).",
+            "\n".join(f"- {path}" for path in python_dirs),
+        )
 
     for manager in managers:
         if manager == "pip":
-            ok, log = _install_python_deps(project_root, privileged_policy)
+            ok, log = _install_python_deps(project_root, privileged_policy, python_dirs)
         else:
-            ok, log = _install_node_deps(project_root, manager, privileged_policy)
+            ok, log = _install_node_deps(project_root, manager, privileged_policy, node_dirs)
 
         install_logs.append(f"=== {manager} ===\n{log}")
         if not ok:

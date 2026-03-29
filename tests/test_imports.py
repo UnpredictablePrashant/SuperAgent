@@ -11,11 +11,12 @@ class ImportSmokeTests(unittest.TestCase):
         import app  # noqa: F401
         import gateway_server  # noqa: F401
         import setup_ui  # noqa: F401
-        import superagent.domain.local_drive  # noqa: F401
-        import superagent.setup.catalog  # noqa: F401
+        import plugin_templates.project_stacks  # noqa: F401
+        import kendr.domain.local_drive  # noqa: F401
+        import kendr.setup.catalog  # noqa: F401
 
     def test_legacy_persistence_imports_remain_compatible(self):
-        import superagent.persistence as persistence
+        import kendr.persistence as persistence
         import tasks.sqlite_store as legacy_store
 
         self.assertIs(legacy_store.initialize_db, persistence.initialize_db)

@@ -12,8 +12,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
-from superagent.persistence import get_setup_provider_tokens, set_setup_provider_tokens
-from superagent.setup.catalog import (
+from kendr.persistence import get_setup_provider_tokens, set_setup_provider_tokens
+from kendr.setup.catalog import (
     INTEGRATION_DEFINITIONS,
     LEGACY_AGENT_REQUIREMENTS,
     REQUIREMENT_RULES,

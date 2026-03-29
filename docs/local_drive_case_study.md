@@ -1,4 +1,4 @@
-# Case Study: Local Drive Intelligence for SuperAgent
+# Case Study: Local Drive Intelligence for Kendr
 
 Status: Stable core workflow.
 
@@ -23,9 +23,9 @@ The team had three blockers:
 2. Slow synthesis: no reusable per-document intelligence layer.
 3. Weak traceability: report claims were hard to map back to source documents.
 
-## SuperAgent Feature Pattern
+## Kendr Feature Pattern
 
-The new `local_drive_agent` workflow addresses this by letting users point SuperAgent at local folders.
+The new `local_drive_agent` workflow addresses this by letting users point Kendr at local folders.
 
 ### How It Works
 

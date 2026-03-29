@@ -1,21 +1,21 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/superagent-logo-dark.svg">
-    <img src="docs/assets/superagent-logo-light.svg" alt="SuperAgent" width="720">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/kendr-logo-dark.svg">
+    <img src="docs/assets/kendr-logo-light.svg" alt="Kendr" width="720">
   </picture>
 </p>
 
-# SuperAgent
+# Kendr
 
 > Multi-agent intelligence workspace for evidence-driven research, document ingestion, and persistent knowledge workflows.
 
-SuperAgent is a setup-aware orchestration runtime that combines specialized agents, web and local evidence, durable memory, and structured run artifacts to produce research briefs, knowledge sessions, and report-ready analysis. The strongest product surface today is not "AI for everything"; it is intelligence work that needs traceability, synthesis, and reusable context.
+Kendr is a setup-aware orchestration runtime that combines specialized agents, web and local evidence, durable memory, and structured run artifacts to produce research briefs, knowledge sessions, and report-ready analysis. The strongest product surface today is not "AI for everything"; it is intelligence work that needs traceability, synthesis, and reusable context.
 
 [Docs](docs/index.md) · [Quickstart](docs/quickstart.md) · [Install](docs/install.md) · [Architecture](docs/architecture.md) · [Agents](docs/agents.md) · [Integrations](docs/integrations.md) · [Security](docs/security.md) · [Examples](docs/examples.md)
 
-## What SuperAgent Is
+## What Kendr Is
 
-SuperAgent is a terminal-first, Python-native multi-agent runtime for high-context work that benefits from setup-aware routing, persistent artifacts, and reusable knowledge sessions.
+Kendr is a terminal-first, Python-native multi-agent runtime for high-context work that benefits from setup-aware routing, persistent artifacts, and reusable knowledge sessions.
 
 It is strongest when the job requires:
 
@@ -45,16 +45,16 @@ The recommended entry points today are:
 2. Configure environment and choose a working directory.
 
 ```bash
-superagent setup set core_runtime SUPERAGENT_WORKING_DIR /absolute/path/to/workdir
-superagent setup set openai OPENAI_API_KEY sk-...
-superagent setup status
+kendr setup set core_runtime KENDR_WORKING_DIR /absolute/path/to/workdir
+kendr setup set openai OPENAI_API_KEY sk-...
+kendr setup status
 python scripts/verify.py smoke
 ```
 
 3. Run your first intelligence brief.
 
 ```bash
-superagent run --current-folder \
+kendr run --current-folder \
   "Create an intelligence brief on Stripe: business model, products, competitors, recent strategy moves, and top risks."
 ```
 
@@ -152,16 +152,16 @@ Contribution baseline:
 
 The current codebase already includes:
 
-- dynamic registry and discovery in [`superagent/discovery.py`](superagent/discovery.py)
-- orchestration runtime in [`superagent/runtime.py`](superagent/runtime.py)
-- shared runtime-state typing in [`superagent/orchestration/state.py`](superagent/orchestration/state.py)
-- CLI entrypoint in [`superagent/cli.py`](superagent/cli.py)
-- optional HTTP gateway and dashboard in [`superagent/gateway_server.py`](superagent/gateway_server.py)
-- HTTP session/resume helpers in [`superagent/http/`](superagent/http)
-- setup and provider boundaries in [`superagent/setup/`](superagent/setup) and [`superagent/providers/`](superagent/providers)
-- domain-specific workflow slices in [`superagent/domain/`](superagent/domain)
+- dynamic registry and discovery in [`kendr/discovery.py`](kendr/discovery.py)
+- orchestration runtime in [`kendr/runtime.py`](kendr/runtime.py)
+- shared runtime-state typing in [`kendr/orchestration/state.py`](kendr/orchestration/state.py)
+- CLI entrypoint in [`kendr/cli.py`](kendr/cli.py)
+- optional HTTP gateway and dashboard in [`kendr/gateway_server.py`](kendr/gateway_server.py)
+- HTTP session/resume helpers in [`kendr/http/`](kendr/http)
+- setup and provider boundaries in [`kendr/setup/`](kendr/setup) and [`kendr/providers/`](kendr/providers)
+- domain-specific workflow slices in [`kendr/domain/`](kendr/domain)
 - internal A2A-inspired task and artifact protocol in [`tasks/a2a_protocol.py`](tasks/a2a_protocol.py)
-- durable SQLite persistence in [`superagent/persistence/`](superagent/persistence) with a compatibility shim at [`tasks/sqlite_store.py`](tasks/sqlite_store.py)
+- durable SQLite persistence in [`kendr/persistence/`](kendr/persistence) with a compatibility shim at [`tasks/sqlite_store.py`](tasks/sqlite_store.py)
 - shared research infrastructure in [`tasks/research_infra.py`](tasks/research_infra.py)
 - Docker and MCP deployment assets in [`docker-compose.yml`](docker-compose.yml) and [`mcp_servers/`](mcp_servers)
 
