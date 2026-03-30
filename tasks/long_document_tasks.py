@@ -35,11 +35,15 @@ AGENT_METADATA = {
             "long_document_sections",
             "long_document_section_pages",
             "long_document_title",
+            "long_document_collect_sources_first",
+            "long_document_disable_visuals",
             "research_model",
+            "research_instructions",
             "research_max_tool_calls",
             "research_max_output_tokens",
             "research_poll_interval_seconds",
             "research_max_wait_seconds",
+            "research_heartbeat_seconds",
         ],
         "output_keys": [
             "long_document_title",
@@ -863,6 +867,8 @@ def _run_research_pass(
     max_output_tokens: int | None,
     poll_interval_seconds: int,
     max_wait_seconds: int,
+    heartbeat_interval_seconds: int | None = None,
+    heartbeat_label: str = "Research pass in progress",
 ) -> dict:
     create_kwargs = {
         "model": model,
@@ -881,6 +887,8 @@ def _run_research_pass(
     status = str(getattr(response, "status", "unknown"))
     elapsed_seconds = 0
     terminal = {"completed", "failed", "cancelled", "incomplete"}
+    heartbeat_every = int(heartbeat_interval_seconds or 0)
+    last_heartbeat = 0
 
     while status not in terminal:
         if elapsed_seconds >= max_wait_seconds:
@@ -893,6 +901,10 @@ def _run_research_pass(
             }
         time.sleep(poll_interval_seconds)
         elapsed_seconds += poll_interval_seconds
+        if heartbeat_every > 0 and (elapsed_seconds - last_heartbeat) >= heartbeat_every:
+            last_heartbeat = elapsed_seconds
+            if heartbeat_label:
+                log_task_update("Long Document", f"{heartbeat_label} ({elapsed_seconds}s elapsed).")
         response = client.responses.retrieve(response_id)
         status = str(getattr(response, "status", "unknown"))
 
@@ -1033,7 +1045,9 @@ def long_document_agent(state):
     max_output_tokens_int = _safe_int(max_output_tokens, 0, 0, 200000) if max_output_tokens is not None else None
     poll_interval_seconds = _safe_int(state.get("research_poll_interval_seconds"), 5, 1, 60)
     max_wait_seconds = _safe_int(state.get("research_max_wait_seconds"), 3600, 60, 86400)
+    heartbeat_seconds = _safe_int(state.get("research_heartbeat_seconds"), 120, 30, 3600)
     words_per_page = _safe_int(state.get("long_document_words_per_page"), 420, 250, 700)
+    disable_visuals = bool(state.get("long_document_disable_visuals", False))
 
     research_instructions = str(
         state.get(
@@ -1109,6 +1123,8 @@ def long_document_agent(state):
                 max_output_tokens=max_output_tokens_int,
                 poll_interval_seconds=poll_interval_seconds,
                 max_wait_seconds=max_wait_seconds,
+                heartbeat_interval_seconds=heartbeat_seconds,
+                heartbeat_label="Evidence bank research in progress",
             )
             web_research_text = str(evidence_pass.get("output_text", "")).strip()
             evidence_sources = _extract_source_entries(evidence_pass, max_sources=60)
@@ -1180,13 +1196,12 @@ def long_document_agent(state):
         write_text_file(_artifact_file(artifact_dir, "long_document_subplan.json"), json.dumps(subplan_data, indent=2, ensure_ascii=False))
         write_text_file(_artifact_file(artifact_dir, "long_document_subplan.md"), subplan_md + "\n")
 
+        outline_storage_path = resolve_output_path(_artifact_file(artifact_dir, "long_document_outline.md"))
+        subplan_storage_path = resolve_output_path(_artifact_file(artifact_dir, "long_document_subplan.md"))
         approval_prompt = build_plan_approval_prompt(
             subplan_md,
             scope_title=f"long-document section plan v{subplan_version}",
-            storage_note=(
-                f"Stored in {OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_outline.md')} and "
-                f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_subplan.md')}."
-            ),
+            storage_note=f"Stored in {outline_storage_path} and {subplan_storage_path}.",
         )
 
         state["long_document_outline"] = outline
@@ -1284,6 +1299,8 @@ def long_document_agent(state):
                 max_output_tokens=max_output_tokens_int,
                 poll_interval_seconds=poll_interval_seconds,
                 max_wait_seconds=max_wait_seconds,
+                heartbeat_interval_seconds=heartbeat_seconds,
+                heartbeat_label=f"Section {index} research in progress",
             )
 
             research_output = str(research_pass.get("output_text", "")).strip()
@@ -1327,7 +1344,9 @@ def long_document_agent(state):
         existing_tables = _extract_markdown_tables(section_text)
         existing_flowcharts = _extract_mermaid_blocks(section_text)
         generated_visuals: dict[str, Any] = {"tables": [], "flowcharts": [], "notes": ""}
-        if not (existing_tables and existing_flowcharts):
+        if disable_visuals:
+            log_task_update("Long Document", f"Skipping visual generation for section {index} (disabled).")
+        elif not (existing_tables and existing_flowcharts):
             log_task_update("Long Document", f"Generating visuals for section {index}.")
             generated_visuals = _generate_visual_assets(section_title, section_text, research_output)
         else:

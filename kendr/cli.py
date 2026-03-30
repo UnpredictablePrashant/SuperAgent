@@ -1363,6 +1363,11 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
         help="Skip the pre-collection evidence bank step for long-form mode.",
     )
     run_parser.add_argument(
+        "--long-document-no-visuals",
+        action="store_true",
+        help="Skip generating extra tables/flowcharts for long-form sections.",
+    )
+    run_parser.add_argument(
         "--drive",
         action="append",
         default=[],
@@ -1908,6 +1913,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         base_ingest_payload["long_document_title"] = str(args.long_document_title).strip()
     if bool(args.long_document_no_collect_sources):
         base_ingest_payload["long_document_collect_sources_first"] = False
+    if bool(args.long_document_no_visuals):
+        base_ingest_payload["long_document_disable_visuals"] = True
     if int(args.research_max_wait_seconds or 0) > 0:
         base_ingest_payload["research_max_wait_seconds"] = int(args.research_max_wait_seconds)
     if int(args.research_poll_interval_seconds or 0) > 0:
@@ -2089,6 +2096,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     sender_id = str(args.sender_id or stored_sender or "cli_user").strip()
     chat_id = str(args.chat_id or selected_session.get("chat_id", sender_id) or sender_id).strip()
     is_group_session = bool(selected_session.get("scope", "main") == "group")
+    channel_session_key = f"{channel}:{workspace_id}:{chat_id}:{'group' if is_group_session else 'main'}"
     base_ingest_payload["channel"] = channel
     base_ingest_payload["workspace_id"] = workspace_id
     base_ingest_payload["sender_id"] = sender_id
@@ -2096,7 +2104,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     base_ingest_payload["is_group"] = is_group_session
     _save_cli_session(
         {
-            "session_key": f"{channel}:{workspace_id}:{chat_id}:{'group' if is_group_session else 'main'}",
+            "session_key": channel_session_key,
             "channel": channel,
             "workspace_id": workspace_id,
             "chat_id": chat_id,
@@ -2182,6 +2190,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     return chosen
             except Exception:
                 continue
+        return ""
+
+    def _resolve_latest_session_run_id(session_key: str) -> str:
+        try:
+            sessions = _http_json_get(f"{gateway_base}/task-sessions", timeout_seconds=1.2)
+        except Exception:
+            return ""
+        if isinstance(sessions, list):
+            for item in sessions:
+                if str(item.get("session_key", "")) == session_key:
+                    run_id = str(item.get("run_id", "")).strip()
+                    if run_id:
+                        return run_id
         return ""
 
     def _tail_file(path: Path, key: str) -> None:
@@ -2425,12 +2446,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
         if bool(result.get("_ingest_timed_out")):
             _emit_status(args, "[run] resume connection timed out; continuing to monitor run by run_id...")
+            target_run_id = _resolve_latest_session_run_id(channel_session_key) or client_run_id
+            if target_run_id != client_run_id:
+                _emit_status(args, f"[run] monitoring active session run_id={target_run_id}")
             while True:
                 run_record: dict[str, object] | None = None
-                last_progress = _poll_task_session_progress(client_run_id, last_progress)
-                _tail_run_logs(client_run_id)
+                last_progress = _poll_task_session_progress(target_run_id, last_progress)
+                _tail_run_logs(target_run_id)
                 try:
-                    payload = _http_json_get(f"{gateway_base}/runs/{client_run_id}", timeout_seconds=1.5)
+                    payload = _http_json_get(f"{gateway_base}/runs/{target_run_id}", timeout_seconds=1.5)
                     if isinstance(payload, dict):
                         run_record = payload
                 except Exception:
@@ -2447,7 +2471,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                             "awaiting_user_input": status == "awaiting_user_input",
                         }
                         if status == "awaiting_user_input":
-                            task_session = _fetch_task_session(client_run_id)
+                            task_session = _fetch_task_session(target_run_id)
                             summary = _task_session_summary(task_session)
                             result["pending_user_input_kind"] = summary.get("pending_user_input_kind", "")
                             result["pending_user_question"] = summary.get("pending_user_question", "")
@@ -2455,7 +2479,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     if status == "failed":
                         raise SystemExit(
                             f"Run failed after resume timeout. "
-                            f"run_id={run_record.get('run_id', client_run_id)}"
+                            f"run_id={run_record.get('run_id', target_run_id)}"
                         )
 
                 now = time.time()

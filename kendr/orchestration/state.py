@@ -80,6 +80,7 @@ class RuntimeState(TypedDict, total=False):
     extension_handler_generation_signature: str
     agent_factory_request: str
     long_document_collect_sources_first: bool
+    long_document_disable_visuals: bool
     long_document_sources_collected: bool
     long_document_evidence_bank_path: str
     long_document_evidence_bank_json_path: str
@@ -92,6 +93,7 @@ class RuntimeState(TypedDict, total=False):
     long_document_addendum_max_attempts: int
     long_document_addendum_path: str
     long_document_addendum_completed: bool
+    research_heartbeat_seconds: int
     user_cancelled: bool
 
 
