@@ -302,6 +302,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             "long_document_title",
             "long_document_collect_sources_first",
             "long_document_disable_visuals",
+            "long_document_section_search",
+            "long_document_section_search_results",
             "research_max_wait_seconds",
             "research_poll_interval_seconds",
             "research_max_tool_calls",

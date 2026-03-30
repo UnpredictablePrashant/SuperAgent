@@ -1363,6 +1363,17 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
         help="Skip the pre-collection evidence bank step for long-form mode.",
     )
     run_parser.add_argument(
+        "--long-document-no-section-search",
+        action="store_true",
+        help="Skip per-section web search results for long-form mode.",
+    )
+    run_parser.add_argument(
+        "--long-document-section-search-results",
+        type=int,
+        default=0,
+        help="Number of web search results to gather per section in long-form mode.",
+    )
+    run_parser.add_argument(
         "--long-document-no-visuals",
         action="store_true",
         help="Skip generating extra tables/flowcharts for long-form sections.",
@@ -1913,6 +1924,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         base_ingest_payload["long_document_title"] = str(args.long_document_title).strip()
     if bool(args.long_document_no_collect_sources):
         base_ingest_payload["long_document_collect_sources_first"] = False
+    if bool(args.long_document_no_section_search):
+        base_ingest_payload["long_document_section_search"] = False
+    if int(args.long_document_section_search_results or 0) > 0:
+        base_ingest_payload["long_document_section_search_results"] = int(args.long_document_section_search_results)
     if bool(args.long_document_no_visuals):
         base_ingest_payload["long_document_disable_visuals"] = True
     if int(args.research_max_wait_seconds or 0) > 0:

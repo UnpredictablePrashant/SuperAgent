@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import html
 import json
 import math
 import os
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+import textwrap
 
 from openai import OpenAI
 
@@ -37,6 +41,9 @@ AGENT_METADATA = {
             "long_document_title",
             "long_document_collect_sources_first",
             "long_document_disable_visuals",
+            "long_document_section_references",
+            "long_document_section_search",
+            "long_document_section_search_results",
             "research_model",
             "research_instructions",
             "research_max_tool_calls",
@@ -51,6 +58,9 @@ AGENT_METADATA = {
             "long_document_sections_data",
             "long_document_artifact_dir",
             "long_document_compiled_path",
+            "long_document_compiled_html_path",
+            "long_document_compiled_docx_path",
+            "long_document_compiled_pdf_path",
             "long_document_outline_md_path",
             "long_document_coherence_base_path",
             "long_document_coherence_live_path",
@@ -194,6 +204,52 @@ def _collect_google_search_evidence(query: str, *, num: int = 10) -> dict:
             }
         )
     return {"results": results, "raw": payload, "error": ""}
+
+
+def _sources_from_search_results(results: list[dict], *, prefix: str = "S") -> list[dict]:
+    entries = []
+    for index, item in enumerate(results or [], start=1):
+        url = str(item.get("url", "")).strip()
+        if not url:
+            continue
+        label = str(item.get("title", "")).strip() or _source_label(url)
+        entries.append({"id": f"{prefix}{index}", "url": url, "label": label})
+    return entries
+
+
+def _search_results_markdown(results: list[dict]) -> str:
+    if not results:
+        return "No web search results were available."
+    lines = ["Web search results (SerpAPI):"]
+    for item in results:
+        title = str(item.get("title", "")).strip() or "Untitled"
+        url = str(item.get("url", "")).strip()
+        snippet = str(item.get("snippet", "")).strip()
+        line = f"- {title}"
+        if snippet:
+            line += f": {snippet}"
+        if url:
+            line += f" ({url})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _merge_sources(primary: list[dict], secondary: list[dict], *, max_sources: int = 60) -> list[dict]:
+    seen: set[str] = set()
+    merged: list[dict] = []
+    for item in (primary or []) + (secondary or []):
+        url = str(item.get("url", "")).strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        merged.append(item)
+        if len(merged) >= max_sources:
+            break
+    # Re-number sequentially
+    renumbered = []
+    for index, item in enumerate(merged, start=1):
+        renumbered.append({"id": f"S{index}", "url": item["url"], "label": item.get("label", "") or _source_label(item["url"])})
+    return renumbered
 
 
 def _format_evidence_bank_markdown(
@@ -469,6 +525,33 @@ def _append_verified_references(section_text: str, entries: list[dict]) -> str:
     text = (section_text or "").rstrip()
     references_block = _references_markdown(entries)
     return f"{text}\n\n{references_block}\n"
+
+def _strip_section_references(section_text: str) -> str:
+    text = str(section_text or "")
+    match = re.search(r"\n#{2,3}\\s+References\\b", text, flags=re.IGNORECASE)
+    if match:
+        return text[: match.start()].rstrip()
+    return text.rstrip()
+
+
+def _remap_section_citations(section_text: str, section_sources: list[dict], consolidated: list[dict]) -> str:
+    url_to_global = {str(item.get("url", "")).strip(): str(item.get("id", "")).strip() for item in consolidated}
+    local_map: dict[str, str] = {}
+    for item in section_sources:
+        local_id = str(item.get("id", "")).strip()
+        url = str(item.get("url", "")).strip()
+        global_id = url_to_global.get(url)
+        if local_id and global_id:
+            local_map[local_id] = global_id
+
+    if not local_map:
+        return section_text
+
+    def _swap(match: re.Match) -> str:
+        local_id = match.group(1)
+        return f"[{local_map.get(local_id, local_id)}]"
+
+    return re.sub(r"\\[(S\\d+)\\]", _swap, section_text)
 
 
 def _consolidate_references(section_outputs: list[dict]) -> list[dict]:
@@ -968,7 +1051,7 @@ Requirements:
 - Include a short "Section Takeaways" list at the end.
 - Use source tags like "[S1]" inline for factual claims that come from the source ledger.
 - Do not cite source ids that are not present in the source ledger.
-- Include a "### References" section at the end with cited source ids and URLs.
+- Do not add a references section; references will be consolidated and renumbered at the end of the document.
 
 Research notes:
 {research_text}
@@ -987,6 +1070,354 @@ Section text:
     return llm_text(prompt)
 
 
+def _markdown_to_plain_text(markdown_text: str) -> str:
+    lines: list[str] = []
+    in_code = False
+    for raw in (markdown_text or "").splitlines():
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            lines.append(line)
+            continue
+        line = re.sub(r"^#{1,6}\\s+", "", line)
+        line = re.sub(r"^[-*]\\s+", "- ", line)
+        line = re.sub(r"^\\d+\\.\\s+", "", line)
+        lines.append(line)
+    cleaned = "\n".join(lines).strip()
+    # Best-effort ASCII clean-up for PDF rendering
+    cleaned = cleaned.encode("ascii", errors="ignore").decode("ascii")
+    return cleaned
+
+
+def _markdown_to_html(markdown_text: str) -> str:
+    lines = (markdown_text or "").splitlines()
+    html_lines: list[str] = []
+    in_code = False
+    in_ul = False
+    in_ol = False
+    index = 0
+
+    def close_lists() -> None:
+        nonlocal in_ul, in_ol
+        if in_ul:
+            html_lines.append("</ul>")
+            in_ul = False
+        if in_ol:
+            html_lines.append("</ol>")
+            in_ol = False
+
+    def render_table(table_lines: list[str]) -> None:
+        rows = []
+        for row_line in table_lines:
+            if not row_line.strip():
+                continue
+            parts = [cell.strip() for cell in row_line.strip().strip("|").split("|")]
+            rows.append(parts)
+        if not rows:
+            return
+        header = rows[0]
+        body_rows = rows[2:] if len(rows) > 2 else rows[1:]
+        html_lines.append("<table>")
+        html_lines.append("<thead><tr>" + "".join(f"<th>{html.escape(cell)}</th>" for cell in header) + "</tr></thead>")
+        if body_rows:
+            html_lines.append("<tbody>")
+            for row in body_rows:
+                html_lines.append("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>")
+            html_lines.append("</tbody>")
+        html_lines.append("</table>")
+
+    while index < len(lines):
+        line = lines[index]
+        if line.strip().startswith("```"):
+            if in_code:
+                html_lines.append("</code></pre>")
+                in_code = False
+            else:
+                close_lists()
+                html_lines.append("<pre><code>")
+                in_code = True
+            index += 1
+            continue
+        if in_code:
+            html_lines.append(html.escape(line))
+            index += 1
+            continue
+
+        # Table detection (header + separator line)
+        if "|" in line and index + 1 < len(lines):
+            sep = lines[index + 1]
+            if re.match(r"^\\s*\\|?\\s*[:\\-\\s|]+\\|?\\s*$", sep):
+                table_block = [line, sep]
+                index += 2
+                while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                    table_block.append(lines[index])
+                    index += 1
+                close_lists()
+                render_table(table_block)
+                continue
+
+        heading = re.match(r"^(#{1,6})\\s+(.*)$", line)
+        if heading:
+            close_lists()
+            level = min(len(heading.group(1)), 6)
+            html_lines.append(f"<h{level}>{html.escape(heading.group(2).strip())}</h{level}>")
+            index += 1
+            continue
+
+        ul_item = re.match(r"^[-*]\\s+(.*)$", line)
+        if ul_item:
+            if not in_ul:
+                close_lists()
+                html_lines.append("<ul>")
+                in_ul = True
+            html_lines.append(f"<li>{html.escape(ul_item.group(1).strip())}</li>")
+            index += 1
+            continue
+
+        ol_item = re.match(r"^\\d+\\.\\s+(.*)$", line)
+        if ol_item:
+            if not in_ol:
+                close_lists()
+                html_lines.append("<ol>")
+                in_ol = True
+            html_lines.append(f"<li>{html.escape(ol_item.group(1).strip())}</li>")
+            index += 1
+            continue
+
+        if not line.strip():
+            close_lists()
+            html_lines.append("<p></p>")
+            index += 1
+            continue
+
+        close_lists()
+        html_lines.append(f"<p>{html.escape(line.strip())}</p>")
+        index += 1
+
+    close_lists()
+    if in_code:
+        html_lines.append("</code></pre>")
+
+    style = (
+        "<style>"
+        "body{font-family:Georgia,'Times New Roman',serif;line-height:1.55;margin:40px;color:#111;}"
+        "h1{font-size:28px;border-bottom:1px solid #ddd;padding-bottom:6px;}"
+        "h2{font-size:22px;margin-top:28px;}"
+        "h3{font-size:18px;margin-top:22px;}"
+        "table{border-collapse:collapse;width:100%;margin:12px 0;}"
+        "th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;}"
+        "pre{background:#f6f6f6;padding:10px;border-radius:4px;overflow:auto;}"
+        "code{font-family:'Courier New',monospace;font-size:0.95em;}"
+        "</style>"
+    )
+    return (
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Long Document</title>"
+        f"{style}</head><body>\n"
+        + "\n".join(html_lines)
+        + "\n</body></html>"
+    )
+
+
+def _markdown_to_docx(markdown_text: str, output_path: str) -> None:
+    if not _ensure_python_package("python-docx", "docx"):
+        raise RuntimeError("python-docx not available")
+    from docx import Document
+
+    doc = Document()
+    in_code = False
+    for raw in (markdown_text or "").splitlines():
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            para = doc.add_paragraph()
+            run = para.add_run(line)
+            run.font.name = "Courier New"
+            continue
+        if not line.strip():
+            doc.add_paragraph("")
+            continue
+        heading_match = re.match(r"^(#{1,6})\\s+(.*)$", line)
+        if heading_match:
+            level = min(len(heading_match.group(1)), 6)
+            doc.add_heading(heading_match.group(2).strip(), level=level)
+            continue
+        if re.match(r"^[-*]\\s+", line):
+            doc.add_paragraph(re.sub(r"^[-*]\\s+", "", line), style="List Bullet")
+            continue
+        if re.match(r"^\\d+\\.\\s+", line):
+            doc.add_paragraph(re.sub(r"^\\d+\\.\\s+", "", line), style="List Number")
+            continue
+        doc.add_paragraph(line)
+
+    doc.save(output_path)
+
+
+def _ensure_python_package(package: str, import_name: str | None = None) -> bool:
+    module_name = import_name or package
+    try:
+        __import__(module_name)
+        return True
+    except Exception:
+        pass
+
+    log_task_update("Long Document", f"Attempting to install missing dependency: {package}.")
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--user",
+                "--break-system-packages",
+                package,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:
+        log_task_update("Long Document", f"Dependency install failed for {package}: {exc}")
+        return False
+
+    try:
+        __import__(module_name)
+        return True
+    except Exception as exc:
+        log_task_update("Long Document", f"Dependency import failed for {package} after install: {exc}")
+        return False
+
+
+def _wrap_pdf_lines(text: str, width: int = 92) -> list[str]:
+    lines = []
+    for paragraph in text.splitlines():
+        if not paragraph.strip():
+            lines.append("")
+            continue
+        lines.extend(textwrap.wrap(paragraph, width=width) or [""])
+    return lines
+
+
+def _escape_pdf_text(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _render_pdf_bytes(text: str) -> bytes:
+    lines = _wrap_pdf_lines(text)
+    page_height = 792
+    margin_top = 742
+    leading = 14
+    lines_per_page = 48
+    pages = [lines[i : i + lines_per_page] for i in range(0, max(len(lines), 1), lines_per_page)] or [[]]
+
+    objects: list[bytes] = []
+
+    def add_object(payload: str | bytes) -> int:
+        objects.append(payload if isinstance(payload, bytes) else payload.encode("latin-1", errors="replace"))
+        return len(objects)
+
+    font_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    page_ids = []
+    content_ids = []
+
+    for page_lines in pages:
+        stream_lines = ["BT", "/F1 11 Tf", f"50 {margin_top} Td"]
+        first_line = True
+        for line in page_lines:
+            escaped_line = _escape_pdf_text(line)
+            if first_line:
+                stream_lines.append(f"({escaped_line}) Tj")
+                first_line = False
+            else:
+                stream_lines.append(f"0 -{leading} Td")
+                stream_lines.append(f"({escaped_line}) Tj")
+        if first_line:
+            stream_lines.append("( ) Tj")
+        stream_lines.append("ET")
+        stream = "\n".join(stream_lines).encode("latin-1", errors="replace")
+        content_id = add_object(
+            b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream"
+        )
+        content_ids.append(content_id)
+        page_ids.append(add_object(""))
+
+    pages_id = add_object("")
+    for idx, page_id in enumerate(page_ids):
+        page_object = (
+            f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 612 {page_height}] "
+            f"/Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_ids[idx]} 0 R >>"
+        )
+        objects[page_id - 1] = page_object.encode("latin-1")
+
+    kids = " ".join(f"{page_id} 0 R" for page_id in page_ids)
+    objects[pages_id - 1] = f"<< /Type /Pages /Count {len(page_ids)} /Kids [{kids}] >>".encode("latin-1")
+    catalog_id = add_object(f"<< /Type /Catalog /Pages {pages_id} 0 R >>")
+
+    buffer = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for index, payload in enumerate(objects, start=1):
+        offsets.append(len(buffer))
+        buffer.extend(f"{index} 0 obj\n".encode("ascii"))
+        buffer.extend(payload)
+        buffer.extend(b"\nendobj\n")
+
+    xref_offset = len(buffer)
+    buffer.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    buffer.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        buffer.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+
+    buffer.extend(b"trailer\n")
+    buffer.extend(f"<< /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\n".encode("ascii"))
+    buffer.extend(b"startxref\n")
+    buffer.extend(f"{xref_offset}\n".encode("ascii"))
+    buffer.extend(b"%%EOF\n")
+    return bytes(buffer)
+
+
+def _export_long_document_formats(compiled_markdown: str, compiled_filename: str) -> dict[str, str]:
+    compiled_path = Path(resolve_output_path(compiled_filename))
+    base_path = compiled_path.with_suffix("")
+    html_path = base_path.with_suffix(".html")
+    docx_path = base_path.with_suffix(".docx")
+    pdf_path = base_path.with_suffix(".pdf")
+
+    html_text = _markdown_to_html(compiled_markdown)
+    html_path.write_text(html_text, encoding="utf-8")
+
+    try:
+        _markdown_to_docx(compiled_markdown, str(docx_path))
+    except Exception as exc:
+        log_task_update("Long Document", f"DOCX export skipped: {exc}")
+        docx_path = Path("")
+
+    pdf_written = False
+    try:
+        if _ensure_python_package("weasyprint"):
+            from weasyprint import HTML  # type: ignore
+
+            HTML(string=html_text).write_pdf(str(pdf_path))
+            pdf_written = True
+        else:
+            raise RuntimeError("weasyprint not available")
+    except Exception as exc:
+        log_task_update("Long Document", f"HTML-to-PDF export unavailable, falling back to text PDF: {exc}")
+
+    if not pdf_written:
+        plain_text = _markdown_to_plain_text(compiled_markdown)
+        pdf_path.write_bytes(_render_pdf_bytes(plain_text))
+
+    return {
+        "html": str(html_path),
+        "docx": str(docx_path) if str(docx_path) else "",
+        "pdf": str(pdf_path),
+    }
+
+
 def _build_compiled_markdown(
     title: str,
     objective: str,
@@ -994,7 +1425,7 @@ def _build_compiled_markdown(
     executive_summary: str,
     consolidated_references: list[dict],
 ) -> str:
-    lines = [f"# {title}", "", "## Objective", objective, "", "## Executive Summary", executive_summary.strip(), "", "## Table of Contents"]
+    lines = [f"# {title}", "", "## Executive Summary", executive_summary.strip(), "", "## Table of Contents"]
     for item in section_outputs:
         lines.append(f"- {item['index']}. {item['title']}")
     lines.append("")
@@ -1048,6 +1479,10 @@ def long_document_agent(state):
     heartbeat_seconds = _safe_int(state.get("research_heartbeat_seconds"), 120, 30, 3600)
     words_per_page = _safe_int(state.get("long_document_words_per_page"), 420, 250, 700)
     disable_visuals = bool(state.get("long_document_disable_visuals", False))
+    include_section_references = bool(state.get("long_document_section_references", False))
+    section_search_flag = state.get("long_document_section_search")
+    use_section_search = True if section_search_flag is None else bool(section_search_flag)
+    section_search_results_count = _safe_int(state.get("long_document_section_search_results"), 6, 1, 20)
 
     research_instructions = str(
         state.get(
@@ -1095,6 +1530,8 @@ def long_document_agent(state):
                     "Proceeding with web research to fill gaps."
                 )
             search_results = _collect_google_search_evidence(objective, num=int(state.get("long_document_search_results", 10) or 10))
+            if isinstance(search_results, dict) and str(search_results.get("error", "")).strip():
+                log_task_update("Long Document", f"Web search evidence collection error: {search_results.get('error')}")
             evidence_instructions = str(
                 state.get(
                     "long_document_evidence_instructions",
@@ -1267,6 +1704,20 @@ def long_document_agent(state):
             f"Researching section {index}/{len(outline.get('sections', []))}: {section_title}",
         )
 
+        section_search_results: dict[str, Any] = {}
+        section_search_sources: list[dict] = []
+        section_search_text = ""
+        if use_section_search:
+            search_query = f"{section_title} {section_objective}"
+            section_search_results = _collect_google_search_evidence(search_query, num=section_search_results_count)
+            if isinstance(section_search_results, dict) and str(section_search_results.get("error", "")).strip():
+                log_task_update(
+                    "Long Document",
+                    f"Section {index} web search error: {section_search_results.get('error')}",
+                )
+            section_search_sources = _sources_from_search_results(section_search_results.get("results", []))
+            section_search_text = _search_results_markdown(section_search_results.get("results", []))
+
         if collect_sources_first and evidence_excerpt:
             research_pass = {
                 "response_id": "evidence_bank",
@@ -1276,7 +1727,10 @@ def long_document_agent(state):
                 "raw": {"evidence_bank_path": state.get("long_document_evidence_bank_path", "")},
             }
             research_output = evidence_excerpt
+            if section_search_text:
+                research_output = f"{section_search_text}\n\n{research_output}"
             section_sources = list(evidence_sources)
+            section_sources = _merge_sources(section_sources, section_search_sources)
             source_ledger_md = _source_ledger_markdown(section_sources)
         else:
             query_lines = [
@@ -1303,11 +1757,23 @@ def long_document_agent(state):
                 heartbeat_label=f"Section {index} research in progress",
             )
 
+            if str(research_pass.get("status", "")).strip() not in {"completed", ""}:
+                log_task_update(
+                    "Long Document",
+                    f"Section {index} research status: {research_pass.get('status')}",
+                )
+
             research_output = str(research_pass.get("output_text", "")).strip()
+            if section_search_text:
+                research_output = f"{section_search_text}\n\n{research_output}".strip()
             if not research_output:
-                research_output = "Research output was empty. Use only explicitly supported claims and call out uncertainty."
+                if section_search_text:
+                    research_output = section_search_text
+                else:
+                    research_output = "Research output was empty. Use only explicitly supported claims and call out uncertainty."
 
             section_sources = _extract_source_entries(research_pass)
+            section_sources = _merge_sources(section_sources, section_search_sources)
             source_ledger_md = _source_ledger_markdown(section_sources)
 
         write_text_file(
@@ -1353,7 +1819,10 @@ def long_document_agent(state):
             log_task_update("Long Document", f"Using visuals already embedded in section {index}.")
         visual_assets = _normalize_visual_assets(existing_tables, existing_flowcharts, generated_visuals)
         section_text = _append_generated_visuals(section_text, visual_assets)
-        section_text = _append_verified_references(section_text, section_sources)
+        if include_section_references:
+            section_text = _append_verified_references(section_text, section_sources)
+        else:
+            section_text = _strip_section_references(section_text)
         log_task_update(
             "Long Document",
             f"Section {index} visuals: {len(visual_assets.get('tables', []))} tables, {len(visual_assets.get('flowcharts', []))} flowcharts.",
@@ -1466,6 +1935,13 @@ Section continuity notes:
         executive_summary = "Executive summary was not generated."
 
     consolidated_references = _consolidate_references(section_outputs)
+    if not include_section_references:
+        for item in section_outputs:
+            item["section_text"] = _remap_section_citations(
+                item.get("section_text", ""),
+                item.get("references", []),
+                consolidated_references,
+            )
     references_md_filename = _artifact_file(artifact_dir, "long_document_references.md")
     references_json_filename = _artifact_file(artifact_dir, "long_document_references.json")
     write_text_file(references_md_filename, _references_markdown(consolidated_references, heading="## Consolidated References", limit=200) + "\n")
@@ -1485,6 +1961,11 @@ Section continuity notes:
     )
     compiled_filename = _artifact_file(artifact_dir, "long_document_compiled.md")
     write_text_file(compiled_filename, compiled_markdown)
+    export_paths: dict[str, str] = {}
+    try:
+        export_paths = _export_long_document_formats(compiled_markdown, compiled_filename)
+    except Exception as exc:
+        log_task_update("Long Document", f"Format export failed: {exc}")
     manifest_filename = _artifact_file(artifact_dir, "long_document_manifest.json")
     write_text_file(
         manifest_filename,
@@ -1503,6 +1984,9 @@ Section continuity notes:
                 "references_json_file": f"{OUTPUT_DIR}/{references_json_filename}",
                 "visual_index_markdown_file": f"{OUTPUT_DIR}/{visual_index_md_filename}",
                 "visual_index_json_file": f"{OUTPUT_DIR}/{visual_index_json_filename}",
+                "compiled_html_file": export_paths.get("html", ""),
+                "compiled_docx_file": export_paths.get("docx", ""),
+                "compiled_pdf_file": export_paths.get("pdf", ""),
                 "evidence_bank_file": state.get("long_document_evidence_bank_path", ""),
                 "evidence_bank_json_file": state.get("long_document_evidence_bank_json_path", ""),
             },
@@ -1520,6 +2004,9 @@ Section continuity notes:
         f"- Target pages: {target_pages}\n"
         f"- Sections produced: {len(section_outputs)}\n"
         f"- Compiled markdown: {OUTPUT_DIR}/{compiled_filename}\n"
+        f"- Compiled HTML: {export_paths.get('html', 'n/a') or 'n/a'}\n"
+        f"- Compiled DOCX: {export_paths.get('docx', 'n/a') or 'n/a'}\n"
+        f"- Compiled PDF: {export_paths.get('pdf', 'n/a') or 'n/a'}\n"
         f"- References: {OUTPUT_DIR}/{references_md_filename}\n"
         f"- Visual index: {OUTPUT_DIR}/{visual_index_md_filename}\n"
         f"- Evidence bank: {state.get('long_document_evidence_bank_path', 'n/a')}\n"
@@ -1552,6 +2039,9 @@ Section continuity notes:
     ]
     state["long_document_artifact_dir"] = f"{OUTPUT_DIR}/{artifact_dir}"
     state["long_document_compiled_path"] = f"{OUTPUT_DIR}/{compiled_filename}"
+    state["long_document_compiled_html_path"] = export_paths.get("html", "")
+    state["long_document_compiled_docx_path"] = export_paths.get("docx", "")
+    state["long_document_compiled_pdf_path"] = export_paths.get("pdf", "")
     state["long_document_manifest_path"] = f"{OUTPUT_DIR}/{manifest_filename}"
     state["long_document_outline_md_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_outline.md')}"
     state["long_document_coherence_base_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_coherence_base.md')}"
