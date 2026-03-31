@@ -796,7 +796,10 @@ def communication_summary_agent(state):
 
     all_messages: list[dict] = []
     for suite, msgs in channel_results.items():
-        all_messages.extend(msgs)
+        for m in msgs:
+            ts = m.get("timestamp", 0)
+            if ts == 0 or ts >= cutoff_epoch:
+                all_messages.append(m)
 
     all_messages.sort(key=lambda m: m.get("timestamp", 0), reverse=True)
 

@@ -838,9 +838,6 @@ class AgentRuntime:
         return any(marker in text for marker in markers)
 
     def _is_communication_summary_request(self, state: dict) -> bool:
-        if bool(state.get("communication_authorized", False)) and not state.get("communication_summary_report"):
-            return True
-
         text = " ".join(
             [
                 str(state.get("user_query", "")),
