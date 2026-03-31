@@ -3869,6 +3869,16 @@ def _cmd_ui(args: argparse.Namespace) -> int:
 
         threading.Thread(target=_open_browser, daemon=True).start()
 
+    import socket as _socket
+
+    def _ui_already_running(port: int) -> bool:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as _s:
+            return _s.connect_ex(("127.0.0.1", port)) == 0
+
+    if _ui_already_running(ui_port):
+        print(f"Kendr UI already running at {ui_url}")
+        return 0
+
     from .ui_server import main as ui_main
 
     ui_main()

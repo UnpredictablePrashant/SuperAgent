@@ -14,18 +14,23 @@ A plugin-driven multi-agent runtime and orchestration system built on LangGraph/
 
 ## Running on Replit
 
-The main workflow runs the **Kendr Web Chat & Config UI** on port 2151.
+The main workflow runs the **Kendr Web Chat & Config UI**.
 
 **Workflow command:**
 ```
-KENDR_UI_HOST=0.0.0.0 KENDR_UI_PORT=2151 python3 -m kendr.cli ui
+KENDR_UI_HOST=0.0.0.0 KENDR_UI_PORT=5000 python3 -m kendr.cli ui
 ```
+
+> **Port note**: The Replit webview requires port 5000 (`localPort=5000, externalPort=80`).
+> The default port outside Replit is **2151**. The `KENDR_UI_PORT` env var overrides the port.
+> `kendr gateway start` (without `kendr ui`) also auto-starts the UI on the default port (2151).
 
 ### Port Overview
 | Port | Service | Command |
 |---|---|---|
-| `2151` | Kendr Web Chat + Config UI | `kendr ui` |
-| `8000` | Gateway (agent ingest) | `kendr gateway start` |
+| `2151` | Kendr Web Chat + Config UI (default, self-hosted) | `kendr ui` |
+| `5000` | Kendr Web Chat + Config UI (Replit webview) | Workflow env `KENDR_UI_PORT=5000` |
+| `8000` | Gateway (agent ingest, Replit) | `kendr gateway start` |
 | `8787` | Setup/OAuth Console | `kendr setup ui` |
 
 ## Key Environment Variables

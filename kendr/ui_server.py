@@ -526,7 +526,8 @@ function finalizeStreamRow(runId, output, error, artifactFiles) {
     if (artifactFiles && artifactFiles.length > 0) {
       let artHtml = '<div style="margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px"><div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">\ud83d\udcc1 Artifact Files</div>';
       artHtml += artifactFiles.map(f => '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">' +
-        '<span style="color:var(--teal)">\ud83d\udcc4</span><span style="color:var(--text)">' + esc(f.name) + '</span>' +
+        '<span style="color:var(--teal)">\ud83d\udcc4</span>' +
+        '<a href="/api/artifacts/download?run_id=' + encodeURIComponent(runId) + '&name=' + encodeURIComponent(f.name) + '" download="' + esc(f.name) + '" style="color:var(--teal);text-decoration:underline">' + esc(f.name) + '</a>' +
         (f.size ? '<span style="color:var(--muted)">(' + (f.size > 1024 ? Math.round(f.size/1024) + ' KB' : f.size + ' B') + ')</span>' : '') + '</div>').join('');
       artHtml += '</div>';
       resultEl.innerHTML += artHtml;
@@ -1035,6 +1036,42 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             except Exception:
                 runs = []
             self._json(200, runs)
+            return
+        if path == "/api/artifacts/download":
+            params = parse_qs(parsed.query or "")
+            run_id = (params.get("run_id") or [""])[0]
+            name = (params.get("name") or [""])[0]
+            if not run_id or not name or "/" in name or name.startswith("."):
+                self._json(400, {"error": "invalid_request"})
+                return
+            try:
+                run_row = _db_get_run(run_id)
+                output_dir = run_row.get("run_output_dir", "") if run_row else ""
+            except Exception:
+                output_dir = ""
+            if not output_dir:
+                self._json(404, {"error": "run_not_found_or_no_output_dir"})
+                return
+            file_path = os.path.join(output_dir, name)
+            if not os.path.isfile(file_path):
+                self._json(404, {"error": "file_not_found", "name": name})
+                return
+            try:
+                with open(file_path, "rb") as fh:
+                    data = fh.read()
+                import mimetypes
+                mime_type, _ = mimetypes.guess_type(file_path)
+                content_type = mime_type or "application/octet-stream"
+                safe_name = os.path.basename(file_path)
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
             return
         if path.startswith("/api/runs/") and path.endswith("/artifacts"):
             run_id = path[len("/api/runs/"):-len("/artifacts")]
