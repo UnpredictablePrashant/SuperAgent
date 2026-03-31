@@ -298,19 +298,23 @@ kendr generate "A Python CLI tool for batch image resizing"
 
 ## `kendr gateway`
 
-Start, stop, or inspect the HTTP gateway server. The gateway must be started explicitly before any workflow that requires it.
+Start, stop, restart, or inspect the HTTP gateway server. The gateway must be started explicitly before any workflow that requires it. It is never auto-started by `kendr run`, `kendr research`, or `kendr generate`.
 
 ```bash
 kendr gateway start
 kendr gateway stop
+kendr gateway restart
 kendr gateway status [--json]
+kendr gateway serve       # run in foreground (default when no action given)
 ```
 
-| Subcommand | Description |
+| Action | Description |
 |---|---|
 | `start` | Start the gateway server in the background. Writes PID to `~/.kendr/gateway.pid`. |
-| `stop` | Stop a gateway-owned process on the configured port. Does not kill unrelated processes. |
+| `stop` | Stop the gateway-owned process on the configured port. Does not kill unrelated processes. |
+| `restart` | Stop the current gateway and start a fresh one. |
 | `status` | Show gateway health, PID state, and port listener status. |
+| `serve` | Run the gateway in the foreground (default when no action is specified). |
 
 | Flag | Default | Description |
 |---|---|---|
@@ -322,7 +326,29 @@ kendr gateway status [--json]
 kendr gateway start
 kendr gateway status
 kendr gateway stop
+kendr gateway restart
 kendr gateway status --json
+kendr gateway serve        # foreground — useful for debugging
+```
+
+---
+
+## `kendr web`
+
+Alias for `kendr gateway serve`. Runs the gateway server in the foreground.
+
+```bash
+kendr web
+```
+
+---
+
+## `kendr setup-ui`
+
+Run the OAuth and setup UI directly in the foreground (shortcut for `kendr setup ui`).
+
+```bash
+kendr setup-ui
 ```
 
 ---
@@ -345,9 +371,9 @@ kendr setup <action> [args]
 | `enable COMPONENT` | Enable a component. |
 | `disable COMPONENT` | Disable a component. |
 | `export-env` | Export current DB configuration as dotenv lines. Use `--include-secrets` to include secrets. |
-| `install` | Install auto-installable local components (nmap, zap, etc.). Use `--yes` to skip confirmation. |
+| `install` | Install auto-installable local components (nmap, zap, dependency-check, playwright). Use `--yes` to skip confirmation, `--only` to install specific tools. |
 | `ui` | Run the web-based OAuth setup UI on `http://127.0.0.1:8787`. |
-| `oauth PROVIDER` | Run the OAuth login flow for a supported provider (google, microsoft, slack). |
+| `oauth PROVIDER` | Run the OAuth login flow for a supported provider (`google`, `microsoft`, `slack`, `all`). Use `--no-browser` to print URLs without opening a browser. |
 
 ### Examples
 
@@ -362,6 +388,12 @@ kendr setup show openai --json
 
 # Install security tools
 kendr setup install --yes
+
+# Install only specific tools
+kendr setup install --yes --only nmap zap
+
+# Run OAuth flow without opening a browser (print URL to copy manually)
+kendr setup oauth google --no-browser
 
 # Export config for a .env file
 kendr setup export-env > .env
@@ -487,6 +519,7 @@ kendr workdir create PATH [--activate]
 | `set PATH` | Set the working directory to an existing absolute path. |
 | `here` | Set the current terminal folder as the working directory. |
 | `create PATH` | Create a new working directory. Use `--activate` to set it active immediately. |
+| `clear` | Clear the configured working directory (unset `KENDR_WORKING_DIR`). |
 
 ### Examples
 
@@ -531,4 +564,40 @@ List or apply filesystem snapshots created by privileged runs.
 ```bash
 kendr rollback list
 kendr rollback apply --snapshot PATH [--target-dir PATH] [--overwrite] [--yes]
+```
+
+---
+
+## `kendr hello`
+
+Display a quick-start welcome screen with setup guidance and example commands. Useful for first-time orientation.
+
+```bash
+kendr hello [--json]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--json` | _(off)_ | Emit quick-start info as JSON. |
+
+---
+
+## `kendr help`
+
+Show help for a specific command.
+
+```bash
+kendr help [TOPIC]
+```
+
+| Argument | Description |
+|---|---|
+| `topic` | Optional command name to show help for. Omit to show general help. |
+
+### Examples
+
+```bash
+kendr help
+kendr help run
+kendr help gateway
 ```
