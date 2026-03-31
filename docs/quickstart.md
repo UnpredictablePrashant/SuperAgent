@@ -63,7 +63,20 @@ That is the minimum. Everything else is optional.
 
 ---
 
-## Step 3 — Health check
+## Step 3 — Start the gateway
+
+Kendr routes all runs through the HTTP gateway server. You must start it before any `kendr run`, `kendr research`, or `kendr generate` command.
+
+```bash
+kendr gateway start
+kendr gateway status     # confirm it's running
+```
+
+The gateway runs in the background and writes its PID to `~/.kendr/gateway.pid`. It stays running across multiple `kendr run` calls. You only need to start it once per session (or after a reboot).
+
+---
+
+## Step 4 — Health check
 
 Confirm everything is wired up:
 
@@ -82,7 +95,7 @@ kendr agents list
 
 ---
 
-## Step 4 — Your first run
+## Step 5 — Your first run
 
 Run a research brief:
 
@@ -104,19 +117,7 @@ kendr run --current-folder \
 
 ---
 
-## What if I see "gateway not running"?
-
-Some workflows require the HTTP gateway. If you see a message saying the gateway is not running, start it:
-
-```bash
-kendr gateway start
-```
-
-Then re-run your query. For basic research workflows the gateway is not needed.
-
----
-
-## Step 5 — Try more workflows
+## Step 6 — Try more workflows
 
 ### Deep research with source selection
 
@@ -169,7 +170,7 @@ kendr research --sources arxiv,web --pages 10 \
 
 ---
 
-## Step 6 — Resume a paused or interrupted run
+## Step 7 — Resume a paused or interrupted run
 
 Every run writes resumable state to its output folder.
 

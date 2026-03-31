@@ -50,13 +50,21 @@ kendr setup set core_runtime KENDR_WORKING_DIR /absolute/path/to/workdir
 
 Or set them in `.env` (copy from `.env.example`).
 
-**3. Check setup:**
+**3. Start the gateway:**
+
+```bash
+kendr gateway start
+```
+
+The gateway is required before `kendr run`, `kendr research`, or `kendr generate`. Start it once — it stays running in the background.
+
+**4. Check setup:**
 
 ```bash
 kendr setup status
 ```
 
-**4. Run your first query:**
+**5. Run your first query:**
 
 ```bash
 kendr run --current-folder \

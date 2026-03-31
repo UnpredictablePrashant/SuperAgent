@@ -6,11 +6,12 @@ Complete reference for every `kendr` subcommand and flag. Every command produces
 
 ## Global Flags
 
-These flags apply to the `kendr` root command.
+These flags apply to the `kendr` root command and must appear before the subcommand.
 
 | Flag | Description |
 |---|---|
 | `--no-color` | Disable ANSI colors in all CLI output. |
+| `--log-level LEVEL` | Global log verbosity hint for runtime services. Choices: `silent`, `fatal`, `error`, `warn`, `info`, `debug`, `trace`. Sets `KENDR_LOG_LEVEL` environment variable for the run. |
 | `-V` / `--version` | Print the current version and exit. |
 
 ---
@@ -373,7 +374,7 @@ kendr setup <action> [args]
 | `export-env` | Export current DB configuration as dotenv lines. Use `--include-secrets` to include secrets. |
 | `install` | Install auto-installable local components (nmap, zap, dependency-check, playwright). Use `--yes` to skip confirmation, `--only` to install specific tools. |
 | `ui` | Run the web-based OAuth setup UI on `http://127.0.0.1:8787`. |
-| `oauth PROVIDER` | Run the OAuth login flow for a supported provider (`google`, `microsoft`, `slack`, `all`). Use `--no-browser` to print URLs without opening a browser. |
+| `oauth PROVIDER` | Run the OAuth login flow for a supported provider (`google`, `microsoft`, `slack`, `all`). Use `--no-browser` to print URLs without opening a browser. Use `--ensure-ui` for compatibility with environments that auto-start the setup UI. |
 
 ### Examples
 
