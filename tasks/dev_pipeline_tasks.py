@@ -4,29 +4,45 @@ dev_pipeline_tasks.py — Multi-agent dev project pipeline orchestrator.
 Provides `dev_pipeline_agent(state)` which orchestrates the complete
 end-to-end project generation flow in a single agent call:
 
-  blueprint → [approval gate] → scaffold → db → auth → backend →
-  frontend → deps → tests → security_scan → devops → verify →
+  blueprint → [y/n approval gate] → scaffold → database → auth →
+  backend → frontend → devops → deps → tests → verify →
   [auto-fix + retest loop ×N] → post_setup → zip export
 
 Activated when state["dev_pipeline_mode"] is True.
 Intended for `kendr run --dev "…"` or `kendr generate "…"`.
 
-Blueprint approval gate:
-- Calls project_blueprint_agent which sets the "project_blueprint" approval scope
-  (using the same state pattern recognized by the runtime's _apply_pending_user_response).
-- auto_approve=True → project_blueprint_agent auto-approves and continues.
-- auto_approve=False → project_blueprint_agent sets blueprint_waiting_for_approval=True,
-  approval_pending_scope="project_blueprint", dev_pipeline_status="waiting_for_approval",
-  and dev_pipeline_agent returns. The orchestrator sees blueprint_waiting_for_approval and
-  routes to __finish__ to surface the approval prompt to the user. On the next run, the
-  runtime sets blueprint_status="approved" via _apply_pending_user_response and
-  re-dispatches dev_pipeline_agent which resumes past the blueprint stage.
+Blueprint approval gate (interactive y/n):
+- When stdin is a tty (CLI context): prints the blueprint summary and prompts
+  the user for y/n. If "n", dev_pipeline_status="cancelled" and returns.
+  If "y", pipeline continues immediately.
+- When stdin is not a tty (gateway/non-interactive context): delegates to
+  project_blueprint_agent's state-based approval flow, which sets
+  approval_pending_scope="project_blueprint", blueprint_waiting_for_approval=True,
+  and dev_pipeline_status="waiting_for_approval". The orchestrator surfaces the
+  prompt to the user and re-dispatches dev_pipeline_agent with blueprint_status
+  ="approved" on the next run (via runtime._apply_pending_user_response).
+
+Stage order:
+  1. blueprint
+  2. scaffold (fatal — no scaffold = no project)
+  3. database
+  4. auth (if blueprint has auth)
+  5. backend
+  6. frontend (if blueprint has frontend)
+  7. devops (Dockerfile/CI/CD — unless skip_devops_agent)
+  8. deps (dependency manager)
+  9. tests (first run — unless skip_test_agent)
+  10. verify_0 (initial verifier)
+  11. auto-fix rounds (coding → retest → re-verify ×N)
+  12. post_setup
+  13. zip export
 
 Auto-fix retry loop:
 - Triggers when verifier_status != "pass" OR test_agent_status indicates failure.
 - Extracts failing file paths from verifier_issues and verifier_check_results.
-- Calls coding_agent for each file with coding_write_path + coding_context_files set
-  so actual file content is patched (not just text output).
+- Calls coding_agent for each file with coding_write_path + coding_context_files
+  so actual file content is patched on disk.
+- Falls back to context-only fix call when no file paths can be extracted.
 - Re-runs test_agent and project_verifier_agent after each fix round.
 - On persistent failure: dev_pipeline_status="partial" with diagnostic summary.
 
@@ -55,8 +71,8 @@ AGENT_METADATA = {
         "display_name": "Dev Pipeline Agent",
         "description": (
             "End-to-end multi-agent software project generation pipeline. "
-            "Orchestrates blueprint → approval → scaffold → build → "
-            "test → verify (with auto-fix retry) → zip export."
+            "Orchestrates blueprint → y/n approval → scaffold → build → "
+            "devops → test → verify (with auto-fix retry) → zip export."
         ),
         "skills": [
             "project generation",
@@ -125,6 +141,21 @@ def _run_stage(
         if fatal:
             raise
     return state
+
+
+def _ask_yn(prompt: str) -> bool:
+    """
+    Prompt the user with a yes/no question on stderr/stdout.
+    Returns True for yes, False for no.
+    Only call when sys.stdin.isatty() is True.
+    """
+    sys.stdout.write(f"\n{prompt} [y/n]: ")
+    sys.stdout.flush()
+    try:
+        answer = sys.stdin.readline().strip().lower()
+    except (EOFError, OSError):
+        return True  # treat EOF as yes (auto-approve)
+    return answer in ("y", "yes", "1", "ok", "approve", "approved")
 
 
 def _zip_project(project_root: Path, output_dir: Path) -> str:
@@ -199,14 +230,18 @@ def _extract_failing_files(state: dict, project_root: str) -> List[str]:
             if resolved:
                 paths.append(resolved)
             stderr = str(check.get("stderr", "") or "")
-            for m in re.finditer(r'(?:^|\s)([\w./\\-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs))\b', stderr):
+            for m in re.finditer(
+                r'(?:^|\s)([\w./\\-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs))\b', stderr
+            ):
                 resolved = _resolve(m.group(1).strip())
                 if resolved:
                     paths.append(resolved)
 
     # From test_agent_results (list[str]): parse file paths from output lines
     for line in (state.get("test_agent_results") or []):
-        for m in re.finditer(r'(?:^|\s)([\w./\\-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs))\b', str(line)):
+        for m in re.finditer(
+            r'(?:^|\s)([\w./\\-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs))\b', str(line)
+        ):
             resolved = _resolve(m.group(1).strip())
             if resolved:
                 paths.append(resolved)
@@ -294,9 +329,9 @@ def _run_fix_round(
     project_verifier_agent: Callable[[dict], dict],
 ) -> dict:
     """
-    Perform one auto-fix round: fix each failing file, then retest + re-verify.
-    coding_agent is called per target file with coding_write_path set.
-    Falls back to a single context-only fix call when no file paths can be extracted.
+    Perform one auto-fix round: fix each failing file with coding_agent
+    (coding_write_path set per file), then retest + re-verify.
+    Falls back to a single context-only fix when no file paths can be extracted.
     """
     project_root = str(state.get("project_root", "") or "").strip()
     failing_files = _extract_failing_files(state, project_root)
@@ -312,15 +347,15 @@ def _run_fix_round(
     if failing_files:
         for file_path in failing_files:
             fix_task = _build_fix_context(state, fix_round, target_file=file_path)
-            # Read current file content as context
             context_files = [file_path]
-            # Add related files from the same directory if small enough
             try:
                 parent = Path(file_path).parent
                 for sibling in sorted(parent.iterdir()):
                     if (
                         sibling.is_file()
-                        and sibling.suffix in {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java"}
+                        and sibling.suffix in {
+                            ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java"
+                        }
                         and str(sibling) != file_path
                         and len(context_files) < 5
                     ):
@@ -336,7 +371,7 @@ def _run_fix_round(
             stage_name = f"auto_fix_{fix_round}_{Path(file_path).name}"
             state = _run_stage(stage_name, coding_agent, state, stages_completed)
     else:
-        # No specific file paths found — send a broad fix call without write path
+        # No specific file paths found — broad fix without write path
         fix_task = _build_fix_context(state, fix_round)
         state["coding_task"] = fix_task
         state["current_objective"] = fix_task
@@ -356,35 +391,36 @@ def dev_pipeline_agent(state: dict) -> dict:
     """
     End-to-end project generation pipeline agent.
 
+    Stage order:
+      blueprint → [y/n gate] → scaffold → database → auth → backend →
+      frontend → devops → deps → tests → verify_0 →
+      auto-fix rounds (coding + retest + re-verify) → post_setup → zip
+
     Blueprint approval gate:
-    - Delegates to project_blueprint_agent which uses the "project_blueprint" scope
-      (recognized by runtime._apply_pending_user_response).
-    - auto_approve=True → blueprint auto-approved, pipeline continues.
-    - auto_approve=False → blueprint_waiting_for_approval=True is set;
-      dev_pipeline_status="waiting_for_approval" and returns; the orchestrator
-      routes to __finish__ to surface the prompt. On the next run with
-      blueprint_status="approved", the pipeline resumes past the blueprint stage.
+    - sys.stdin.isatty() is True (CLI): blueprint summary printed; user prompted
+      [y/n]. "n" → dev_pipeline_status="cancelled". "y" → continues immediately.
+    - sys.stdin.isatty() is False (gateway): delegates to project_blueprint_agent's
+      state-based gate; blueprint_waiting_for_approval=True + approval_pending_scope=
+      "project_blueprint" are set; dev_pipeline_status="waiting_for_approval" returned;
+      orchestrator routes to __finish__ to surface prompt; on next run with
+      blueprint_status="approved", orchestrator clears status and re-dispatches.
+    - auto_approve=True: always skip the gate.
 
     Auto-fix retry loop (max_fix_rounds, default 3):
     - Triggers when verifier_status != pass OR test failures detected.
-    - Extracts failing file paths from verifier/test output.
-    - coding_agent called per failing file with coding_write_path set (real patch).
-    - Falls back to context-only call when no file paths found.
-    - Re-runs test_agent and project_verifier_agent after each round.
-    - dev_pipeline_status="partial" with diagnostics on persistent failure.
+    - _extract_failing_files() extracts file paths from verifier_issues,
+      verifier_check_results, and test_agent_results (list[str]).
+    - coding_agent called with coding_write_path per file (real patch).
+    - Falls back to context-only fix when no file paths found.
 
-    Zip export (run output directory):
-    - Archive written to state["run_output_dir"] (falls back to get_output_dir()).
-    - dev_pipeline_zip_path stored in state and written to dev_pipeline_zip_path.txt.
-
-    Orchestrator finalization:
-    - On return, dev_pipeline_status is set to a terminal value (complete/partial/
-      error/cancelled/waiting_for_approval). The orchestrator routing block checks
-      this and routes to __finish__ accordingly.
+    Zip export:
+    - Written to state["run_output_dir"] (falls back to get_output_dir()).
+    - dev_pipeline_zip_path stored in state and dev_pipeline_zip_path.txt.
     """
     active_task, task_content, _ = begin_agent_session(state, _AGENT_NAME)
     state["dev_pipeline_agent_calls"] = state.get("dev_pipeline_agent_calls", 0) + 1
 
+    auto_approve: bool = bool(state.get("auto_approve") or state.get("auto_approve_blueprint"))
     skip_tests: bool = bool(state.get("skip_test_agent", False))
     skip_devops: bool = bool(state.get("skip_devops_agent", False))
     max_fix_rounds: int = max(0, int(state.get("dev_pipeline_max_fix_rounds", 3) or 3))
@@ -393,7 +429,7 @@ def dev_pipeline_agent(state: dict) -> dict:
     state["dev_pipeline_stages_completed"] = stages_completed
     state["dev_pipeline_error"] = ""
 
-    # ── Determine if we are resuming after blueprint approval ──────────────────
+    # Detect resume-after-approval
     already_approved = str(state.get("blueprint_status", "") or "").strip() == "approved"
 
     _print_banner("Kendr Dev Pipeline — starting full project generation")
@@ -421,9 +457,7 @@ def dev_pipeline_agent(state: dict) -> dict:
 
     state["dev_pipeline_status"] = "running"
 
-    # ── Stage 1: Blueprint ─────────────────────────────────────────────────────
-    # project_blueprint_agent handles both auto-approve and the approval gate
-    # using the "project_blueprint" scope (recognized by runtime handling).
+    # ── Stage 1: Blueprint + approval gate ────────────────────────────────────
     if not already_approved:
         try:
             state = _run_stage("blueprint", project_blueprint_agent, state, stages_completed, fatal=True)
@@ -432,12 +466,42 @@ def dev_pipeline_agent(state: dict) -> dict:
             state["dev_pipeline_error"] = f"Blueprint stage failed: {exc}"
             return state
 
-        # If blueprint agent set the approval gate, surface it and stop
-        if bool(state.get("blueprint_waiting_for_approval", False)):
-            state["dev_pipeline_status"] = "waiting_for_approval"
-            log_task_update("DevPipeline", "Blueprint awaiting user approval.")
-            _print_banner("Blueprint generated — awaiting approval.")
-            return state
+        if not auto_approve:
+            is_tty = bool(getattr(sys.stdin, "isatty", lambda: False)())
+            if is_tty:
+                # ── Interactive [y/n] gate (CLI context) ──────────────────────
+                blueprint_md = str(
+                    state.get("blueprint_summary")
+                    or state.get("draft_response", "")
+                ).strip()
+                project_root_display = str(state.get("project_root", "(working directory)"))
+                sys.stdout.write("\n" + "═" * 72 + "\n")
+                sys.stdout.write("  BLUEPRINT READY FOR REVIEW\n")
+                sys.stdout.write("═" * 72 + "\n")
+                sys.stdout.write(f"\n{blueprint_md[:4000]}\n")
+                sys.stdout.write(f"\nProject will be created at: {project_root_display}\n")
+                sys.stdout.flush()
+                approved = _ask_yn("Proceed with this blueprint?")
+                if not approved:
+                    state["dev_pipeline_status"] = "cancelled"
+                    state["draft_response"] = "Blueprint rejected by user. Generation cancelled."
+                    state["dev_pipeline_error"] = "Cancelled at blueprint approval gate."
+                    log_task_update("DevPipeline", "Blueprint rejected at interactive gate.")
+                    _print_banner("Generation cancelled.")
+                    return state
+                state["blueprint_status"] = "approved"
+                state["blueprint_waiting_for_approval"] = False
+                log_task_update("DevPipeline", "Blueprint approved at interactive gate.")
+            else:
+                # ── State-based gate (gateway / non-interactive context) ───────
+                # project_blueprint_agent already set the approval state keys
+                if bool(state.get("blueprint_waiting_for_approval", False)):
+                    state["dev_pipeline_status"] = "waiting_for_approval"
+                    log_task_update("DevPipeline", "Blueprint awaiting user approval (state-based gate).")
+                    _print_banner("Blueprint generated — awaiting approval.")
+                    return state
+                # If blueprint agent auto-cleared the flag (shouldn't happen here, but safe)
+                state["blueprint_status"] = "approved"
 
     # ── Stage 2: Scaffold (fatal — no scaffold means no project) ───────────────
     try:
@@ -464,21 +528,18 @@ def dev_pipeline_agent(state: dict) -> dict:
     if has_frontend:
         state = _run_stage("frontend", frontend_builder_agent, state, stages_completed)
 
-    # ── Stage 7: Dependency manager ────────────────────────────────────────────
-    state = _run_stage("deps", dependency_manager_agent, state, stages_completed)
-
-    # ── Stage 8: Tests (first run) ────────────────────────────────────────────
-    if not skip_tests:
-        state = _run_stage("tests", test_agent, state, stages_completed)
-
-    # ── Stage 9: Security scanner ─────────────────────────────────────────────
-    state = _run_stage("security_scan", security_scanner_agent, state, stages_completed)
-
-    # ── Stage 10: DevOps ──────────────────────────────────────────────────────
+    # ── Stage 7: DevOps (before deps and tests per required order) ─────────────
     if not skip_devops:
         state = _run_stage("devops", devops_agent, state, stages_completed)
 
-    # ── Stage 11: Initial verify ──────────────────────────────────────────────
+    # ── Stage 8: Dependency manager ────────────────────────────────────────────
+    state = _run_stage("deps", dependency_manager_agent, state, stages_completed)
+
+    # ── Stage 9: Tests (first run) ────────────────────────────────────────────
+    if not skip_tests:
+        state = _run_stage("tests", test_agent, state, stages_completed)
+
+    # ── Stage 10: Initial verify ──────────────────────────────────────────────
     state = _run_stage("verify_0", project_verifier_agent, state, stages_completed)
 
     # ── Auto-fix + retest loop ────────────────────────────────────────────────
@@ -504,7 +565,7 @@ def dev_pipeline_agent(state: dict) -> dict:
         if not all_passing:
             log_task_update("DevPipeline", "Max auto-fix rounds exhausted; proceeding to post-setup.")
 
-    # ── Stage 12: Post-setup ──────────────────────────────────────────────────
+    # ── Stage 11: Post-setup ──────────────────────────────────────────────────
     state = _run_stage("post_setup", post_setup_agent, state, stages_completed)
 
     # ── Zip export (into run output directory) ────────────────────────────────

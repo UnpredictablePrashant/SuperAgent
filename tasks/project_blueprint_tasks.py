@@ -672,9 +672,16 @@ def project_blueprint_agent(state):
     log_task_update("Blueprint", f"Architecture pass #{call_number} started.")
 
     # Load stack templates
+    # Honor state["project_stack"] when explicitly set from CLI (--stack / --dev-stack);
+    # fall back to LLM-driven detection from description.
     stack_requirements = _extract_stack_requirements(description)
     helpers = _load_stack_helpers()
-    detected_stack_name = _detect_stack(description)
+    explicit_stack = str(state.get("project_stack", "") or "").strip()
+    if explicit_stack:
+        detected_stack_name = explicit_stack
+        log_task_update("Blueprint", f"Using explicitly requested stack: {detected_stack_name}")
+    else:
+        detected_stack_name = _detect_stack(description)
     stack_template = helpers["load"](detected_stack_name) if detected_stack_name else None
     available_stack_names = helpers["available"]()
 
