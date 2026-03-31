@@ -610,7 +610,7 @@ def research_pipeline_agent(state: dict) -> dict:
         state["long_document_evidence_bank_path"] = f"{OUTPUT_DIR}/{evidence_bank_filename}"
         state["long_document_evidence_bank_excerpt"] = report_md[:18000]
         state["long_document_evidence_sources"] = [
-            {"id": f"P{i + 1}", "url": item["url"], "label": item["label"]}
+            {"id": f"S{i + 1}", "url": item["url"], "label": item["label"]}
             for i, item in enumerate(source_urls[:60])
         ]
         if pipeline_collected_all:

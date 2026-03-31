@@ -551,7 +551,8 @@ def _remap_section_citations(section_text: str, section_sources: list[dict], con
         local_id = match.group(1)
         return f"[{local_map.get(local_id, local_id)}]"
 
-    return re.sub(r"\\[(S\\d+)\\]", _swap, section_text)
+    # Match any source citation tag of the form [S1], [S12], [P1], etc.
+    return re.sub(r"\[([A-Z]\d+)\]", _swap, section_text)
 
 
 def _consolidate_references(section_outputs: list[dict]) -> list[dict]:

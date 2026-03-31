@@ -1686,8 +1686,9 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
         default="",
         help=(
             "Comma-separated list of research sources for the multi-source pipeline. "
-            "Supported: web, arxiv, reddit, scholar, patents, openalex. "
-            "Example: --sources web,arxiv,reddit"
+            "Supported: web, arxiv (alias: papers, academic), reddit (alias: social), "
+            "scholar, patents (alias: patent), openalex, local (requires --local-drive-paths). "
+            "Example: --sources web,papers,reddit or --sources local,openalex"
         ),
     )
     run_parser.add_argument(
