@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
+from typing import Any
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.research_infra import (
     arxiv_search,
+    llm_text,
     openalex_search,
     reddit_search,
     serp_patent_search,
@@ -48,13 +51,42 @@ AGENT_METADATA = {
 _VALID_SOURCES = {"web", "arxiv", "reddit", "scholar", "patents", "openalex"}
 _DEFAULT_SOURCES = ["web"]
 
+# Source aliases: map user-friendly names to canonical source IDs
+_SOURCE_ALIASES: dict[str, str] = {
+    "papers": "arxiv",
+    "arxiv": "arxiv",
+    "academic": "arxiv",
+    "reddit": "reddit",
+    "social": "reddit",
+    "web": "web",
+    "google": "web",
+    "search": "web",
+    "scholar": "scholar",
+    "google_scholar": "scholar",
+    "patents": "patents",
+    "patent": "patents",
+    "google_patents": "patents",
+    "openalex": "openalex",
+    # "local" is a valid alias but handled separately (local file scan, not a remote source)
+    "local": "local",
+}
+
 
 def _parse_sources(raw: object) -> list[str]:
+    """Parse a raw source list or comma-separated string and normalize to canonical names."""
     if isinstance(raw, list):
-        return [str(s).strip().lower() for s in raw if str(s).strip()]
-    if isinstance(raw, str) and raw.strip():
-        return [s.strip().lower() for s in raw.split(",") if s.strip()]
-    return list(_DEFAULT_SOURCES)
+        tokens = [str(s).strip().lower() for s in raw if str(s).strip()]
+    elif isinstance(raw, str) and raw.strip():
+        tokens = [s.strip().lower() for s in raw.split(",") if s.strip()]
+    else:
+        return list(_DEFAULT_SOURCES)
+
+    result: list[str] = []
+    for t in tokens:
+        canonical = _SOURCE_ALIASES.get(t, t)
+        if canonical not in result:
+            result.append(canonical)
+    return result or list(_DEFAULT_SOURCES)
 
 
 def _format_arxiv_results(entries: list[dict]) -> str:
@@ -172,6 +204,48 @@ def _format_openalex_results(payload: dict, query: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _fetch_one_source(
+    source: str,
+    query: str,
+    *,
+    serp_key_available: bool,
+    arxiv_max: int,
+    reddit_limit: int,
+    web_num: int,
+    scholar_num: int,
+    patents_num: int,
+    openalex_per_page: int,
+) -> tuple[str, Any, str | None]:
+    """Fetch results from a single source. Returns (source, result_or_None, error_or_None)."""
+    try:
+        if source == "local":
+            return (source, None, "local source requires --local-drive-paths; skipping remote fetch.")
+        if source == "arxiv":
+            log_task_update("Research Pipeline", f"[parallel] Fetching arXiv papers for: {query}")
+            return (source, arxiv_search(query, max_results=arxiv_max), None)
+        if source == "reddit":
+            log_task_update("Research Pipeline", f"[parallel] Fetching Reddit posts for: {query}")
+            return (source, reddit_search(query, limit=reddit_limit), None)
+        if source == "openalex":
+            log_task_update("Research Pipeline", f"[parallel] Fetching OpenAlex academic works for: {query}")
+            return (source, openalex_search(query, per_page=openalex_per_page), None)
+        if source in ("web", "scholar", "patents"):
+            if not serp_key_available:
+                return (source, None, f"SERP_API_KEY not set — {source} skipped.")
+            if source == "web":
+                log_task_update("Research Pipeline", f"[parallel] Fetching web search results for: {query}")
+                return (source, serp_search(query, num=web_num), None)
+            if source == "scholar":
+                log_task_update("Research Pipeline", f"[parallel] Fetching Google Scholar results for: {query}")
+                return (source, serp_scholar_search(query, num=scholar_num), None)
+            if source == "patents":
+                log_task_update("Research Pipeline", f"[parallel] Fetching patent results for: {query}")
+                return (source, serp_patent_search(query, num=patents_num), None)
+        return (source, None, f"Unknown source '{source}' — skipping.")
+    except Exception as exc:
+        return (source, None, str(exc))
+
+
 def _collect_pipeline_sources(
     query: str,
     sources: list[str],
@@ -183,49 +257,40 @@ def _collect_pipeline_sources(
     patents_num: int = 10,
     openalex_per_page: int = 10,
 ) -> dict:
+    """Fan-out source fetches in parallel using a thread pool, then collect results."""
     serp_key_available = bool(os.getenv("SERP_API_KEY", "").strip())
-    results = {}
-    errors = {}
+    results: dict[str, Any] = {}
+    errors: dict[str, str] = {}
 
-    for source in sources:
-        source = source.lower()
-        if source not in _VALID_SOURCES:
-            log_task_update("Research Pipeline", f"Unknown source '{source}' — skipping.")
-            continue
-        try:
-            if source == "arxiv":
-                log_task_update("Research Pipeline", f"Fetching arXiv papers for: {query}")
-                results["arxiv"] = arxiv_search(query, max_results=arxiv_max)
-            elif source == "reddit":
-                log_task_update("Research Pipeline", f"Fetching Reddit posts for: {query}")
-                results["reddit"] = reddit_search(query, limit=reddit_limit)
-            elif source == "web":
-                if not serp_key_available:
-                    errors["web"] = "SERP_API_KEY not set — web search skipped."
-                    log_task_update("Research Pipeline", errors["web"])
-                    continue
-                log_task_update("Research Pipeline", f"Fetching web search results for: {query}")
-                results["web"] = serp_search(query, num=web_num)
-            elif source == "scholar":
-                if not serp_key_available:
-                    errors["scholar"] = "SERP_API_KEY not set — Google Scholar skipped."
-                    log_task_update("Research Pipeline", errors["scholar"])
-                    continue
-                log_task_update("Research Pipeline", f"Fetching Google Scholar results for: {query}")
-                results["scholar"] = serp_scholar_search(query, num=scholar_num)
-            elif source == "patents":
-                if not serp_key_available:
-                    errors["patents"] = "SERP_API_KEY not set — patent search skipped."
-                    log_task_update("Research Pipeline", errors["patents"])
-                    continue
-                log_task_update("Research Pipeline", f"Fetching patent results for: {query}")
-                results["patents"] = serp_patent_search(query, num=patents_num)
-            elif source == "openalex":
-                log_task_update("Research Pipeline", f"Fetching OpenAlex academic works for: {query}")
-                results["openalex"] = openalex_search(query, per_page=openalex_per_page)
-        except Exception as exc:
-            errors[source] = str(exc)
-            log_task_update("Research Pipeline", f"Source '{source}' fetch failed: {exc}")
+    # Filter out sources not in _VALID_SOURCES plus 'local'
+    valid = [s for s in sources if s in _VALID_SOURCES or s == "local"]
+    skipped = [s for s in sources if s not in _VALID_SOURCES and s != "local"]
+    for s in skipped:
+        log_task_update("Research Pipeline", f"Ignoring unrecognized source '{s}'.")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(valid) or 1, 6)) as pool:
+        futures = {
+            pool.submit(
+                _fetch_one_source,
+                source,
+                query,
+                serp_key_available=serp_key_available,
+                arxiv_max=arxiv_max,
+                reddit_limit=reddit_limit,
+                web_num=web_num,
+                scholar_num=scholar_num,
+                patents_num=patents_num,
+                openalex_per_page=openalex_per_page,
+            ): source
+            for source in valid
+        }
+        for future in concurrent.futures.as_completed(futures):
+            src, data, err = future.result()
+            if err:
+                errors[src] = err
+                log_task_update("Research Pipeline", f"Source '{src}' error: {err}")
+            elif data is not None:
+                results[src] = data
 
     return {"results": results, "errors": errors}
 
@@ -272,6 +337,54 @@ def _build_evidence_report(
         lines.append("")
 
     return "\n".join(lines).strip() + "\n"
+
+
+# Maximum characters of raw evidence text fed to the LLM synthesis prompt
+_SYNTHESIS_MAX_CHARS = int(os.getenv("PIPELINE_SYNTHESIS_MAX_CHARS", "12000"))
+
+
+def _synthesize_evidence(query: str, raw_report: str) -> str:
+    """
+    Run a structured LLM synthesis pass over the raw multi-source evidence report.
+
+    Produces a deduplicated, ranked, cross-source synthesis with:
+    - Key findings with provenance citations per source
+    - Agreements / convergences across sources
+    - Contradictions / gaps
+    - Ranked top items by relevance and credibility
+    Returns empty string if LLM is unavailable (caller falls back to raw_report).
+    """
+    truncated = raw_report[:_SYNTHESIS_MAX_CHARS]
+    prompt = f"""You are a research synthesis expert.
+
+Below is a multi-source evidence report collected for the query:
+"{query}"
+
+Evidence report:
+---
+{truncated}
+---
+
+Your task:
+1. Write a concise **Synthesis Summary** (3-5 paragraphs) that:
+   - Integrates the key findings across all sources
+   - Identifies convergences (where multiple sources agree) and marks them as high-confidence
+   - Flags contradictions or data gaps between sources
+   - Cites provenance (source name) for every specific claim
+2. Write a **Ranked Key Evidence** section (numbered list, up to 15 items):
+   - Each item: one specific finding, with [Source] tag, ranked by relevance + credibility
+3. Write a **Gaps & Recommended Next Steps** section (bullet list):
+   - What remains unclear, what sources to consult next
+
+Format your response in clean Markdown with the three sections clearly labeled.
+Do NOT repeat raw search result text verbatim — synthesize and paraphrase.
+"""
+    try:
+        synthesis = llm_text(prompt)
+        return synthesis.strip()
+    except Exception as exc:
+        log_task_update("Research Pipeline", f"LLM synthesis failed (falling back to raw report): {exc}")
+        return ""
 
 
 def _extract_source_urls(collected: dict) -> list[dict]:
@@ -322,11 +435,14 @@ def research_pipeline_agent(state: dict) -> dict:
         raise ValueError("research_pipeline_agent requires a non-empty query or objective.")
 
     raw_sources = state.get("research_sources") or state.get("pipeline_sources") or _DEFAULT_SOURCES
+    # _parse_sources normalizes aliases (e.g. "papers" → "arxiv") and deduplicates
     sources = _parse_sources(raw_sources)
-    unknown = [s for s in sources if s not in _VALID_SOURCES]
+    # After alias expansion, filter to valid remote sources (+ "local" handled by _fetch_one_source)
+    valid_and_local = _VALID_SOURCES | {"local"}
+    unknown = [s for s in sources if s not in valid_and_local]
     if unknown:
-        log_task_update("Research Pipeline", f"Ignoring unknown sources: {', '.join(unknown)}")
-        sources = [s for s in sources if s in _VALID_SOURCES]
+        log_task_update("Research Pipeline", f"Ignoring unrecognized sources after alias expansion: {', '.join(unknown)}")
+        sources = [s for s in sources if s in valid_and_local]
     if not sources:
         sources = list(_DEFAULT_SOURCES)
 
@@ -353,8 +469,30 @@ def research_pipeline_agent(state: dict) -> dict:
         openalex_per_page=openalex_per_page,
     )
 
-    report_md = _build_evidence_report(query, sources, collected)
+    raw_report_md = _build_evidence_report(query, sources, collected)
     source_urls = _extract_source_urls(collected)
+
+    # LLM synthesis pass — produces ranked, deduplicated, cross-source synthesis
+    fetched_sources = list(collected.get("results", {}).keys())
+    skip_synthesis = bool(state.get("pipeline_skip_synthesis", False))
+    synthesis_md = ""
+    if not skip_synthesis and fetched_sources:
+        log_task_update("Research Pipeline", "Running LLM synthesis and reconciliation pass...")
+        synthesis_md = _synthesize_evidence(query, raw_report_md)
+        if synthesis_md:
+            log_task_update("Research Pipeline", "Synthesis complete.")
+
+    # Final report = synthesis (if available) + raw evidence appendix
+    if synthesis_md:
+        report_md = (
+            f"# Research Synthesis: {query}\n\n"
+            f"{synthesis_md}\n\n"
+            f"---\n\n"
+            f"## Appendix: Raw Evidence Collected\n\n"
+            f"{raw_report_md}"
+        )
+    else:
+        report_md = raw_report_md
 
     report_filename = f"research_pipeline_report_{call_number}.md"
     raw_filename = f"research_pipeline_raw_{call_number}.json"
@@ -362,7 +500,9 @@ def research_pipeline_agent(state: dict) -> dict:
     write_text_file(raw_filename, json.dumps(collected, indent=2, ensure_ascii=False, default=str))
 
     state["research_pipeline_report"] = report_md
-    state["research_pipeline_sources_fetched"] = list(collected.get("results", {}).keys())
+    state["research_pipeline_raw_report"] = raw_report_md
+    state["research_pipeline_synthesis"] = synthesis_md
+    state["research_pipeline_sources_fetched"] = fetched_sources
     state["research_pipeline_source_urls"] = source_urls
     state["research_pipeline_errors"] = collected.get("errors", {})
     state["draft_response"] = report_md

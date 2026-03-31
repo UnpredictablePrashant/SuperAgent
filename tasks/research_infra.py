@@ -307,13 +307,29 @@ def arxiv_search(query: str, max_results: int = 10, sort_by: str = "relevance") 
         ]
         published = (entry.findtext("atom:published", "", ns) or "").strip()
         categories = [c.attrib.get("term", "") for c in entry.findall("atom:category", ns)]
+        # Extract year from published date (e.g. "2023-01-15T00:00:00Z" → "2023")
+        year = published[:4] if published and len(published) >= 4 else "Unknown"
+        # Extract PDF link from alternate links in the entry
+        pdf_url = ""
+        for link in entry.findall("atom:link", ns):
+            if link.attrib.get("type") == "application/pdf" or link.attrib.get("title") == "pdf":
+                pdf_url = link.attrib.get("href", "")
+                break
+        if not pdf_url and arxiv_url:
+            # Derive PDF URL from abstract URL: abs/ → pdf/
+            pdf_url = arxiv_url.replace("/abs/", "/pdf/").rstrip("v0123456789") if "/abs/" in arxiv_url else ""
         entries.append(
             {
                 "title": title,
+                # Canonical field names required by downstream consumers
+                "abstract": summary[:800],
+                "year": year,
+                "pdf_url": pdf_url,
+                # Legacy aliases kept for backward compatibility
                 "summary": summary[:800],
+                "published": published,
                 "url": arxiv_url,
                 "authors": [a for a in authors if a][:6],
-                "published": published,
                 "categories": [c for c in categories if c][:5],
                 "source": "arxiv",
             }
@@ -328,7 +344,9 @@ def reddit_search(
     limit: int = 10,
 ) -> list[dict]:
     """Search Reddit posts using the public JSON search API (no authentication required)."""
-    subreddit = str(subreddit or "").strip().lstrip("r/")
+    sub_raw = str(subreddit or "").strip()
+    # Use removeprefix to avoid lstrip's char-set semantics (lstrip("r/") corrupts names like "reactjs")
+    subreddit = sub_raw.removeprefix("r/").removeprefix("/r/").strip()
     base = f"{REDDIT_BASE_URL}/r/{subreddit}" if subreddit else REDDIT_BASE_URL
     params = {
         "q": query,

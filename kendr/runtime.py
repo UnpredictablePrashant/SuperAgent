@@ -1820,6 +1820,44 @@ class AgentRuntime:
             return state
 
         if (
+            bool(state.get("research_pipeline_enabled", False))
+            and not state.get("plan_steps")
+            and state.get("last_agent") != "research_pipeline_agent"
+            and self._is_agent_available(state, "research_pipeline_agent")
+        ):
+            pipeline_query = state.get("current_objective") or state.get("user_query", "")
+            reason = (
+                "research_pipeline_enabled is set. Routing to research_pipeline_agent "
+                "to perform parallel multi-source evidence collection and LLM synthesis."
+            )
+            sources = state.get("research_sources") or ["web"]
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "research_pipeline_agent"
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="research_pipeline_agent",
+                    intent="research-pipeline-dispatch",
+                    content=pipeline_query,
+                    state_updates={
+                        "research_sources": sources,
+                        "research_pipeline_enabled": True,
+                    },
+                ),
+            )
+            record_work_note(
+                state,
+                "orchestrator_agent",
+                "decision",
+                (
+                    f"next_agent=research_pipeline_agent\nreason={reason}\n"
+                    f"state_updates={{'research_sources': {sources!r}, 'research_pipeline_enabled': True}}"
+                ),
+            )
+            return state
+
+        if (
             not state.get("plan_steps")
             and
             state.get("last_agent") != "deep_research_agent"
