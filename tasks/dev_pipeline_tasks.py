@@ -11,17 +11,23 @@ end-to-end project generation flow in a single agent call:
 Activated when state["dev_pipeline_mode"] is True.
 Intended for `kendr run --dev "…"` or `kendr generate "…"`.
 
-Blueprint approval:
-- auto_approve=True → skip gate, continue immediately.
-- auto_approve=False → set pending_user_input_kind="blueprint_approval",
-  set dev_pipeline_status="waiting_for_approval", and return.
-  The next orchestrator turn (after user replies) should set
-  blueprint_status="approved" and re-dispatch dev_pipeline_agent.
+Blueprint approval gate:
+- Calls project_blueprint_agent which sets the "project_blueprint" approval scope
+  (using the same state pattern recognized by the runtime's _apply_pending_user_response).
+- auto_approve=True → project_blueprint_agent auto-approves and continues.
+- auto_approve=False → project_blueprint_agent sets blueprint_waiting_for_approval=True,
+  approval_pending_scope="project_blueprint", dev_pipeline_status="waiting_for_approval",
+  and dev_pipeline_agent returns. The orchestrator sees blueprint_waiting_for_approval and
+  routes to __finish__ to surface the approval prompt to the user. On the next run, the
+  runtime sets blueprint_status="approved" via _apply_pending_user_response and
+  re-dispatches dev_pipeline_agent which resumes past the blueprint stage.
 
 Auto-fix retry loop:
 - Triggers when verifier_status != "pass" OR test_agent_status indicates failure.
-- Builds rich context (verifier report + failed checks + test output) for coding_agent.
-- Re-runs test_agent and project_verifier_agent after each fix attempt.
+- Extracts failing file paths from verifier_issues and verifier_check_results.
+- Calls coding_agent for each file with coding_write_path + coding_context_files set
+  so actual file content is patched (not just text output).
+- Re-runs test_agent and project_verifier_agent after each fix round.
 - On persistent failure: dev_pipeline_status="partial" with diagnostic summary.
 
 Zip export:
@@ -31,11 +37,12 @@ Zip export:
 
 from __future__ import annotations
 
+import re
 import sys
 import time
 import zipfile
 from pathlib import Path
-from typing import Callable
+from typing import Callable, List
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.utils import get_output_dir, log_task_update, write_text_file
@@ -98,7 +105,7 @@ def _run_stage(
     name: str,
     agent_fn: Callable[[dict], dict],
     state: dict,
-    stages_completed: list[str],
+    stages_completed: list,
     *,
     fatal: bool = False,
 ) -> dict:
@@ -128,7 +135,10 @@ def _zip_project(project_root: Path, output_dir: Path) -> str:
     project_name = project_root.name or "project"
     zip_path = output_dir / f"{project_name}.zip"
     output_dir.mkdir(parents=True, exist_ok=True)
-    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", "dist", "build"}
+    skip_dirs = {
+        ".git", "node_modules", "__pycache__", ".venv", "venv",
+        ".mypy_cache", "dist", "build",
+    }
     with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
         for item in sorted(project_root.rglob("*")):
             if item.is_file():
@@ -143,12 +153,8 @@ def _zip_project(project_root: Path, output_dir: Path) -> str:
 
 
 def _verifier_passed(state: dict) -> bool:
-    """
-    Return True when verifier_status indicates success.
-    project_verifier_agent writes state["verifier_status"] = "pass" or "fail".
-    Empty/absent status = no checks ran = treated as pass.
-    """
-    status = str(state.get("verifier_status", "")).strip().lower()
+    """Return True when verifier_status indicates success or no checks ran."""
+    status = str(state.get("verifier_status", "") or "").strip().lower()
     return not status or status in ("pass", "passed", "ok", "success")
 
 
@@ -158,20 +164,77 @@ def _tests_passed(state: dict) -> bool:
     return not status or status in ("pass", "passed", "ok", "success")
 
 
-def _build_fix_context(state: dict, fix_round: int) -> str:
+def _extract_failing_files(state: dict, project_root: str) -> List[str]:
+    """
+    Extract absolute file paths that need fixing from verifier_issues,
+    verifier_check_results, and test_agent_results (list[str]).
+    Returns a deduplicated list of absolute paths that exist on disk.
+    """
+    paths = []
+    root = Path(project_root).resolve() if project_root else None
+
+    def _resolve(p: str) -> str | None:
+        if not p:
+            return None
+        candidate = Path(p)
+        if candidate.is_absolute() and candidate.is_file():
+            return str(candidate)
+        if root:
+            full = root / p
+            if full.is_file():
+                return str(full)
+        return None
+
+    # From structured verifier issues: each issue dict may have "file" key
+    for issue in (state.get("verifier_issues") or []):
+        if isinstance(issue, dict):
+            resolved = _resolve(str(issue.get("file", "") or ""))
+            if resolved:
+                paths.append(resolved)
+
+    # From verifier_check_results: each failed check dict may have "file" key
+    for check in (state.get("verifier_check_results") or []):
+        if isinstance(check, dict) and not check.get("success", True):
+            resolved = _resolve(str(check.get("file", "") or ""))
+            if resolved:
+                paths.append(resolved)
+            stderr = str(check.get("stderr", "") or "")
+            for m in re.finditer(r'(?:^|\s)([\w./\\-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs))\b', stderr):
+                resolved = _resolve(m.group(1).strip())
+                if resolved:
+                    paths.append(resolved)
+
+    # From test_agent_results (list[str]): parse file paths from output lines
+    for line in (state.get("test_agent_results") or []):
+        for m in re.finditer(r'(?:^|\s)([\w./\\-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs))\b', str(line)):
+            resolved = _resolve(m.group(1).strip())
+            if resolved:
+                paths.append(resolved)
+
+    seen = set()
+    result = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            result.append(p)
+    return result
+
+
+def _build_fix_context(state: dict, fix_round: int, target_file: str = "") -> str:
     """
     Build a rich fix-context string for coding_agent.
-    Combines verifier failures AND test_agent failures.
-    Handles test_agent_results as list[str] (as written by test_tasks.py).
+    Combines verifier failures AND test_agent failures (list[str]).
     """
     lines = [
         f"Auto-fix round {fix_round}: Fix failures in the generated project.",
         "",
         f"Project root: {state.get('project_root', '(unknown)')}",
-        "",
     ]
+    if target_file:
+        lines.append(f"Target file to fix: {target_file}")
+    lines.append("")
 
-    # ── Verifier failures ─────────────────────────────────────────────────────
+    # Verifier report
     verifier_summary = str(state.get("verifier_summary", "") or "").strip()
     if verifier_summary:
         lines.append("=== Verifier Report ===")
@@ -186,7 +249,7 @@ def _build_fix_context(state: dict, fix_round: int) -> str:
         lines.append("Failed verification checks:")
         for check in failed_checks[:15]:
             lines.append(f"  [{check.get('label', '?')}]")
-            stderr = str(check.get("stderr", "")).strip()
+            stderr = str(check.get("stderr", "") or "").strip()
             if stderr:
                 for err_line in stderr.splitlines()[:5]:
                     lines.append(f"    {err_line}")
@@ -202,24 +265,91 @@ def _build_fix_context(state: dict, fix_round: int) -> str:
             )
         lines.append("")
 
-    # ── Test agent failures ───────────────────────────────────────────────────
-    # test_agent_results is a list[str] (each entry is a result line/message)
+    # Test failures — test_agent_results is list[str]
     if not _tests_passed(state):
         lines.append("=== Test Failures ===")
         test_summary = str(state.get("test_agent_summary", "") or "").strip()
         if test_summary:
             lines.append(test_summary[:1000])
             lines.append("")
-
         test_results = state.get("test_agent_results") or []
         if test_results:
             lines.append("Test output:")
-            for line in test_results[:30]:
-                lines.append(f"  {str(line)[:300]}")
+            for result_line in test_results[:30]:
+                lines.append(f"  {str(result_line)[:300]}")
             lines.append("")
 
     lines.append("Fix all failures listed above and ensure all checks pass.")
     return "\n".join(lines)
+
+
+def _run_fix_round(
+    state: dict,
+    fix_round: int,
+    max_fix_rounds: int,
+    skip_tests: bool,
+    stages_completed: list,
+    coding_agent: Callable[[dict], dict],
+    test_agent: Callable[[dict], dict],
+    project_verifier_agent: Callable[[dict], dict],
+) -> dict:
+    """
+    Perform one auto-fix round: fix each failing file, then retest + re-verify.
+    coding_agent is called per target file with coding_write_path set.
+    Falls back to a single context-only fix call when no file paths can be extracted.
+    """
+    project_root = str(state.get("project_root", "") or "").strip()
+    failing_files = _extract_failing_files(state, project_root)
+
+    log_task_update(
+        "DevPipeline",
+        f"Auto-fix round {fix_round}/{max_fix_rounds} — "
+        f"verifier={'pass' if _verifier_passed(state) else 'fail'}, "
+        f"tests={'pass' if _tests_passed(state) else 'fail'}, "
+        f"failing files: {len(failing_files)}.",
+    )
+
+    if failing_files:
+        for file_path in failing_files:
+            fix_task = _build_fix_context(state, fix_round, target_file=file_path)
+            # Read current file content as context
+            context_files = [file_path]
+            # Add related files from the same directory if small enough
+            try:
+                parent = Path(file_path).parent
+                for sibling in sorted(parent.iterdir()):
+                    if (
+                        sibling.is_file()
+                        and sibling.suffix in {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java"}
+                        and str(sibling) != file_path
+                        and len(context_files) < 5
+                    ):
+                        context_files.append(str(sibling))
+            except Exception:
+                pass
+
+            state["coding_task"] = fix_task
+            state["current_objective"] = fix_task
+            state["coding_write_path"] = file_path
+            state["coding_context_files"] = context_files
+            state["coding_working_directory"] = project_root or "."
+            stage_name = f"auto_fix_{fix_round}_{Path(file_path).name}"
+            state = _run_stage(stage_name, coding_agent, state, stages_completed)
+    else:
+        # No specific file paths found — send a broad fix call without write path
+        fix_task = _build_fix_context(state, fix_round)
+        state["coding_task"] = fix_task
+        state["current_objective"] = fix_task
+        state["coding_write_path"] = ""
+        state["coding_context_files"] = []
+        state["coding_working_directory"] = project_root or "."
+        state = _run_stage(f"auto_fix_{fix_round}", coding_agent, state, stages_completed)
+
+    # Re-run tests then re-verify after this round's fixes
+    if not skip_tests:
+        state = _run_stage(f"retest_{fix_round}", test_agent, state, stages_completed)
+    state = _run_stage(f"verify_{fix_round}", project_verifier_agent, state, stages_completed)
+    return state
 
 
 def dev_pipeline_agent(state: dict) -> dict:
@@ -227,18 +357,21 @@ def dev_pipeline_agent(state: dict) -> dict:
     End-to-end project generation pipeline agent.
 
     Blueprint approval gate:
-    - If auto_approve=True: blueprint auto-approved, pipeline continues immediately.
-    - If auto_approve=False: sets pending_user_input_kind="blueprint_approval",
-      pending_user_question=(blueprint summary + approval prompt),
-      dev_pipeline_status="waiting_for_approval", and returns. The orchestrator
-      exposes this to the user; the next run should have blueprint_status="approved".
+    - Delegates to project_blueprint_agent which uses the "project_blueprint" scope
+      (recognized by runtime._apply_pending_user_response).
+    - auto_approve=True → blueprint auto-approved, pipeline continues.
+    - auto_approve=False → blueprint_waiting_for_approval=True is set;
+      dev_pipeline_status="waiting_for_approval" and returns; the orchestrator
+      routes to __finish__ to surface the prompt. On the next run with
+      blueprint_status="approved", the pipeline resumes past the blueprint stage.
 
     Auto-fix retry loop (max_fix_rounds, default 3):
     - Triggers when verifier_status != pass OR test failures detected.
-    - coding_agent receives full failure context (verifier + test output).
-    - test_agent and project_verifier_agent are re-run after each fix.
-    - test_agent_results handled as list[str] (test_tasks.py format).
-    - On persistent failure: dev_pipeline_status="partial" with diagnostics.
+    - Extracts failing file paths from verifier/test output.
+    - coding_agent called per failing file with coding_write_path set (real patch).
+    - Falls back to context-only call when no file paths found.
+    - Re-runs test_agent and project_verifier_agent after each round.
+    - dev_pipeline_status="partial" with diagnostics on persistent failure.
 
     Zip export (run output directory):
     - Archive written to state["run_output_dir"] (falls back to get_output_dir()).
@@ -252,19 +385,16 @@ def dev_pipeline_agent(state: dict) -> dict:
     active_task, task_content, _ = begin_agent_session(state, _AGENT_NAME)
     state["dev_pipeline_agent_calls"] = state.get("dev_pipeline_agent_calls", 0) + 1
 
-    auto_approve: bool = bool(state.get("auto_approve") or state.get("auto_approve_blueprint"))
     skip_tests: bool = bool(state.get("skip_test_agent", False))
     skip_devops: bool = bool(state.get("skip_devops_agent", False))
     max_fix_rounds: int = max(0, int(state.get("dev_pipeline_max_fix_rounds", 3) or 3))
 
-    stages_completed: list[str] = list(state.get("dev_pipeline_stages_completed") or [])
+    stages_completed = list(state.get("dev_pipeline_stages_completed") or [])
     state["dev_pipeline_stages_completed"] = stages_completed
     state["dev_pipeline_error"] = ""
 
-    # ── Handle resume after blueprint approval ─────────────────────────────────
-    # If we're re-entering after the user approved the blueprint interactively,
-    # blueprint_status should already be "approved" so we skip the gate below.
-    already_approved = str(state.get("blueprint_status", "")).strip() == "approved"
+    # ── Determine if we are resuming after blueprint approval ──────────────────
+    already_approved = str(state.get("blueprint_status", "") or "").strip() == "approved"
 
     _print_banner("Kendr Dev Pipeline — starting full project generation")
 
@@ -291,7 +421,9 @@ def dev_pipeline_agent(state: dict) -> dict:
 
     state["dev_pipeline_status"] = "running"
 
-    # ── Stage 1: Blueprint (only if not already done) ─────────────────────────
+    # ── Stage 1: Blueprint ─────────────────────────────────────────────────────
+    # project_blueprint_agent handles both auto-approve and the approval gate
+    # using the "project_blueprint" scope (recognized by runtime handling).
     if not already_approved:
         try:
             state = _run_stage("blueprint", project_blueprint_agent, state, stages_completed, fatal=True)
@@ -300,27 +432,9 @@ def dev_pipeline_agent(state: dict) -> dict:
             state["dev_pipeline_error"] = f"Blueprint stage failed: {exc}"
             return state
 
-        # ── Blueprint approval gate ────────────────────────────────────────────
-        blueprint_md = str(state.get("draft_response", "")).strip()
-        project_root_display = str(state.get("project_root", "(working directory)"))
-
-        if auto_approve:
-            state["blueprint_status"] = "approved"
-            state["blueprint_waiting_for_approval"] = False
-            log_task_update("DevPipeline", "Blueprint auto-approved.")
-        else:
-            approval_prompt = (
-                f"Blueprint ready for review:\n\n"
-                f"{blueprint_md[:4000]}\n\n"
-                f"Project will be generated at: {project_root_display}\n\n"
-                "Reply **approve** (or yes/y) to proceed, or describe changes to regenerate."
-            )
-            state["pending_user_question"] = approval_prompt
-            state["pending_user_input_kind"] = "blueprint_approval"
-            state["approval_pending_scope"] = "dev_pipeline_blueprint"
-            state["blueprint_waiting_for_approval"] = True
+        # If blueprint agent set the approval gate, surface it and stop
+        if bool(state.get("blueprint_waiting_for_approval", False)):
             state["dev_pipeline_status"] = "waiting_for_approval"
-            state["draft_response"] = approval_prompt
             log_task_update("DevPipeline", "Blueprint awaiting user approval.")
             _print_banner("Blueprint generated — awaiting approval.")
             return state
@@ -338,7 +452,7 @@ def dev_pipeline_agent(state: dict) -> dict:
 
     # ── Stage 4: Auth & security helpers ──────────────────────────────────────
     blueprint = state.get("blueprint_json") or {}
-    auth_type = str(((blueprint.get("tech_stack") or {}).get("auth", "")) or "").lower()
+    auth_type = str(((blueprint.get("tech_stack") or {}).get("auth", "") or "")).lower()
     if auth_type and auth_type not in ("none", "no"):
         state = _run_stage("auth", auth_security_agent, state, stages_completed)
 
@@ -368,28 +482,20 @@ def dev_pipeline_agent(state: dict) -> dict:
     state = _run_stage("verify_0", project_verifier_agent, state, stages_completed)
 
     # ── Auto-fix + retest loop ────────────────────────────────────────────────
-    # Triggers on verifier_status=fail OR test_agent_status indicating failure.
     all_passing = _verifier_passed(state) and (skip_tests or _tests_passed(state))
 
     if not all_passing:
         for fix_round in range(1, max_fix_rounds + 1):
-            fix_context = _build_fix_context(state, fix_round)
-            log_task_update(
-                "DevPipeline",
-                f"Auto-fix round {fix_round}/{max_fix_rounds} — "
-                f"verifier={'pass' if _verifier_passed(state) else 'fail'}, "
-                f"tests={'pass' if _tests_passed(state) else 'fail'}.",
+            state = _run_fix_round(
+                state,
+                fix_round=fix_round,
+                max_fix_rounds=max_fix_rounds,
+                skip_tests=skip_tests,
+                stages_completed=stages_completed,
+                coding_agent=coding_agent,
+                test_agent=test_agent,
+                project_verifier_agent=project_verifier_agent,
             )
-            state["current_objective"] = fix_context
-            state["task"] = fix_context
-
-            state = _run_stage(f"auto_fix_{fix_round}", coding_agent, state, stages_completed)
-
-            if not skip_tests:
-                state = _run_stage(f"retest_{fix_round}", test_agent, state, stages_completed)
-
-            state = _run_stage(f"verify_{fix_round}", project_verifier_agent, state, stages_completed)
-
             all_passing = _verifier_passed(state) and (skip_tests or _tests_passed(state))
             if all_passing:
                 log_task_update("DevPipeline", f"All checks passed after fix round {fix_round}.")
@@ -402,19 +508,20 @@ def dev_pipeline_agent(state: dict) -> dict:
     state = _run_stage("post_setup", post_setup_agent, state, stages_completed)
 
     # ── Zip export (into run output directory) ────────────────────────────────
-    project_root_str = str(state.get("project_root", "")).strip()
-    project_name = str(state.get("project_name", "")).strip()
+    project_root_str = str(state.get("project_root", "") or "").strip()
+    project_name = str(state.get("project_name", "") or "").strip()
     zip_path_result = ""
     if project_root_str:
         project_root_path = Path(project_root_str).resolve()
         if not project_name:
             project_name = project_root_path.name or "project"
         if project_root_path.exists():
-            run_output_dir_str = str(state.get("run_output_dir", "")).strip()
-            if run_output_dir_str:
-                zip_output_dir = Path(run_output_dir_str).resolve()
-            else:
-                zip_output_dir = Path(get_output_dir()).resolve()
+            run_output_dir_str = str(state.get("run_output_dir", "") or "").strip()
+            zip_output_dir = (
+                Path(run_output_dir_str).resolve()
+                if run_output_dir_str
+                else Path(get_output_dir()).resolve()
+            )
             try:
                 zip_path_result = _zip_project(project_root_path, zip_output_dir)
                 state["dev_pipeline_zip_path"] = zip_path_result

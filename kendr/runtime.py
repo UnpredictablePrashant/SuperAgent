@@ -1266,29 +1266,42 @@ class AgentRuntime:
 
         # --- Dev pipeline: finalization — terminate when pipeline is done ---
         dev_pipeline_status = str(state.get("dev_pipeline_status", "")).strip().lower()
+        blueprint_just_approved = (
+            str(state.get("blueprint_status", "")).strip() == "approved"
+            and not bool(state.get("blueprint_waiting_for_approval", False))
+        )
         if (
             bool(state.get("dev_pipeline_mode", False))
             and dev_pipeline_status in ("complete", "partial", "error", "cancelled", "waiting_for_approval")
         ):
-            final_output = (
-                state.get("draft_response")
-                or state.get("final_output")
-                or state.get("dev_pipeline_error")
-                or f"Dev pipeline finished with status: {dev_pipeline_status}."
-            )
-            state["next_agent"] = "__finish__"
-            state["final_output"] = final_output
-            log_task_update(
-                "Orchestrator",
-                f"Dev pipeline completed with status={dev_pipeline_status}; routing to __finish__.",
-            )
-            return state
+            # Resume: blueprint was just approved externally; clear the waiting status
+            # and fall through to re-dispatch dev_pipeline_agent.
+            if dev_pipeline_status == "waiting_for_approval" and blueprint_just_approved:
+                state["dev_pipeline_status"] = ""
+                dev_pipeline_status = ""
+                log_task_update(
+                    "Orchestrator",
+                    "Blueprint approved; resuming dev pipeline — re-dispatching dev_pipeline_agent.",
+                )
+            else:
+                final_output = (
+                    state.get("draft_response")
+                    or state.get("final_output")
+                    or state.get("dev_pipeline_error")
+                    or f"Dev pipeline finished with status: {dev_pipeline_status}."
+                )
+                state["next_agent"] = "__finish__"
+                state["final_output"] = final_output
+                log_task_update(
+                    "Orchestrator",
+                    f"Dev pipeline completed with status={dev_pipeline_status}; routing to __finish__.",
+                )
+                return state
 
         # --- Dev pipeline: full end-to-end orchestration (blueprint → build → verify → zip) ---
         if (
             bool(state.get("dev_pipeline_mode", False))
             and not dev_pipeline_status
-            and state.get("last_agent") != "dev_pipeline_agent"
             and self._is_agent_available(state, "dev_pipeline_agent")
         ):
             state["project_build_mode"] = True

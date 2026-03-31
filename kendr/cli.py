@@ -1712,6 +1712,17 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
         ),
     )
     run_parser.add_argument(
+        "--dev-stack",
+        default="",
+        help=(
+            "Optional tech stack template for dev pipeline mode (--dev). "
+            "Available: fastapi_postgres, fastapi_react_postgres, nextjs_prisma_postgres, "
+            "express_prisma_postgres, mern_microservices_mongodb, pern_postgres, nextjs_static_site, "
+            "django_react_postgres, custom_freeform. "
+            "Leave blank for LLM-driven stack selection."
+        ),
+    )
+    run_parser.add_argument(
         "--dev-skip-tests",
         action="store_true",
         help="Skip test generation/execution in dev pipeline mode (--dev).",
@@ -2635,6 +2646,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         base_ingest_payload["dev_pipeline_mode"] = True
         base_ingest_payload["project_build_mode"] = True
         base_ingest_payload["project_root"] = resolved_working_dir
+        dev_stack = str(getattr(args, "dev_stack", "") or "").strip()
+        if dev_stack:
+            base_ingest_payload["project_stack"] = dev_stack
         if bool(getattr(args, "dev_skip_tests", False)):
             base_ingest_payload["skip_test_agent"] = True
         if bool(getattr(args, "dev_skip_devops", False)):
