@@ -18,7 +18,7 @@ This guide gets you from a fresh checkout to a successful first run in under 5 m
 Clone the repo and install:
 
 ```bash
-git clone https://github.com/your-org/kendr.git
+git clone https://github.com/kendr-ai/kendr.git
 cd kendr
 pip install -e .
 ```

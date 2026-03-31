@@ -36,7 +36,7 @@ Everything is CLI-based. There is no web dashboard.
 **1. Install:**
 
 ```bash
-git clone https://github.com/your-org/kendr.git
+git clone https://github.com/kendr-ai/kendr.git
 cd kendr
 pip install -e .
 ```

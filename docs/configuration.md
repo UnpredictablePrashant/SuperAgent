@@ -29,7 +29,7 @@ Kendr requires OpenAI for orchestration, reasoning, embeddings, OCR, and deep re
 | `OPENAI_MODEL_GENERAL` | no | `gpt-4o-mini` | Model for planning, orchestration, research, and general agents. | `gpt-4o` |
 | `OPENAI_MODEL_CODING` | no | `gpt-4o-mini` | Model used by coding-focused agents. | `gpt-4o` |
 | `OPENAI_MODEL` | no | `gpt-4o-mini` | Backward-compatible fallback general model. Used when `OPENAI_MODEL_GENERAL` is not set. | `gpt-4o-mini` |
-| `OPENAI_CODEX_MODEL` | no | _(falls back to `OPENAI_MODEL_CODING`)_ | Legacy backward-compatible fallback for coding-model selection. Checked after `OPENAI_MODEL_CODING`. Still active in coding agent paths. | `gpt-4o` |
+| `OPENAI_CODEX_MODEL` | no | _(falls back to `OPENAI_MODEL_CODING`)_ | Legacy backward-compatible fallback for coding-model selection. Checked after `OPENAI_MODEL_CODING` in the internal model resolution chain. Not recommended for new configurations — use `OPENAI_MODEL_CODING` instead. | `gpt-4o` |
 | `OPENAI_VISION_MODEL` | no | `gpt-4o-mini` | Model used by image analysis and OCR workflows. | `gpt-4o` |
 | `OPENAI_EMBEDDING_MODEL` | no | `text-embedding-3-small` | Model used for text embeddings and vector indexing. | `text-embedding-3-large` |
 
