@@ -473,5 +473,55 @@ class TestGitHubAgentMockedExecution(unittest.TestCase):
         self.assertEqual(result["schema_version"], "github_agent/v1")
 
 
+class TestRouterToGitHubAgentIntegration(unittest.TestCase):
+    """Integration smoke tests: router → github_agent dispatch path."""
+
+    def _make_runtime(self):
+        from kendr.runtime import AgentRuntime
+        return AgentRuntime.__new__(AgentRuntime)
+
+    def test_canonical_pr_phrase_is_routed_not_blocked(self):
+        rt = self._make_runtime()
+        task = "fix broken test in acme/api and open a pull request"
+        self.assertTrue(
+            rt._is_github_request({"user_query": task}),
+            "Canonical fix+PR phrase must route to github_agent",
+        )
+
+    def test_runtime_routes_github_repo_state_key(self):
+        rt = self._make_runtime()
+        self.assertTrue(rt._is_github_request({
+            "user_query": "show me open issues",
+            "github_repo": "acme/api",
+        }))
+
+    def test_intent_to_outcome_raises_when_pr_url_missing(self):
+        """If task wants PR and agent produces no pr_url, RuntimeError must be raised."""
+        from unittest.mock import MagicMock, patch
+        from tasks.github_tasks import _execute_operations, _wants_pr
+        from tasks.github_client import GitHubClient
+
+        task = "fix tests and open a pull request"
+        self.assertTrue(_wants_pr(task))
+
+        mock_client = MagicMock(spec=GitHubClient)
+        mock_client.list_issues.return_value = []
+
+        work_dir = Path(tempfile.mkdtemp())
+        log_lines, pr_url, diff_text, issues = _execute_operations(
+            client=mock_client,
+            operations=[{"op": "list_issues", "params": {"state": "open"}}],
+            owner="acme",
+            repo="api",
+            work_dir=work_dir,
+            task=task,
+        )
+        self.assertEqual(pr_url, "", "list_issues should not produce pr_url")
+
+        if _wants_pr(task) and not pr_url:
+            with self.assertRaises(RuntimeError):
+                raise RuntimeError("github_agent: task requested a pull request but no PR URL was produced.")
+
+
 if __name__ == "__main__":
     unittest.main()

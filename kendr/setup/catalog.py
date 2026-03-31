@@ -364,11 +364,6 @@ INTEGRATION_DEFINITIONS: tuple[IntegrationDefinition, ...] = (
                 secret=True,
                 required=True,
             ),
-            _field(
-                "GITHUB_API_URL",
-                "API Base URL",
-                "Override for GitHub Enterprise Server (defaults to https://api.github.com).",
-            ),
         ),
         env_all=("GITHUB_TOKEN",),
         health_description="GitHub token available for repository and issue management.",

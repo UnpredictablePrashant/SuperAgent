@@ -515,15 +515,12 @@ def github_agent(state):
     )
 
     if _wants_pr(task) and not pr_url:
-        planned_has_pr = any(
-            str(entry.get("op", "")) == "create_pr" for entry in operations
+        raise RuntimeError(
+            "github_agent: task requested a pull request but no PR URL was produced. "
+            "Check operation log for failures (e.g. 'no commits ahead of base', auth errors, "
+            "target file not determinable, or network issues). "
+            "Operations attempted: " + "; ".join(log_lines[:10])
         )
-        if planned_has_pr:
-            raise RuntimeError(
-                "github_agent: task requested a pull request but no PR URL was produced. "
-                "Check operation log for failures (e.g. 'no commits ahead of base', auth errors, "
-                "or network issues). Operations attempted: " + "; ".join(log_lines[:10])
-            )
 
     ops_log = "\n".join(log_lines)
     issues_text = json.dumps(issues, indent=2, ensure_ascii=False) if issues else ""
