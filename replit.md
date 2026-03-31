@@ -4,21 +4,29 @@ A plugin-driven multi-agent runtime and orchestration system built on LangGraph/
 
 ## Architecture
 
-- **`kendr/`** — Core package: runtime, registry, discovery, CLI, gateway server, setup UI
+- **`kendr/`** — Core package: runtime, registry, discovery, CLI, gateway server, UI server, setup UI
 - **`tasks/`** — Built-in task agent modules (research, coding, security, file ops, etc.)
 - **`mcp_servers/`** — MCP server implementations (research, vector, security)
 - **`app.py`** — Entry point: builds registry and workflow
-- **`setup_ui.py`** — Starts the web-based Setup Console
-- **`gateway_server.py`** — Starts the HTTP gateway/dashboard server
+- **`kendr/ui_server.py`** — NEW: Kendr Web Chat & Config UI on port 2151 (`kendr ui`)
+- **`kendr/setup_ui.py`** — OAuth/Setup Console on port 8787 (`kendr setup ui`)
+- **`kendr/gateway_server.py`** — HTTP gateway/ingest server on port 8000 (`kendr gateway start`)
 
 ## Running on Replit
 
-The main workflow runs the **Kendr Setup Console** (web UI) on port 5000.
+The main workflow runs the **Kendr Web Chat & Config UI** on port 2151.
 
 **Workflow command:**
 ```
-SETUP_UI_HOST=0.0.0.0 SETUP_UI_PORT=5000 python3 setup_ui.py
+KENDR_UI_HOST=0.0.0.0 KENDR_UI_PORT=2151 python3 -m kendr.cli ui
 ```
+
+### Port Overview
+| Port | Service | Command |
+|---|---|---|
+| `2151` | Kendr Web Chat + Config UI | `kendr ui` |
+| `8000` | Gateway (agent ingest) | `kendr gateway start` |
+| `8787` | Setup/OAuth Console | `kendr setup ui` |
 
 ## Key Environment Variables
 
@@ -27,10 +35,13 @@ Set via Replit secrets/env vars (see `.env.example` for the full list):
 | Variable | Purpose |
 |---|---|
 | `OPENAI_API_KEY` | Required for agent LLM calls |
-| `SETUP_UI_HOST` | Bind host for Setup UI (set to `0.0.0.0`) |
-| `SETUP_UI_PORT` | Port for Setup UI (set to `5000`) |
-| `GATEWAY_HOST` | Bind host for Gateway server (set to `0.0.0.0`) |
-| `GATEWAY_PORT` | Port for Gateway server (set to `8000`) |
+| `KENDR_UI_HOST` | Bind host for Chat+Config UI (default: 0.0.0.0) |
+| `KENDR_UI_PORT` | Port for Chat+Config UI (default: 2151) |
+| `SETUP_UI_HOST` | Bind host for OAuth Setup UI (default: 127.0.0.1) |
+| `SETUP_UI_PORT` | Port for OAuth Setup UI (default: 8787) |
+| `GATEWAY_HOST` | Bind host for Gateway server (default: 0.0.0.0) |
+| `GATEWAY_PORT` | Port for Gateway server (default: 8000) |
+| `KENDR_WORKING_DIR` | Default output/workspace directory |
 
 ## Python 3.10 Compatibility Fixes
 

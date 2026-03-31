@@ -1922,6 +1922,10 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
     gateway_parser.add_argument("--json", action="store_true", help="Emit machine-readable status output.")
     subparsers.add_parser("web", help="Alias for gateway server.")
     subparsers.add_parser("setup-ui", help="Run the OAuth/setup UI.")
+    ui_parser = subparsers.add_parser("ui", help="Launch the Kendr Web Chat & Config UI on port 2151.")
+    command_parsers["ui"] = ui_parser
+    ui_parser.add_argument("--port", type=int, default=0, help="Override port (default: KENDR_UI_PORT or 2151).")
+    ui_parser.add_argument("--host", default="", help="Override bind host (default: KENDR_UI_HOST or 0.0.0.0).")
     status_parser = subparsers.add_parser("status", help="Show runtime status snapshot.")
     command_parsers["status"] = status_parser
     status_parser.add_argument("--json", action="store_true", help="Emit status as JSON.")
@@ -3834,6 +3838,19 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     raise SystemExit(f"Unknown gateway action: {action}")
 
 
+def _cmd_ui(args: argparse.Namespace) -> int:
+    port_override = int(getattr(args, "port", 0) or 0)
+    host_override = str(getattr(args, "host", "") or "").strip()
+    if port_override:
+        os.environ["KENDR_UI_PORT"] = str(port_override)
+    if host_override:
+        os.environ["KENDR_UI_HOST"] = host_override
+    from .ui_server import main as ui_main
+
+    ui_main()
+    return 0
+
+
 def _cmd_hello(args: argparse.Namespace) -> int:
     style = _style_from_args(args)
     version = _cli_version()
@@ -4550,6 +4567,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_setup(args)
     if args.command == "workdir":
         return _cmd_workdir(args)
+    if args.command == "ui":
+        return _cmd_ui(args)
     raise SystemExit(f"Unknown command: {args.command}")
 
 

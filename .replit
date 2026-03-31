@@ -50,13 +50,13 @@ args = "Start application"
 name = "Start application"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "SETUP_UI_HOST=0.0.0.0 SETUP_UI_PORT=5000 python3 setup_ui.py"
-waitForPort = 5000
-
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "KENDR_UI_HOST=0.0.0.0 KENDR_UI_PORT=5000 python3 -m kendr.cli ui"
+waitForPort = 5000
 
 [[ports]]
 localPort = 5000
