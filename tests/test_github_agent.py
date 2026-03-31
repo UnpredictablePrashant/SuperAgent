@@ -409,7 +409,28 @@ class TestGitHubAgentMockedExecution(unittest.TestCase):
         self.assertIn("push", names)
         self.assertIn("create_pr", names)
         write_op = next(o for o in ops if o["op"] == "write_file")
-        self.assertEqual(write_op["params"]["file_path"], "src/utils.py")
+        self.assertEqual(write_op["params"]["path"], "src/utils.py",
+            "write_file params must use key 'path' to match _execute_operations contract")
+
+    def test_canonical_pr_plan_write_file_key_matches_executor_contract(self):
+        """Regression: _canonical_pr_plan 'path' key must match _execute_operations read key.
+
+        _execute_operations reads params['path'] for write_file; using params['file_path']
+        would silently skip the write and cause 'no commits ahead of base' on create_pr.
+        """
+        from unittest.mock import MagicMock, patch
+        from tasks.github_tasks import _canonical_pr_plan, _execute_operations
+        from tasks.github_client import GitHubClient
+
+        with patch("tasks.github_tasks._resolve_target_file", return_value="tests/test_foo.py"):
+            ops = _canonical_pr_plan("fix the test and open a pr", "acme", "api")
+
+        write_ops = [o for o in ops if o["op"] == "write_file"]
+        self.assertEqual(len(write_ops), 1)
+        self.assertIn("path", write_ops[0]["params"],
+            "'path' key must be present in write_file params for _execute_operations")
+        self.assertNotIn("file_path", write_ops[0]["params"],
+            "'file_path' key must NOT be used — _execute_operations reads params['path']")
 
     def test_canonical_pr_plan_returns_empty_when_file_not_resolved(self):
         from unittest.mock import patch

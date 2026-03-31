@@ -146,7 +146,7 @@ def _canonical_pr_plan(task: str, owner: str, repo: str) -> list[dict]:
     return [
         {"op": "clone_repo", "params": {}},
         {"op": "create_branch", "params": {"branch": branch}},
-        {"op": "write_file", "params": {"file_path": target_file}},
+        {"op": "write_file", "params": {"path": target_file}},
         {"op": "commit", "params": {"message": f"kendr: {task[:72]}"}},
         {"op": "push", "params": {}},
         {"op": "create_pr", "params": {"title": f"kendr: {task[:60]}", "head": branch, "base": "main"}},
