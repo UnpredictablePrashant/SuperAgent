@@ -1949,6 +1949,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if parsed_sources:
             base_ingest_payload["research_sources"] = parsed_sources
             base_ingest_payload["research_pipeline_enabled"] = True
+            # Reset completed flag so the pipeline runs fresh for each new CLI invocation
+            base_ingest_payload["research_pipeline_completed"] = False
     if int(args.long_document_sections or 0) > 0:
         base_ingest_payload["long_document_sections"] = int(args.long_document_sections)
     if int(args.long_document_section_pages or 0) > 0:
