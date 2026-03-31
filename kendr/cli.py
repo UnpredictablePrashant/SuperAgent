@@ -734,16 +734,24 @@ def _pid_is_gateway_owned(pid: int) -> bool:
             return False
     except Exception:
         return False
-    try:
-        cmdline_path = f"/proc/{pid}/cmdline"
-        if os.path.exists(cmdline_path):
+    cmdline_path = f"/proc/{pid}/cmdline"
+    if os.path.exists(cmdline_path):
+        try:
             with open(cmdline_path, "rb") as f:
                 cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="replace")
             gateway_keywords = ("kendr", "gateway", "serve", "uvicorn", "setup_ui")
             return any(kw in cmdline for kw in gateway_keywords)
-        return True
+        except Exception:
+            return False
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        cmdline_list = proc.cmdline()
+        cmdline = " ".join(cmdline_list)
+        gateway_keywords = ("kendr", "gateway", "serve", "uvicorn", "setup_ui")
+        return any(kw in cmdline for kw in gateway_keywords)
     except Exception:
-        return True
+        return False
 
 
 def _wait_for_listener_shutdown(port: int, timeout_seconds: float = 5.0) -> bool:
@@ -876,7 +884,10 @@ def _terminate_gateway_on_port() -> int:
     pids = _listener_pids_for_port(port)
     if not pids:
         return 0
-    for pid in pids:
+    owned = [p for p in pids if _pid_is_gateway_owned(p)]
+    if not owned:
+        return 0
+    for pid in owned:
         try:
             if os.name == "nt":
                 subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, check=False)
@@ -884,7 +895,7 @@ def _terminate_gateway_on_port() -> int:
                 os.kill(pid, 15)
         except Exception:
             continue
-    return len(pids)
+    return len(owned)
 
 
 def _resolve_working_dir(path_value: str) -> str:
