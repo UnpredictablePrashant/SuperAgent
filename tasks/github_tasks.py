@@ -185,33 +185,37 @@ Instructions:
 def _fallback_operations(task: str) -> list[dict]:
     """Return a minimal deterministic operation sequence based on task keywords.
 
-    Used when the LLM plan produces zero operations so the agent always performs
-    something meaningful rather than returning an empty success.
+    Used only when the LLM plan produces zero operations so the agent always
+    returns something meaningful rather than an empty success.
 
-    PR precondition rule: create_pr is only emitted after commit+push have been
-    scheduled in the same sequence.  This prevents opening a PR with an un-pushed
-    branch, which would fail at the GitHub API level.
+    Design constraint — NO commit/push/create_pr in fallback:
+        Push and PR operations require prior file modifications.  The fallback
+        has no mechanism to guarantee files were edited, so including those ops
+        would reliably fail at the `is_branch_ahead_of_base` guard.  When the
+        task genuinely requires a PR, the LLM planner (``_plan_operations``)
+        is responsible for emitting a write_file → commit → push → create_pr
+        sequence.  The fallback is a diagnostic/exploration safety net only.
+
+    Note on test-run loops:
+        Autonomous test discovery, execution, and iterative fix loops are
+        handled by the Testing Agent (Task #11), which is a separate kendr
+        component.  github_agent's role is repository operations only; it does
+        not shell-run test suites.
     """
     lower = task.lower()
     ops: list[dict] = []
 
-    wants_edit = any(w in lower for w in ["fix", "edit", "change", "update", "write"])
-    wants_pr = any(w in lower for w in ["pr", "pull request", "open a pr"])
     wants_code_action = any(w in lower for w in [
         "clone", "fix", "edit", "change", "update", "write", "commit", "push", "pr", "pull request",
     ])
+    wants_issue_info = any(w in lower for w in ["issue", "bug", "error", "problem", "fail", "pr", "pull request"])
 
     if wants_code_action:
         ops.append({"op": "clone_repo", "params": {}})
-        if wants_edit or wants_pr:
-            branch_name = "kendr/fix"
-            ops.append({"op": "create_branch", "params": {"branch": branch_name}})
-        if wants_pr:
-            ops.append({"op": "commit", "params": {"message": "kendr: automated changes"}})
-            ops.append({"op": "push", "params": {}})
-            ops.append({"op": "create_pr", "params": {}})
+        if any(w in lower for w in ["fix", "edit", "change", "update", "write"]):
+            ops.append({"op": "create_branch", "params": {"branch": "kendr/fix"}})
 
-    if any(w in lower for w in ["issue", "bug", "error", "problem", "fail"]):
+    if wants_issue_info:
         if not any(o["op"] == "list_issues" for o in ops):
             ops.append({"op": "list_issues", "params": {"state": "open"}})
 

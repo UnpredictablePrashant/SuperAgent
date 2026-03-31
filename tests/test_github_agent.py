@@ -227,29 +227,33 @@ class TestPathTraversalProtection(unittest.TestCase):
 
 
 class TestFallbackOperations(unittest.TestCase):
-    """Tests for _fallback_operations() deterministic sequence invariants."""
+    """Tests for _fallback_operations() deterministic sequence invariants.
 
-    def test_pr_task_includes_expected_ops(self):
+    Fallback design constraint: commit/push/create_pr are intentionally absent.
+    These ops require prior file modifications; the fallback cannot guarantee
+    any files were edited, so including them would reliably fail the
+    is_branch_ahead_of_base() guard.  Commit/push/PR are LLM-planner
+    responsibility only (via _plan_operations).
+    """
+
+    def test_fix_pr_task_clones_and_branches_but_no_commit_or_pr(self):
         from tasks.github_tasks import _fallback_operations
         ops = _fallback_operations("fix the broken test and open a pull request")
         names = [o["op"] for o in ops]
         self.assertIn("clone_repo", names)
         self.assertIn("create_branch", names)
-        self.assertIn("commit", names)
-        self.assertIn("push", names)
-        self.assertIn("create_pr", names)
+        self.assertNotIn("commit", names,
+            "Fallback must not emit commit — no file changes are guaranteed")
+        self.assertNotIn("push", names,
+            "Fallback must not emit push — no committed changes are guaranteed")
+        self.assertNotIn("create_pr", names,
+            "Fallback must not emit create_pr — would fail is_branch_ahead_of_base guard")
 
-    def test_pr_task_ops_in_correct_order(self):
+    def test_pr_task_clone_before_branch(self):
         from tasks.github_tasks import _fallback_operations
         ops = _fallback_operations("fix the broken test and open a pull request")
         names = [o["op"] for o in ops]
-        clone_i = names.index("clone_repo")
-        commit_i = names.index("commit")
-        push_i = names.index("push")
-        pr_i = names.index("create_pr")
-        self.assertLess(clone_i, commit_i)
-        self.assertLess(commit_i, push_i)
-        self.assertLess(push_i, pr_i)
+        self.assertLess(names.index("clone_repo"), names.index("create_branch"))
 
     def test_issue_task_lists_issues(self):
         from tasks.github_tasks import _fallback_operations
@@ -384,15 +388,15 @@ class TestGitHubAgentMockedExecution(unittest.TestCase):
 
         self.assertTrue(any("skipped" in line for line in log_lines))
 
-    def test_fallback_plan_validates_pr_sequence_ordering(self):
+    def test_fallback_plan_conservative_no_pr_or_push(self):
         from tasks.github_tasks import _fallback_operations
         ops = _fallback_operations("fix broken test and open a pull request")
         names = [o["op"] for o in ops]
         self.assertIn("clone_repo", names)
-        pr_idx = names.index("create_pr")
-        push_idx = names.index("push")
-        self.assertLess(push_idx, pr_idx,
-                        "push must come before create_pr in fallback plan")
+        self.assertNotIn("push", names,
+            "Fallback must not emit push — no committed changes are guaranteed")
+        self.assertNotIn("create_pr", names,
+            "Fallback must not emit create_pr — LLM planner is responsible for PR ops")
 
     def test_agent_structured_output_schema_keys(self):
         required_keys = {
