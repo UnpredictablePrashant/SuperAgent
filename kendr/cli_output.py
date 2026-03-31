@@ -285,6 +285,10 @@ def print_text(text: str, style: str = "default") -> None:
     _console.print(text, style=style)
 
 
+def print_status(message: str, style: str = _GREY) -> None:
+    _err_console.print(Text(f"  {message}", style=style))
+
+
 def print_final_output(output: str) -> None:
     if not str(output or "").strip():
         return

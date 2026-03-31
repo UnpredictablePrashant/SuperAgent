@@ -632,7 +632,11 @@ def _emit_status(args: argparse.Namespace, message: str, *, transient: bool = Fa
         _STATUS_LINE_LENGTH = _visible_status_length(text)
         return
     _clear_transient_status_line()
-    print(styled_message, file=sys.stderr, flush=True)
+    try:
+        from kendr import cli_output as _cout
+        _cout.print_status(str(styled_message).strip())
+    except Exception:
+        print(styled_message, file=sys.stderr, flush=True)
 
 
 def _gateway_ready(timeout_seconds: float = 1.0) -> bool:
@@ -670,10 +674,20 @@ def _gateway_start_time_path() -> Path:
     return home / "gateway.start_time"
 
 
+_GATEWAY_OWNER_MARKER = "kendr-gateway"
+
+
+def _gateway_owner_marker_path() -> Path:
+    home = _kendr_state_home()
+    home.mkdir(parents=True, exist_ok=True)
+    return home / "gateway.owner"
+
+
 def _write_gateway_pid(pid: int) -> None:
     try:
         _gateway_pid_path().write_text(str(pid), encoding="utf-8")
         _gateway_start_time_path().write_text(str(time.time()), encoding="utf-8")
+        _gateway_owner_marker_path().write_text(_GATEWAY_OWNER_MARKER, encoding="utf-8")
     except Exception:
         pass
 
@@ -697,7 +711,7 @@ def _read_gateway_start_time() -> float | None:
 
 
 def _clear_gateway_pid() -> None:
-    for path in (_gateway_pid_path(), _gateway_start_time_path()):
+    for path in (_gateway_pid_path(), _gateway_start_time_path(), _gateway_owner_marker_path()):
         try:
             if path.exists():
                 path.unlink()
@@ -711,6 +725,25 @@ def _pid_is_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def _pid_is_gateway_owned(pid: int) -> bool:
+    try:
+        marker = _gateway_owner_marker_path().read_text(encoding="utf-8").strip()
+        if marker != _GATEWAY_OWNER_MARKER:
+            return False
+    except Exception:
+        return False
+    try:
+        cmdline_path = f"/proc/{pid}/cmdline"
+        if os.path.exists(cmdline_path):
+            with open(cmdline_path, "rb") as f:
+                cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="replace")
+            gateway_keywords = ("kendr", "gateway", "serve", "uvicorn", "setup_ui")
+            return any(kw in cmdline for kw in gateway_keywords)
+        return True
+    except Exception:
+        return True
 
 
 def _wait_for_listener_shutdown(port: int, timeout_seconds: float = 5.0) -> bool:
@@ -3670,16 +3703,27 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         return 0
 
     if action == "status":
-        running = _gateway_ready(timeout_seconds=0.8)
         pids = _listener_pids_for_port(port)
         pid = _read_gateway_pid()
+        pid_alive = bool(pid and _pid_is_alive(pid))
+        pid_owned = bool(pid_alive and _pid_is_gateway_owned(pid))
+        port_listening = bool(pids)
+        health_ok = _gateway_ready(timeout_seconds=0.8)
+        running = health_ok or (pid_owned and port_listening)
         start_time = _read_gateway_start_time()
         uptime = (time.time() - start_time) if (running and start_time) else None
-        if pid and not running:
+        if pid and not pid_alive:
+            _clear_gateway_pid()
+            pid = None
+        elif pid and pid_alive and not pid_owned:
             _clear_gateway_pid()
             pid = None
         payload = {
             "running": running,
+            "health_ok": health_ok,
+            "pid_alive": pid_alive,
+            "pid_owned": pid_owned,
+            "port_listening": port_listening,
             "host": host,
             "port": port,
             "base_url": base,
@@ -3696,7 +3740,8 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     if action == "stop":
         pid = _read_gateway_pid()
         killed_via_pid = False
-        if pid and _pid_is_alive(pid):
+        pid_is_owned = pid and _pid_is_alive(pid) and _pid_is_gateway_owned(pid)
+        if pid_is_owned:
             try:
                 import signal
                 os.kill(pid, signal.SIGTERM)
@@ -3704,13 +3749,13 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
                 while time.time() < deadline and _pid_is_alive(pid):
                     time.sleep(0.2)
                 if _pid_is_alive(pid):
-                    try:
+                    if _pid_is_gateway_owned(pid):
                         os.kill(pid, signal.SIGKILL)
-                    except Exception:
-                        pass
                 killed_via_pid = True
             except Exception:
                 pass
+        elif pid and _pid_is_alive(pid) and not _pid_is_gateway_owned(pid):
+            _clear_gateway_pid()
         stopped_port = _terminate_gateway_on_port()
         _clear_gateway_pid()
         _wait_for_listener_shutdown(port, timeout_seconds=3.0)
