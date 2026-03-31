@@ -3854,9 +3854,12 @@ def _cmd_ui(args: argparse.Namespace) -> int:
     if not _gateway_ready(timeout_seconds=0.8):
         print(f"[ui] Gateway not running — starting it in background...")
         try:
+            os.environ["KENDR_UI_ENABLED"] = "0"
             _start_gateway_process()
         except SystemExit:
             print("[ui] Warning: gateway did not start. Chat will require 'kendr gateway start'.")
+        finally:
+            os.environ.pop("KENDR_UI_ENABLED", None)
 
     if not no_browser:
         def _open_browser() -> None:

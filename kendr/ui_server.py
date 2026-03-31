@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html as _html
 import json
 import os
 import queue
@@ -20,6 +21,49 @@ from tasks.setup_config_store import (
     set_component_enabled,
     setup_overview,
 )
+
+try:
+    from kendr.persistence import (
+        list_agent_executions_for_run as _list_run_steps,
+        list_artifacts_for_run as _list_run_artifacts,
+        get_run as _db_get_run,
+    )
+    _HAS_PERSISTENCE = True
+except Exception:
+    _HAS_PERSISTENCE = False
+    def _list_run_steps(run_id):  # type: ignore[misc]
+        return []
+    def _list_run_artifacts(run_id):  # type: ignore[misc]
+        return []
+    def _db_get_run(run_id):  # type: ignore[misc]
+        return None
+
+try:
+    from kendr.providers import (
+        build_google_oauth_config,
+        build_google_oauth_start_url,
+        build_microsoft_oauth_config,
+        build_microsoft_oauth_start_url,
+        build_slack_oauth_config,
+        build_slack_oauth_start_url,
+        exchange_google_oauth_code,
+        exchange_microsoft_oauth_code,
+        exchange_slack_oauth_code,
+    )
+    from kendr.setup import issue_oauth_state_token
+    _HAS_OAUTH = True
+except Exception:
+    _HAS_OAUTH = False
+
+try:
+    from kendr.setup.catalog import INTEGRATION_DEFINITIONS as _INTEGRATION_DEFS
+    _OAUTH_PATH_MAP: dict[str, str] = {
+        d.id: d.oauth_start_path
+        for d in _INTEGRATION_DEFS
+        if getattr(d, "oauth_start_path", "")
+    }
+except Exception:
+    _OAUTH_PATH_MAP = {}
 
 _UI_PORT = int(os.getenv("KENDR_UI_PORT", "2151"))
 _UI_HOST = os.getenv("KENDR_UI_HOST", "127.0.0.1")
@@ -62,6 +106,7 @@ def _gateway_get(path: str, timeout: float = 5.0) -> dict | list:
 _pending_runs: dict[str, dict] = {}
 _run_event_queues: dict[str, "queue.Queue[dict]"] = {}
 _pending_lock = threading.Lock()
+_OAUTH_PENDING_STATES: dict[str, str] = {}
 
 
 def _push_event(run_id: str, event_type: str, data: dict) -> None:
@@ -71,11 +116,67 @@ def _push_event(run_id: str, event_type: str, data: dict) -> None:
         q.put({"type": event_type, "data": data})
 
 
+def _format_step(step: dict) -> dict:
+    excerpt = str(step.get("output_excerpt") or "").strip()
+    agent = step.get("agent_name", "agent")
+    return {
+        "agent": agent,
+        "status": step.get("status", "running"),
+        "message": excerpt or f"Running {agent}...",
+        "execution_id": step.get("execution_id"),
+    }
+
+
+def _collect_artifacts(run_id: str, output_dir: str) -> tuple[list[dict], list[dict]]:
+    db_artifacts: list[dict] = []
+    file_list: list[dict] = []
+    try:
+        db_artifacts = _list_run_artifacts(run_id)
+    except Exception:
+        pass
+    try:
+        if output_dir and os.path.isdir(output_dir):
+            for fname in sorted(os.listdir(output_dir))[:50]:
+                fp = os.path.join(output_dir, fname)
+                if os.path.isfile(fp):
+                    file_list.append({
+                        "name": fname,
+                        "path": fp,
+                        "size": os.path.getsize(fp),
+                    })
+    except Exception:
+        pass
+    return db_artifacts, file_list
+
+
 def _start_run_background(run_id: str, payload: dict) -> None:
+    def _poll_db_steps() -> None:
+        seen: set = set()
+        while True:
+            with _pending_lock:
+                current = _pending_runs.get(run_id, {})
+            done = current.get("status") in ("completed", "failed")
+            try:
+                for step in _list_run_steps(run_id):
+                    eid = step.get("execution_id")
+                    if eid and eid not in seen:
+                        seen.add(eid)
+                        _push_event(run_id, "step", _format_step(step))
+            except Exception:
+                pass
+            if done:
+                break
+            time.sleep(0.6)
+
     def _run() -> None:
         _push_event(run_id, "status", {"status": "running", "message": "Agents mobilizing..."})
+        poll = threading.Thread(target=_poll_db_steps, daemon=True)
+        poll.start()
         try:
             result = _gateway_ingest(payload)
+            db_artifacts, file_list = _collect_artifacts(run_id, result.get("output_dir", ""))
+            result["artifacts"] = db_artifacts
+            result["artifact_files"] = file_list
             with _pending_lock:
                 _pending_runs[run_id] = {"status": "completed", "result": result}
             _push_event(run_id, "result", result)
@@ -408,7 +509,7 @@ function addStreamStep(runId, step) {
   scrollDown();
 }
 
-function finalizeStreamRow(runId, output, error) {
+function finalizeStreamRow(runId, output, error, artifactFiles) {
   const row = document.getElementById('stream-row-' + runId);
   if (!row) return;
   const typing = row.querySelector('.typing-indicator');
@@ -421,6 +522,14 @@ function finalizeStreamRow(runId, output, error) {
       resultEl.innerHTML = '<div class="error-banner" style="margin-top:8px">\u26A0\uFE0F ' + esc(error) + '</div>';
     } else if (output) {
       resultEl.innerHTML = '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">' + formatOutput(output) + '</div>';
+    }
+    if (artifactFiles && artifactFiles.length > 0) {
+      let artHtml = '<div style="margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px"><div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">\ud83d\udcc1 Artifact Files</div>';
+      artHtml += artifactFiles.map(f => '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">' +
+        '<span style="color:var(--teal)">\ud83d\udcc4</span><span style="color:var(--text)">' + esc(f.name) + '</span>' +
+        (f.size ? '<span style="color:var(--muted)">(' + (f.size > 1024 ? Math.round(f.size/1024) + ' KB' : f.size + ' B') + ')</span>' : '') + '</div>').join('');
+      artHtml += '</div>';
+      resultEl.innerHTML += artHtml;
     }
   }
   const meta = document.createElement('div');
@@ -452,7 +561,7 @@ function openEventStream(runId) {
       const d = JSON.parse(e.data);
       const output = d.final_output || d.output || d.draft_response || '';
       updateStreamStatus(runId, 'Completed.');
-      finalizeStreamRow(runId, output, '');
+      finalizeStreamRow(runId, output, '', d.artifact_files || []);
     } catch(_) {}
   });
 
@@ -740,6 +849,7 @@ async function toggleCard(compId) {
 function renderCardBody(body, snapshot, compId) {
   const fields = (snapshot.component || {}).fields || [];
   const values = snapshot.values || {};
+  const oauthPath = (snapshot.component || {}).oauth_start_path || '';
   let html = '';
   if (fields.length > 0) {
     fields.forEach(f => {
@@ -754,6 +864,9 @@ function renderCardBody(body, snapshot, compId) {
     html = '<div style="font-size:12px;color:var(--muted);margin-bottom:12px">No configurable fields.</div>';
   }
   let actionsHtml = fields.length > 0 ? '<button class="btn primary" onclick="saveComponent(\'' + esc(compId) + '\')">Save</button>' : '';
+  if (oauthPath) {
+    actionsHtml += ' <a class="btn oauth" href="' + esc(oauthPath) + '" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:8px;background:rgba(0,201,167,0.15);border:1px solid rgba(0,201,167,0.4);color:var(--teal);font-size:12px;font-weight:600;text-decoration:none;cursor:pointer">\u{1F517} OAuth Connect</a>';
+  }
   actionsHtml += '<span class="save-msg" id="save-msg-' + esc(compId) + '" style="display:none"></span>';
   body.innerHTML = html + '<div class="card-actions">' + actionsHtml + '</div>';
 }
@@ -923,6 +1036,24 @@ class KendrUIHandler(BaseHTTPRequestHandler):
                 runs = []
             self._json(200, runs)
             return
+        if path.startswith("/api/runs/") and path.endswith("/artifacts"):
+            run_id = path[len("/api/runs/"):-len("/artifacts")]
+            db_artifacts, file_list = [], []
+            output_dir = ""
+            try:
+                run_row = _db_get_run(run_id)
+                if run_row:
+                    output_dir = run_row.get("run_output_dir", "")
+                db_artifacts, file_list = _collect_artifacts(run_id, output_dir)
+            except Exception:
+                pass
+            self._json(200, {
+                "run_id": run_id,
+                "output_dir": output_dir,
+                "artifacts": db_artifacts,
+                "files": file_list,
+            })
+            return
         if path.startswith("/api/runs/"):
             run_id = path[len("/api/runs/"):]
             try:
@@ -951,6 +1082,15 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             if not snap:
                 self._json(404, {"error": "component_not_found"})
                 return
+            oauth_path = _OAUTH_PATH_MAP.get(comp_id, "")
+            if oauth_path and snap.get("component") is not None:
+                parts = oauth_path.strip("/").split("/")
+                provider = parts[1] if len(parts) >= 2 else ""
+                snap = dict(snap)
+                snap["component"] = dict(snap["component"])
+                if provider:
+                    snap["component"]["oauth_start_path"] = f"/api/oauth/{provider}/start"
+                    snap["component"]["oauth_provider"] = provider
             self._json(200, snap)
             return
         if path == "/api/setup/env-export":
@@ -959,6 +1099,14 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 lines = []
             self._json(200, {"lines": lines})
+            return
+        if path.startswith("/api/oauth/") and path.endswith("/start"):
+            provider = path[len("/api/oauth/"):-len("/start")]
+            self._handle_oauth_start(provider)
+            return
+        if path.startswith("/api/oauth/") and path.endswith("/callback"):
+            provider = path[len("/api/oauth/"):-len("/callback")]
+            self._handle_oauth_callback(provider, parse_qs(parsed.query or ""))
             return
         if path == "/api/stream":
             params = parse_qs(parsed.query or "")
@@ -1068,6 +1216,91 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             except queue.Empty:
                 if not write_event("ping", {"ts": int(time.time())}):
                     break
+
+    def _handle_oauth_start(self, provider: str) -> None:
+        if not _HAS_OAUTH:
+            self._html(503, "<h1>OAuth not available</h1><p>kendr.providers module not loaded.</p>")
+            return
+        try:
+            missing: list[str] = []
+            if provider == "google":
+                config = build_google_oauth_config()
+                for k in ("client_id", "client_secret", "redirect_uri", "scopes"):
+                    if not str(config.get(k, "")).strip():
+                        missing.append({"client_id": "GOOGLE_CLIENT_ID", "client_secret": "GOOGLE_CLIENT_SECRET",
+                                        "redirect_uri": "GOOGLE_REDIRECT_URI", "scopes": "GOOGLE_OAUTH_SCOPES"}.get(k, k))
+            elif provider == "microsoft":
+                config = build_microsoft_oauth_config()
+                for k in ("client_id", "client_secret", "redirect_uri", "scopes"):
+                    if not str(config.get(k, "")).strip():
+                        missing.append({"client_id": "MICROSOFT_CLIENT_ID", "client_secret": "MICROSOFT_CLIENT_SECRET",
+                                        "redirect_uri": "MICROSOFT_REDIRECT_URI", "scopes": "MICROSOFT_OAUTH_SCOPES"}.get(k, k))
+            elif provider == "slack":
+                config = build_slack_oauth_config()
+                for k in ("client_id", "client_secret", "redirect_uri", "scopes"):
+                    if not str(config.get(k, "")).strip():
+                        missing.append({"client_id": "SLACK_CLIENT_ID", "client_secret": "SLACK_CLIENT_SECRET",
+                                        "redirect_uri": "SLACK_REDIRECT_URI", "scopes": "SLACK_OAUTH_SCOPES"}.get(k, k))
+            else:
+                self._html(400, f"<h1>Unknown provider: {_html.escape(provider)}</h1>")
+                return
+            if missing:
+                body_txt = (
+                    f"<h1>{_html.escape(provider.title())} OAuth not configured</h1>"
+                    "<p>Set the following environment variables before connecting:</p>"
+                    f"<pre>{_html.escape(chr(10).join(missing))}</pre>"
+                    '<p><a href="/setup">Return to Setup</a></p>'
+                )
+                self._html(400, body_txt)
+                return
+            state_token = issue_oauth_state_token()
+            _OAUTH_PENDING_STATES[state_token] = provider
+            if provider == "google":
+                url = build_google_oauth_start_url(state_token)
+            elif provider == "microsoft":
+                url = build_microsoft_oauth_start_url(state_token)
+            else:
+                url = build_slack_oauth_start_url(state_token)
+            self.send_response(302)
+            self.send_header("Location", url)
+            self.end_headers()
+        except Exception as exc:
+            self._html(500, f"<h1>OAuth error</h1><p>{_html.escape(str(exc))}</p>")
+
+    def _handle_oauth_callback(self, provider: str, query: dict) -> None:
+        if not _HAS_OAUTH:
+            self._html(503, "<h1>OAuth not available</h1>")
+            return
+        state_token = (query.get("state") or [""])[0]
+        code = (query.get("code") or [""])[0]
+        error = (query.get("error") or [""])[0]
+        if error:
+            self._html(400, f"<h1>OAuth failed</h1><p>{_html.escape(error)}</p>")
+            return
+        if not code:
+            self._html(400, "<h1>OAuth failed</h1><p>Missing authorization code.</p>")
+            return
+        if _OAUTH_PENDING_STATES.get(state_token) != provider:
+            self._html(400, "<h1>OAuth failed</h1><p>Invalid or expired state token.</p>")
+            return
+        try:
+            if provider == "google":
+                exchange_google_oauth_code(code)
+            elif provider == "microsoft":
+                exchange_microsoft_oauth_code(code)
+            elif provider == "slack":
+                exchange_slack_oauth_code(code)
+            else:
+                self._html(400, f"<h1>Unknown provider: {_html.escape(provider)}</h1>")
+                return
+            _OAUTH_PENDING_STATES.pop(state_token, None)
+            self._html(200, (
+                f"<h1>{_html.escape(provider.title())} connected</h1>"
+                "<p>Tokens saved to the kendr setup database.</p>"
+                '<p><a href="/setup">Return to Setup</a></p>'
+            ))
+        except Exception as exc:
+            self._html(500, f"<h1>OAuth failed</h1><p>{_html.escape(str(exc))}</p>")
 
     def _handle_setup_save(self, body: dict) -> None:
         comp_id = str(body.get("component_id", "")).strip()

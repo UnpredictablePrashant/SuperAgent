@@ -457,10 +457,29 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    import threading as _threading
+
     host = os.getenv("GATEWAY_HOST", "127.0.0.1")
     port = int(os.getenv("GATEWAY_PORT", "8790"))
     server = ThreadingHTTPServer((host, port), GatewayHandler)
     print(f"Gateway server running at http://{host}:{port}")
+
+    if os.getenv("KENDR_UI_ENABLED", "1") != "0":
+        def _start_ui() -> None:
+            try:
+                from kendr.ui_server import main as _ui_main
+                _ui_main()
+            except OSError as exc:
+                if "Address already in use" in str(exc):
+                    pass
+                else:
+                    print(f"[kendr-ui] startup error: {exc}")
+            except Exception as exc:
+                print(f"[kendr-ui] startup error: {exc}")
+
+        _ui_thread = _threading.Thread(target=_start_ui, daemon=True, name="kendr-ui")
+        _ui_thread.start()
+
     server.serve_forever()
 
 
