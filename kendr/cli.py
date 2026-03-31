@@ -4578,50 +4578,54 @@ def main(argv: list[str] | None = None) -> int:
         target_parser.print_help()
         return 0
 
-    if args.command == "hello":
-        return _cmd_hello(args)
-    if args.command == "run":
-        return _cmd_run(args)
-    if args.command == "generate":
-        return _cmd_generate(args)
-    if args.command == "research":
-        return _cmd_research(args)
-    if args.command == "agents":
-        return _cmd_agents(args)
-    if args.command == "plugins":
-        return _cmd_plugins(args)
-    if args.command == "gateway":
-        return _cmd_gateway(args)
-    if args.command == "web":
-        return _cmd_gateway(argparse.Namespace(action="serve"))
-    if args.command == "setup-ui":
-        from .setup_ui import main as setup_main
+    try:
+        if args.command == "hello":
+            return _cmd_hello(args)
+        if args.command == "run":
+            return _cmd_run(args)
+        if args.command == "generate":
+            return _cmd_generate(args)
+        if args.command == "research":
+            return _cmd_research(args)
+        if args.command == "agents":
+            return _cmd_agents(args)
+        if args.command == "plugins":
+            return _cmd_plugins(args)
+        if args.command == "gateway":
+            return _cmd_gateway(args)
+        if args.command == "web":
+            return _cmd_gateway(argparse.Namespace(action="serve"))
+        if args.command == "setup-ui":
+            from .setup_ui import main as setup_main
 
-        setup_main()
+            setup_main()
+            return 0
+        if args.command == "status":
+            return _cmd_status(args)
+        if args.command == "resume":
+            return _cmd_resume(args)
+        if args.command == "sessions":
+            return _cmd_sessions(args)
+        if args.command == "rollback":
+            return _cmd_rollback(args)
+        if args.command == "daemon":
+            from .daemon import run_daemon
+
+            return run_daemon(
+                poll_interval_seconds=args.poll_interval,
+                heartbeat_interval_seconds=args.heartbeat_interval,
+                once=args.once,
+            )
+        if args.command == "setup":
+            return _cmd_setup(args)
+        if args.command == "workdir":
+            return _cmd_workdir(args)
+        if args.command == "ui":
+            return _cmd_ui(args)
+        raise SystemExit(f"Unknown command: {args.command}")
+    except KeyboardInterrupt:
+        print("\nQuit")
         return 0
-    if args.command == "status":
-        return _cmd_status(args)
-    if args.command == "resume":
-        return _cmd_resume(args)
-    if args.command == "sessions":
-        return _cmd_sessions(args)
-    if args.command == "rollback":
-        return _cmd_rollback(args)
-    if args.command == "daemon":
-        from .daemon import run_daemon
-
-        return run_daemon(
-            poll_interval_seconds=args.poll_interval,
-            heartbeat_interval_seconds=args.heartbeat_interval,
-            once=args.once,
-        )
-    if args.command == "setup":
-        return _cmd_setup(args)
-    if args.command == "workdir":
-        return _cmd_workdir(args)
-    if args.command == "ui":
-        return _cmd_ui(args)
-    raise SystemExit(f"Unknown command: {args.command}")
 
 
 if __name__ == "__main__":
