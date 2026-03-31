@@ -152,21 +152,60 @@ Rules:
     return plan if isinstance(plan, dict) else {}
 
 
-def _generate_file_content(task: str, file_path: str, recent_log: str) -> str:
-    """Use the LLM to produce file content when write_file params say __GENERATE__."""
+def _generate_file_content(task: str, file_path: str, recent_log: str, existing_content: str = "") -> str:
+    """Use the LLM to produce the full replacement content for *file_path*.
+
+    Provides both the current file content (when available) and recent operation
+    log so the LLM has the context needed to make a targeted, correct fix.
+    """
+    existing_section = (
+        f"\nExisting file content (full):\n```\n{existing_content[:4000]}\n```"
+        if existing_content
+        else "\nExisting file content: (file does not exist yet)"
+    )
     prompt = f"""
-You are generating file content for a GitHub task.
+You are generating the complete replacement content for a file as part of an automated GitHub task.
 
 Task: {task}
-File to write: {file_path}
+File: {file_path}
 Recent operations context:
 {recent_log}
+{existing_section}
 
-Return ONLY the file content. No explanation, no markdown fences.
+Instructions:
+- Return ONLY the complete file content with the required change applied.
+- Preserve all unrelated existing code/structure.
+- No explanation, no markdown fences, no surrounding text.
 """.strip()
     response = llm.invoke(prompt)
     raw = response.content if hasattr(response, "content") else str(response)
     return normalize_llm_text(raw).strip()
+
+
+def _fallback_operations(task: str) -> list[dict]:
+    """Return a minimal deterministic operation sequence based on task keywords.
+
+    Used when the LLM plan produces zero operations so the agent always performs
+    something meaningful rather than returning an empty success.
+    """
+    lower = task.lower()
+    ops: list[dict] = []
+
+    if any(w in lower for w in ["clone", "fix", "edit", "change", "update", "write", "commit", "push", "pr", "pull request"]):
+        ops.append({"op": "clone_repo", "params": {}})
+        if any(w in lower for w in ["fix", "edit", "change", "update", "write"]):
+            branch_name = "kendr/fix"
+            ops.append({"op": "create_branch", "params": {"branch": branch_name}})
+        if any(w in lower for w in ["pr", "pull request", "open a pr"]):
+            ops.append({"op": "create_pr", "params": {}})
+
+    if any(w in lower for w in ["issue", "bug", "error", "problem", "fail"]):
+        ops.append({"op": "list_issues", "params": {"state": "open"}})
+
+    if not ops:
+        ops.append({"op": "list_issues", "params": {"state": "open"}})
+
+    return ops
 
 
 def _execute_operations(
@@ -232,14 +271,19 @@ def _execute_operations(
             elif op == "write_file":
                 file_path = str(params.get("path") or "")
                 content = str(params.get("content") or "__GENERATE__")
-                if content == "__GENERATE__":
-                    recent = "\n".join(log_lines[-5:])
-                    content = _generate_file_content(task, file_path, recent)
-                if file_path:
+                if not file_path:
+                    log_lines.append("write_file: no path specified — skipped")
+                else:
+                    if content == "__GENERATE__":
+                        existing_content = ""
+                        try:
+                            existing_content = client.read_repo_file(repo_dir, file_path)
+                        except Exception:
+                            pass
+                        recent = "\n".join(log_lines[-5:])
+                        content = _generate_file_content(task, file_path, recent, existing_content)
                     client.write_repo_file(repo_dir, file_path, content)
                     log_lines.append(f"write_file: wrote {file_path} ({len(content)} chars)")
-                else:
-                    log_lines.append("write_file: no path specified — skipped")
 
             elif op == "commit":
                 message = str(params.get("message") or "kendr automated commit")
@@ -353,6 +397,20 @@ def github_agent(state):
 
     if not isinstance(operations, list):
         operations = []
+
+    if not operations:
+        if resolved_owner and resolved_repo:
+            fallback_ops = _fallback_operations(task)
+            log_task_update(
+                "GitHub Agent",
+                f"LLM plan produced no operations; using keyword-based fallback ({len(fallback_ops)} op(s)).",
+            )
+            operations = fallback_ops
+        else:
+            raise ValueError(
+                "github_agent: LLM plan produced no operations and no owner/repo could be identified. "
+                "Provide 'github_owner'/'github_repo' in state or include 'owner/repo' in the task."
+            )
 
     log_task_update(
         "GitHub Agent",

@@ -221,12 +221,26 @@ class GitHubClient:
         return self._run_git(["push", "--set-upstream", remote, branch], repo_dir, timeout=120)
 
     @staticmethod
+    def _safe_repo_path(repo_dir: Path, relative_path: str) -> Path:
+        """Resolve *relative_path* inside *repo_dir* and reject any path-traversal attempts."""
+        resolved = (repo_dir / relative_path).resolve()
+        repo_resolved = repo_dir.resolve()
+        try:
+            resolved.relative_to(repo_resolved)
+        except ValueError:
+            raise PermissionError(
+                f"Path traversal denied: '{relative_path}' escapes the repository root."
+            )
+        return resolved
+
+    @staticmethod
     def read_repo_file(repo_dir: Path, relative_path: str) -> str:
-        return (repo_dir / relative_path).read_text(encoding="utf-8")
+        target = GitHubClient._safe_repo_path(repo_dir, relative_path)
+        return target.read_text(encoding="utf-8")
 
     @staticmethod
     def write_repo_file(repo_dir: Path, relative_path: str, content: str) -> None:
-        target = repo_dir / relative_path
+        target = GitHubClient._safe_repo_path(repo_dir, relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
