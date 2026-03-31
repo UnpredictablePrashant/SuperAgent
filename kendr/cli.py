@@ -3871,18 +3871,24 @@ def _cmd_ui(args: argparse.Namespace) -> int:
 
         threading.Thread(target=_open_browser, daemon=True).start()
 
-    def _kendr_ui_running(port: int) -> bool:
+    def _kendr_ui_running(port: int, host: str) -> bool:
         import urllib.request as _req
-        import urllib.error as _uerr
-        try:
-            with _req.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1) as r:
-                import json as _json
-                data = _json.loads(r.read())
-                return data.get("service") == "kendr-ui"
-        except Exception:
-            return False
+        import json as _json
 
-    if _kendr_ui_running(ui_port):
+        _probe_hosts = ["127.0.0.1"]
+        if host not in ("0.0.0.0", "", "127.0.0.1"):
+            _probe_hosts.append(host)
+        for _h in _probe_hosts:
+            try:
+                with _req.urlopen(f"http://{_h}:{port}/api/health", timeout=1) as r:
+                    data = _json.loads(r.read())
+                    if data.get("service") == "kendr-ui":
+                        return True
+            except Exception:
+                pass
+        return False
+
+    if _kendr_ui_running(ui_port, os.getenv("KENDR_UI_HOST", "0.0.0.0")):
         print(f"Kendr UI already running at {ui_url}")
         return 0
 

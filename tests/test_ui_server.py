@@ -76,24 +76,80 @@ class TestSecretSentinelHandling(unittest.TestCase):
             self.assertIn("API_KEY", calls, "New real secret value must be persisted")
 
 
-class TestUICmdPortCollision(unittest.TestCase):
-    def test_ui_already_running_check_returns_true_when_port_bound(self):
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("127.0.0.1", 0))
-        srv.listen(1)
-        _, port = srv.getsockname()
+class TestUICmdHealthProbe(unittest.TestCase):
+    def _make_running_check(self):
+        import urllib.request as _req
+        import json as _json
+
+        def _kendr_ui_running(port: int, host: str) -> bool:
+            _probe_hosts = ["127.0.0.1"]
+            if host not in ("0.0.0.0", "", "127.0.0.1"):
+                _probe_hosts.append(host)
+            for _h in _probe_hosts:
+                try:
+                    with _req.urlopen(f"http://{_h}:{port}/api/health", timeout=1) as r:
+                        data = _json.loads(r.read())
+                        if data.get("service") == "kendr-ui":
+                            return True
+                except Exception:
+                    pass
+            return False
+
+        return _kendr_ui_running
+
+    def test_detects_kendr_ui_on_loopback(self):
+        from kendr.ui_server import KendrUIHandler
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), KendrUIHandler)
+        _, port = srv.server_address
+
+        t = threading.Thread(target=srv.handle_request, daemon=True)
+        t.start()
 
         try:
-            import kendr.cli as _cli
-
-            def _check(p):
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    return s.connect_ex(("127.0.0.1", p)) == 0
-
-            self.assertTrue(_check(port), "Port in use must be detected")
+            check = self._make_running_check()
+            result = check(port, "0.0.0.0")
         finally:
-            srv.close()
+            srv.server_close()
+            t.join(timeout=3)
+
+        self.assertTrue(result, "Should detect running kendr-ui via /api/health probe")
+
+    def test_returns_false_for_non_kendr_service(self):
+        class _DummyHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'{"service": "other"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), _DummyHandler)
+        _, port = srv.server_address
+        t = threading.Thread(target=srv.handle_request, daemon=True)
+        t.start()
+        try:
+            check = self._make_running_check()
+            result = check(port, "0.0.0.0")
+        finally:
+            srv.server_close()
+            t.join(timeout=3)
+
+        self.assertFalse(result, "Must not detect non-kendr service as kendr-ui")
+
+    def test_returns_false_when_nothing_listening(self):
+        tmp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        tmp.bind(("127.0.0.1", 0))
+        _, port = tmp.getsockname()
+        tmp.close()
+
+        check = self._make_running_check()
+        result = check(port, "0.0.0.0")
+        self.assertFalse(result, "Should return False when no server is listening")
 
 
 class TestUIServerRawValuesStripped(unittest.TestCase):
