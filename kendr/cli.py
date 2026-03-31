@@ -3244,19 +3244,44 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
             if paused and interactive_follow_up:
                 prompt = _pending_question(result)
-                if prompt:
-                    print(prompt)
-                while True:
+                # ── Blueprint approval gate — show [y/n] prompt for dev pipeline ──
+                pending_kind = str(result.get("pending_user_input_kind") or "").strip().lower()
+                is_blueprint_gate = (
+                    pending_kind == "blueprint_approval"
+                    or (bool(getattr(args, "dev", False)) and "blueprint" in (prompt or "")[:120].lower())
+                )
+                if is_blueprint_gate:
+                    print()
+                    print("═" * 72)
+                    print("  BLUEPRINT READY FOR REVIEW")
+                    print("═" * 72)
+                    if prompt:
+                        print(f"\n{prompt}\n")
+                    sys.stdout.write("Proceed with this blueprint? [y/n]: ")
+                    sys.stdout.flush()
                     try:
-                        current_query = input("Reply: ").strip()
-                    except (EOFError, KeyboardInterrupt) as exc:
-                        raise SystemExit(
-                            "Run is paused and the session was preserved. "
-                            f"Resume with `kendr resume --reply \"<your reply>\" --working-directory \"{resolved_working_dir}\"`."
-                        ) from exc
-                    if current_query:
-                        break
-                    _emit_status(args, "[run] empty reply ignored; enter a response or press Ctrl+C to stop.")
+                        answer = sys.stdin.readline().strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        answer = "n"
+                    if answer in ("y", "yes", "approve", "ok", "1"):
+                        current_query = "approve"
+                    else:
+                        print("\nGeneration cancelled at blueprint review.")
+                        return 0
+                else:
+                    if prompt:
+                        print(prompt)
+                    while True:
+                        try:
+                            current_query = input("Reply: ").strip()
+                        except (EOFError, KeyboardInterrupt) as exc:
+                            raise SystemExit(
+                                "Run is paused and the session was preserved. "
+                                f"Resume with `kendr resume --reply \"<your reply>\" --working-directory \"{resolved_working_dir}\"`."
+                            ) from exc
+                        if current_query:
+                            break
+                        _emit_status(args, "[run] empty reply ignored; enter a response or press Ctrl+C to stop.")
                 use_resume = True
                 continue
 

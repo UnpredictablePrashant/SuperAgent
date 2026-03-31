@@ -97,35 +97,42 @@ STACK_TEMPLATE = {
             "django-stubs",
         ],
     },
-    "docker_services": {
-        "db": {
+    "base_docker_services": [
+        {
+            "name": "db",
             "image": "postgres:16-alpine",
-            "env": {"POSTGRES_DB": "${DB_NAME}", "POSTGRES_USER": "${DB_USER}", "POSTGRES_PASSWORD": "${DB_PASSWORD}"},
             "ports": ["5432:5432"],
             "volumes": ["postgres_data:/var/lib/postgresql/data"],
+            "env": {
+                "POSTGRES_DB": "${DB_NAME}",
+                "POSTGRES_USER": "${DB_USER}",
+                "POSTGRES_PASSWORD": "${DB_PASSWORD}",
+            },
         },
-        "backend": {
+        {
+            "name": "backend",
             "build": "./docker/backend.Dockerfile",
             "command": "gunicorn config.wsgi:application --bind 0.0.0.0:8000",
             "ports": ["8000:8000"],
             "depends_on": ["db"],
         },
-        "frontend": {
+        {
+            "name": "frontend",
             "build": "./docker/frontend.Dockerfile",
             "ports": ["3000:3000"],
         },
-    },
-    "env_vars": [
-        "SECRET_KEY",
-        "DEBUG",
-        "DB_NAME",
-        "DB_USER",
-        "DB_PASSWORD",
-        "DB_HOST",
-        "DB_PORT",
-        "ALLOWED_HOSTS",
-        "CORS_ALLOWED_ORIGINS",
-        "JWT_SECRET_KEY",
+    ],
+    "base_env_vars": [
+        {"name": "SECRET_KEY", "description": "Django secret key", "example_value": "change-me", "required": True},
+        {"name": "DEBUG", "description": "Django debug flag", "example_value": "True", "required": False},
+        {"name": "DB_NAME", "description": "PostgreSQL database name", "example_value": "appdb", "required": True},
+        {"name": "DB_USER", "description": "PostgreSQL user", "example_value": "postgres", "required": True},
+        {"name": "DB_PASSWORD", "description": "PostgreSQL password", "example_value": "postgres", "required": True},
+        {"name": "DB_HOST", "description": "PostgreSQL host", "example_value": "localhost", "required": True},
+        {"name": "DB_PORT", "description": "PostgreSQL port", "example_value": "5432", "required": False},
+        {"name": "ALLOWED_HOSTS", "description": "Django allowed hosts", "example_value": "localhost", "required": True},
+        {"name": "CORS_ALLOWED_ORIGINS", "description": "CORS origins", "example_value": "http://localhost:3000", "required": False},
+        {"name": "JWT_SECRET_KEY", "description": "JWT secret key", "example_value": "change-me", "required": True},
     ],
     "feature_flags": {
         "has_auth": True,

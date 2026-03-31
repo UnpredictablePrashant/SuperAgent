@@ -21,8 +21,8 @@ STACK_TEMPLATE = {
     },
     "base_directory_structure": [],
     "base_dependencies": {},
-    "docker_services": {},
-    "env_vars": [],
+    "base_docker_services": [],
+    "base_env_vars": [],
     "feature_flags": {
         "has_auth": False,
         "has_frontend": False,
