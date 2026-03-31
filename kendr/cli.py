@@ -658,6 +658,61 @@ def _gateway_log_path() -> Path:
     return logs_dir / "gateway.log"
 
 
+def _gateway_pid_path() -> Path:
+    home = _kendr_state_home()
+    home.mkdir(parents=True, exist_ok=True)
+    return home / "gateway.pid"
+
+
+def _gateway_start_time_path() -> Path:
+    home = _kendr_state_home()
+    home.mkdir(parents=True, exist_ok=True)
+    return home / "gateway.start_time"
+
+
+def _write_gateway_pid(pid: int) -> None:
+    try:
+        _gateway_pid_path().write_text(str(pid), encoding="utf-8")
+        _gateway_start_time_path().write_text(str(time.time()), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _read_gateway_pid() -> int | None:
+    try:
+        raw = _gateway_pid_path().read_text(encoding="utf-8").strip()
+        if raw.isdigit():
+            return int(raw)
+    except Exception:
+        pass
+    return None
+
+
+def _read_gateway_start_time() -> float | None:
+    try:
+        raw = _gateway_start_time_path().read_text(encoding="utf-8").strip()
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _clear_gateway_pid() -> None:
+    for path in (_gateway_pid_path(), _gateway_start_time_path()):
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception:
+            pass
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def _wait_for_listener_shutdown(port: int, timeout_seconds: float = 5.0) -> bool:
     deadline = time.time() + max(0.5, timeout_seconds)
     while time.time() < deadline:
@@ -689,6 +744,7 @@ def _start_gateway_process() -> None:
             stderr=gateway_log,
             start_new_session=True,
         )
+        _write_gateway_pid(process.pid)
 
     start_timeout_seconds = max(
         5.0,
@@ -2556,7 +2612,43 @@ def _cmd_research(args: argparse.Namespace) -> int:
     return 0
 
 
+def _emit_run_summary_table(run_id: str) -> None:
+    if not str(run_id or "").strip():
+        return
+    try:
+        from kendr.persistence import list_agent_executions_for_run
+        from kendr import cli_output as out
+
+        rows = list_agent_executions_for_run(run_id)
+        if not rows:
+            return
+        steps = []
+        for row in rows:
+            started = row.get("timestamp") or ""
+            completed = row.get("completed_at") or ""
+            dur = None
+            if started and completed:
+                try:
+                    import datetime as _dt
+                    t0 = _dt.datetime.fromisoformat(started.replace("Z", "+00:00"))
+                    t1 = _dt.datetime.fromisoformat(completed.replace("Z", "+00:00"))
+                    dur = (t1 - t0).total_seconds()
+                except Exception:
+                    pass
+            steps.append({
+                "agent": row.get("agent_name", ""),
+                "status": row.get("status", ""),
+                "duration": dur,
+                "artifacts": [],
+            })
+        out.run_summary(steps)
+    except ImportError:
+        pass
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
+    from kendr import cli_output as out
+
     query = " ".join(args.query).strip() or input("Enter your query: ").strip()
     configured_working_dir = ""
     if bool(args.current_folder):
@@ -2570,6 +2662,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
         save_component_values("core_runtime", {"KENDR_WORKING_DIR": configured_working_dir})
         os.environ["KENDR_WORKING_DIR"] = configured_working_dir
     resolved_working_dir = _resolve_working_dir(configured_working_dir)
+
+    if not bool(getattr(args, "json", False)) and not bool(getattr(args, "quiet", False)):
+        try:
+            out.startup_banner(
+                version=_cli_version(),
+                model=os.getenv("KENDR_MODEL", os.getenv("OPENAI_MODEL", "")),
+                working_dir=resolved_working_dir,
+                tagline=_cli_tagline(),
+            )
+        except Exception:
+            pass
+
     if _is_project_code_request(query):
         cwd = str(Path.cwd().resolve())
         if _looks_like_project_root(cwd) and not _looks_like_project_root(resolved_working_dir):
@@ -3344,6 +3448,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
             else:
                 print(result.get("final_output", ""))
+                if not bool(getattr(args, "quiet", False)):
+                    try:
+                        _emit_run_summary_table(result.get("run_id", ""))
+                    except Exception:
+                        pass
             return 0
     finally:
         _clear_transient_status_line()
@@ -3496,10 +3605,12 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 
 def _cmd_gateway(args: argparse.Namespace) -> int:
-    style = _style_from_args(args)
+    from kendr import cli_output as out
+
     action = getattr(args, "action", "serve")
     base = _gateway_base_url()
     host, port = _gateway_host_port()
+    use_json = bool(getattr(args, "json", False))
 
     if action == "serve":
         from .gateway_server import main as gateway_main
@@ -3508,47 +3619,85 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         return 0
 
     if action == "status":
-        running = _gateway_ready(timeout_seconds=0.5)
+        running = _gateway_ready(timeout_seconds=0.8)
         pids = _listener_pids_for_port(port)
-        payload = {"running": running, "host": host, "port": port, "base_url": base, "pids": pids}
-        if bool(getattr(args, "json", False)):
+        pid = _read_gateway_pid()
+        start_time = _read_gateway_start_time()
+        uptime = (time.time() - start_time) if (running and start_time) else None
+        if pid and not running:
+            _clear_gateway_pid()
+            pid = None
+        payload = {
+            "running": running,
+            "host": host,
+            "port": port,
+            "base_url": base,
+            "pids": pids,
+            "pid": pid,
+            "uptime_seconds": round(uptime, 1) if uptime is not None else None,
+        }
+        if use_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
             return 0
-        if running:
-            print(style.ok(f"Gateway is running at {base} (port {port}, pids={pids or 'unknown'})."))
-        else:
-            print(style.warn(f"Gateway is stopped at {base} (port {port})."))
+        out.gateway_status(running, base, pid=pid, uptime_seconds=uptime)
         return 0
 
     if action == "stop":
-        stopped = _terminate_gateway_on_port()
-        if bool(getattr(args, "json", False)):
-            print(json.dumps({"action": "stop", "port": port, "stopped": stopped}, indent=2, ensure_ascii=False))
+        pid = _read_gateway_pid()
+        killed_via_pid = False
+        if pid and _pid_is_alive(pid):
+            try:
+                import signal
+                os.kill(pid, signal.SIGTERM)
+                deadline = time.time() + 5.0
+                while time.time() < deadline and _pid_is_alive(pid):
+                    time.sleep(0.2)
+                if _pid_is_alive(pid):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except Exception:
+                        pass
+                killed_via_pid = True
+            except Exception:
+                pass
+        stopped_port = _terminate_gateway_on_port()
+        _clear_gateway_pid()
+        _wait_for_listener_shutdown(port, timeout_seconds=3.0)
+        stopped = max(int(killed_via_pid), stopped_port)
+        if use_json:
+            print(json.dumps({"action": "stop", "port": port, "stopped": stopped, "pid": pid}, indent=2, ensure_ascii=False))
             return 0
-        print(style.ok(f"Stopped gateway listeners on port {port}: {stopped}"))
+        if stopped or killed_via_pid:
+            out.gateway_stopped(port, max(stopped, int(killed_via_pid)))
+        else:
+            out.gateway_not_running(base)
         return 0
 
     if action == "restart":
         _terminate_gateway_on_port()
+        _clear_gateway_pid()
         _start_gateway_process()
-        if bool(getattr(args, "json", False)):
-            print(json.dumps({"action": "restart", "base_url": base, "port": port}, indent=2, ensure_ascii=False))
+        pid = _read_gateway_pid()
+        if use_json:
+            print(json.dumps({"action": "restart", "base_url": base, "port": port, "pid": pid}, indent=2, ensure_ascii=False))
             return 0
-        print(style.ok(f"Gateway restarted at {base}"))
+        out.gateway_started(base)
         return 0
 
     if action == "start":
-        if _gateway_ready(timeout_seconds=0.5):
-            if bool(getattr(args, "json", False)):
-                print(json.dumps({"action": "start", "base_url": base, "already_running": True}, indent=2, ensure_ascii=False))
+        if _gateway_ready(timeout_seconds=0.8):
+            pid = _read_gateway_pid()
+            if use_json:
+                print(json.dumps({"action": "start", "base_url": base, "already_running": True, "pid": pid}, indent=2, ensure_ascii=False))
                 return 0
-            print(style.warn(f"Gateway already running at {base}"))
+            out.gateway_already_running(base)
             return 0
         _start_gateway_process()
-        if bool(getattr(args, "json", False)):
-            print(json.dumps({"action": "start", "base_url": base, "started": True}, indent=2, ensure_ascii=False))
+        pid = _read_gateway_pid()
+        if use_json:
+            print(json.dumps({"action": "start", "base_url": base, "started": True, "pid": pid}, indent=2, ensure_ascii=False))
             return 0
-        print(style.ok(f"Gateway started at {base}"))
+        out.gateway_started(base)
         return 0
 
     raise SystemExit(f"Unknown gateway action: {action}")

@@ -1081,6 +1081,11 @@ class AgentRuntime:
 
         spec = self.registry.agents[agent_name]
         log_task_update("System", f"Dispatching to {agent_name}.")
+        try:
+            from kendr.cli_output import step_start as _cli_step_start
+            _cli_step_start(agent_name)
+        except Exception:
+            pass
         ensure_a2a_state(state, state.get("available_agent_cards") or self._agent_cards())
         active_task = task_for_agent(state, agent_name)
         if not active_task:
@@ -1143,6 +1148,11 @@ class AgentRuntime:
             )
             state["review_pending"] = requires_review
             state = self._append_history(state, agent_name, "success", state.get("orchestrator_reason", ""), output_text)
+            try:
+                from kendr.cli_output import step_done as _cli_step_done
+                _cli_step_done(agent_name)
+            except Exception:
+                pass
             append_daily_memory_note(state, agent_name, "completed", self._truncate(output_text, 1000))
             append_session_event(state, agent_name, "completed", self._truncate(output_text, 600))
             if agent_name == str(state.get("planned_active_agent", "")).strip():
@@ -1173,6 +1183,11 @@ class AgentRuntime:
                 ),
             )
             state = self._append_history(state, agent_name, "error", state.get("orchestrator_reason", ""), error_message)
+            try:
+                from kendr.cli_output import step_error as _cli_step_error
+                _cli_step_error(agent_name, error_message)
+            except Exception:
+                pass
             append_daily_memory_note(state, agent_name, "failed", self._truncate(error_message, 1000))
             append_session_event(state, agent_name, "failed", self._truncate(error_message, 600))
             record_work_note(state, agent_name, "failed", f"task_id={active_task['task_id']}\nerror={error_message}")

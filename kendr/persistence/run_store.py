@@ -487,6 +487,21 @@ def insert_heartbeat_event(event: dict, db_path: str = DB_PATH):
         )
 
 
+def list_agent_executions_for_run(run_id: str, db_path: str = DB_PATH) -> list[dict]:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT execution_id, run_id, timestamp, agent_name, status, reason, output_excerpt
+            FROM agent_executions
+            WHERE run_id = ?
+            ORDER BY execution_id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def list_recent_runs(limit: int = 20, db_path: str = DB_PATH) -> list[dict]:
     initialize_db(db_path)
     with _connect(db_path) as conn:
