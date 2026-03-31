@@ -1712,8 +1712,9 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
         ),
     )
     run_parser.add_argument(
-        "--dev-stack",
+        "--stack",
         default="",
+        dest="dev_stack",
         help=(
             "Optional tech stack template for dev pipeline mode (--dev). "
             "Available: fastapi_postgres, fastapi_react_postgres, nextjs_prisma_postgres, "
@@ -2199,6 +2200,129 @@ def _cmd_generate(args: argparse.Namespace) -> int:
     if bool(args.json):
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
         return 0
+
+    # ── Interactive blueprint approval loop (for dev pipeline mode) ───────────
+    # When the pipeline pauses awaiting blueprint approval, prompt [y/n] and
+    # resume or cancel accordingly. Repeats for revision re-review if needed.
+    interactive = bool(getattr(sys.stdin, "isatty", lambda: False)()) and not bool(args.json)
+    resume_output_dir: str | None = str(result.get("output_dir") or "").strip() or None
+
+    def _gen_resume_payload(reply_text: str) -> dict:
+        return {key: value for key, value in {
+            "output_folder": resume_output_dir or "",
+            "working_directory": resolved_working_dir,
+            "reply": reply_text,
+            "channel": channel,
+            "workspace_id": workspace_id,
+            "sender_id": sender_id,
+            "chat_id": chat_id,
+            "is_group": False,
+            "max_steps": args.max_steps,
+        }.items() if value not in ("", None)}
+
+    max_approval_loops = 5
+    approval_loop = 0
+    while approval_loop < max_approval_loops:
+        approval_loop += 1
+        is_paused = (
+            bool(result.get("awaiting_user_input"))
+            or str(result.get("status", "")).strip().lower() == "awaiting_user_input"
+        )
+        if not is_paused:
+            break
+        pending_prompt = str(result.get("pending_user_question") or result.get("final_output") or "").strip()
+        if not pending_prompt:
+            break
+
+        if interactive:
+            # Determine if this is a blueprint approval gate
+            pending_kind = str(result.get("pending_user_input_kind") or "").strip().lower()
+            is_blueprint_gate = pending_kind in ("blueprint_approval",) or "blueprint" in pending_prompt[:120].lower()
+            print()
+            print("═" * 72)
+            if is_blueprint_gate:
+                print("  BLUEPRINT READY FOR REVIEW")
+                print("═" * 72)
+                print(f"\n{pending_prompt}\n")
+                sys.stdout.write("Proceed with this blueprint? [y/n]: ")
+                sys.stdout.flush()
+                try:
+                    answer = sys.stdin.readline().strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    answer = "n"
+                if answer in ("y", "yes", "approve", "ok", "1"):
+                    reply = "approve"
+                else:
+                    print("\nGeneration cancelled at blueprint review.")
+                    return 0
+            else:
+                print("  PIPELINE PAUSED — AWAITING INPUT")
+                print("═" * 72)
+                print(f"\n{pending_prompt}\n")
+                sys.stdout.write("Reply (or press Ctrl+C to cancel): ")
+                sys.stdout.flush()
+                try:
+                    reply = sys.stdin.readline().strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nGeneration paused. Resume with: kendr resume --reply '<reply>' "
+                          f"--working-directory '{resolved_working_dir}'")
+                    return 0
+                if not reply:
+                    print("Empty reply ignored; generation paused.")
+                    print(f"Resume with: kendr resume --reply '<reply>' --working-directory '{resolved_working_dir}'")
+                    return 0
+
+            # Send resume
+            resume_payload = _gen_resume_payload(reply)
+            holder2: dict = {"result": None, "error": None}
+
+            def _do_resume(payload: dict = resume_payload, h: dict = holder2) -> None:
+                try:
+                    req = urllib.request.Request(
+                        f"{gateway_base}/resume",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=600) as resp:
+                        h["result"] = json.loads(resp.read().decode("utf-8"))
+                except BaseException as exc:  # noqa: BLE001
+                    h["error"] = exc
+
+            worker2 = threading.Thread(target=_do_resume, daemon=True)
+            worker2.start()
+            _emit_status(args, "[generate] resuming pipeline…")
+            last_progress = ""
+            while worker2.is_alive():
+                worker2.join(timeout=1.0)
+                try:
+                    sessions = _http_json_get(f"{gateway_base}/task-sessions", timeout_seconds=1.2)
+                    if isinstance(sessions, list):
+                        match = next(
+                            (s for s in sessions if str(s.get("run_id", "")) == client_run_id), None
+                        )
+                        if isinstance(match, dict):
+                            msg = _build_run_progress_message(match)
+                            if msg != last_progress:
+                                _emit_status(args, _colorize_run_progress_message(msg, style))
+                                last_progress = msg
+                except Exception:
+                    pass
+
+            if holder2["error"]:
+                raise SystemExit(f"[generate] resume failed: {holder2['error']}")
+            result = holder2["result"] or {}
+            if result.get("output_dir"):
+                resume_output_dir = str(result["output_dir"]).strip() or resume_output_dir
+        else:
+            # Non-interactive: print the pending question and exit
+            print(pending_prompt)
+            _emit_status(
+                args,
+                f"Generation paused. Resume with: kendr resume --reply 'approve' "
+                f"--working-directory '{resolved_working_dir}'"
+            )
+            return 0
 
     final = str(result.get("final_output") or result.get("draft_response") or "").strip()
     pending = str(result.get("pending_user_question") or "").strip()
