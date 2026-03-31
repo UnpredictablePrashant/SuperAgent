@@ -1145,7 +1145,7 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             provider = path[len("/api/oauth/"):-len("/callback")]
             self._handle_oauth_callback(provider, parse_qs(parsed.query or ""))
             return
-        if path == "/api/stream":
+        if path in ("/api/stream", "/stream"):
             params = parse_qs(parsed.query or "")
             run_id = (params.get("run_id") or [""])[0]
             if not run_id:
