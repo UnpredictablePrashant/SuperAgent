@@ -1,17 +1,25 @@
 """GitHub REST API client and local git operation wrapper for kendr's github_agent.
 
-Design note — synchronous implementation:
-    kendr is a fully synchronous multi-agent runtime (no asyncio event loop).
-    All agents, tools, and infra helpers use blocking I/O throughout.
-    This client intentionally mirrors that contract: urllib.request for HTTP
-    and subprocess.run for git.  Wrapping it in asyncio would require thread
-    executors or a separate event loop and would add complexity with no benefit
-    in the kendr context.  If kendr ever migrates to an async runtime this
-    module should be ported to httpx/asyncio at that time.
+Architecture — async-first with sync bridge:
+    REST API calls are implemented in ``AsyncGitHubClient`` using Python's
+    standard-library ``asyncio`` with thread-executor offloading for the
+    blocking ``urllib.request`` calls.  This gives a true async interface for
+    callers that run inside an event loop.
+
+    ``GitHubClient`` is a thin synchronous bridge that delegates every REST
+    method to its async counterpart via ``asyncio.run()``.  kendr's multi-agent
+    runtime is fully synchronous (no running event loop), so ``asyncio.run()``
+    is always safe here.  Any future migration to an async runtime can simply
+    use ``AsyncGitHubClient`` directly.
+
+    Local git operations (subprocess) remain synchronous in both classes
+    because subprocess.run() is not made meaningfully faster by wrapping in
+    asyncio, and git commands are short-lived.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -25,8 +33,14 @@ GITHUB_API_BASE = "https://api.github.com"
 _DEFAULT_TIMEOUT = 30
 
 
-class GitHubClient:
-    """Thin wrapper around the GitHub REST API plus local git operations."""
+class AsyncGitHubClient:
+    """Async GitHub REST API wrapper.
+
+    All REST methods are ``async def`` and run HTTP I/O in a thread executor so
+    callers inside an event loop are never blocked.  Local git operations are
+    provided as regular (synchronous) methods because subprocess is
+    process-level and not meaningfully improved by async wrapping.
+    """
 
     def __init__(self, token: str | None = None, api_base: str = GITHUB_API_BASE) -> None:
         self.token = token or os.getenv("GITHUB_TOKEN") or ""
@@ -42,7 +56,7 @@ class GitHubClient:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
 
-    def _request(self, method: str, path: str, body: dict | None = None, timeout: int = _DEFAULT_TIMEOUT) -> Any:
+    def _request_sync(self, method: str, path: str, body: dict | None, timeout: int) -> Any:
         url = f"{self.api_base}/{path.lstrip('/')}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = Request(url, data=data, headers=self._headers(), method=method)
@@ -54,50 +68,51 @@ class GitHubClient:
             err_body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"GitHub API {method} {path} → HTTP {exc.code}: {err_body}") from exc
 
-    def _get(self, path: str, timeout: int = _DEFAULT_TIMEOUT) -> Any:
-        return self._request("GET", path, timeout=timeout)
+    async def _request(self, method: str, path: str, body: dict | None = None, timeout: int = _DEFAULT_TIMEOUT) -> Any:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._request_sync, method, path, body, timeout)
 
-    def _post(self, path: str, body: dict) -> Any:
-        return self._request("POST", path, body=body)
+    async def _get(self, path: str, timeout: int = _DEFAULT_TIMEOUT) -> Any:
+        return await self._request("GET", path, timeout=timeout)
 
-    def _put(self, path: str, body: dict | None = None) -> Any:
-        return self._request("PUT", path, body=body or {})
+    async def _post(self, path: str, body: dict) -> Any:
+        return await self._request("POST", path, body=body)
 
-    def get_repo(self, owner: str, repo: str) -> dict:
-        return self._get(f"/repos/{owner}/{repo}")
+    async def _put(self, path: str, body: dict | None = None) -> Any:
+        return await self._request("PUT", path, body=body or {})
 
-    def test_connection(self) -> dict:
-        """Test the stored token by calling GET /user.
+    async def get_repo(self, owner: str, repo: str) -> dict:
+        return await self._get(f"/repos/{owner}/{repo}")
 
-        Returns a dict with ``ok`` (bool) and ``login`` / ``error`` (str) fields.
-        """
+    async def test_connection(self) -> dict:
+        """Test the stored token by calling GET /user."""
         if not self.token:
             return {"ok": False, "error": "GITHUB_TOKEN is not configured."}
         try:
-            user = self._get("/user")
+            user = await self._get("/user")
             login = str(user.get("login") or "")
             return {"ok": True, "login": login, "detail": f"Authenticated as {login}"}
         except RuntimeError as exc:
             return {"ok": False, "error": str(exc)}
 
-    def list_issues(self, owner: str, repo: str, state: str = "open", per_page: int = 30) -> list[dict]:
-        result = self._get(f"/repos/{owner}/{repo}/issues?state={state}&per_page={per_page}")
+    async def list_issues(self, owner: str, repo: str, state: str = "open", per_page: int = 30) -> list[dict]:
+        result = await self._get(f"/repos/{owner}/{repo}/issues?state={state}&per_page={per_page}")
         return result if isinstance(result, list) else []
 
-    def get_issue(self, owner: str, repo: str, number: int) -> dict:
-        return self._get(f"/repos/{owner}/{repo}/issues/{number}")
+    async def get_issue(self, owner: str, repo: str, number: int) -> dict:
+        return await self._get(f"/repos/{owner}/{repo}/issues/{number}")
 
-    def add_comment(self, owner: str, repo: str, issue_number: int, body: str) -> dict:
-        return self._post(f"/repos/{owner}/{repo}/issues/{issue_number}/comments", {"body": body})
+    async def add_comment(self, owner: str, repo: str, issue_number: int, body: str) -> dict:
+        return await self._post(f"/repos/{owner}/{repo}/issues/{issue_number}/comments", {"body": body})
 
-    def list_pull_requests(self, owner: str, repo: str, state: str = "open") -> list[dict]:
-        result = self._get(f"/repos/{owner}/{repo}/pulls?state={state}&per_page=30")
+    async def list_pull_requests(self, owner: str, repo: str, state: str = "open") -> list[dict]:
+        result = await self._get(f"/repos/{owner}/{repo}/pulls?state={state}&per_page=30")
         return result if isinstance(result, list) else []
 
-    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict:
-        return self._get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
+    async def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict:
+        return await self._get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
 
-    def create_pull_request(
+    async def create_pull_request(
         self,
         owner: str,
         repo: str,
@@ -106,12 +121,12 @@ class GitHubClient:
         head: str,
         base: str = "main",
     ) -> dict:
-        return self._post(
+        return await self._post(
             f"/repos/{owner}/{repo}/pulls",
             {"title": title, "body": body, "head": head, "base": base},
         )
 
-    def merge_pull_request(
+    async def merge_pull_request(
         self,
         owner: str,
         repo: str,
@@ -122,10 +137,10 @@ class GitHubClient:
         payload: dict[str, str] = {"merge_method": merge_method}
         if commit_title:
             payload["commit_title"] = commit_title
-        return self._put(f"/repos/{owner}/{repo}/pulls/{pr_number}/merge", payload)
+        return await self._put(f"/repos/{owner}/{repo}/pulls/{pr_number}/merge", payload)
 
-    def list_branches(self, owner: str, repo: str) -> list[dict]:
-        result = self._get(f"/repos/{owner}/{repo}/branches?per_page=50")
+    async def list_branches(self, owner: str, repo: str) -> list[dict]:
+        result = await self._get(f"/repos/{owner}/{repo}/branches?per_page=50")
         return result if isinstance(result, list) else []
 
     def _git_env(self) -> dict[str, str]:
@@ -145,7 +160,6 @@ class GitHubClient:
         return env
 
     def _run_git(self, args: list[str], cwd: Path, timeout: int = 120) -> str:
-        env = self._git_env()
         result = subprocess.run(
             ["git"] + args,
             cwd=str(cwd),
@@ -153,7 +167,7 @@ class GitHubClient:
             text=True,
             timeout=timeout,
             check=False,
-            env=env,
+            env=self._git_env(),
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -162,30 +176,24 @@ class GitHubClient:
         return result.stdout.strip()
 
     def clone_repo(self, clone_url: str, to_dir: Path, depth: int = 0) -> Path:
-        """Clone a repository to *to_dir*. Returns the cloned directory path."""
         args = ["clone"]
         if depth:
             args += ["--depth", str(depth)]
         args += [clone_url, str(to_dir)]
-        env = self._git_env()
         result = subprocess.run(
             ["git"] + args,
             capture_output=True,
             text=True,
             timeout=300,
             check=False,
-            env=env,
+            env=self._git_env(),
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git clone failed")
         return to_dir
 
     def clone_repo_authenticated(self, owner: str, repo: str, to_dir: Path, depth: int = 0) -> Path:
-        """Clone via HTTPS using the stored token injected as an HTTP Authorization header.
-
-        The token is passed through git's ``http.extraHeader`` config via environment
-        variables — it is never embedded in the remote URL and never stored in .git/config.
-        """
+        """Clone via HTTPS injecting the token as an HTTP Authorization header env-var."""
         clone_url = f"https://github.com/{owner}/{repo}.git"
         return self.clone_repo(clone_url, to_dir, depth=depth)
 
@@ -203,6 +211,18 @@ class GitHubClient:
 
     def diff_staged(self, repo_dir: Path) -> str:
         return self._run_git(["diff", "--cached"], repo_dir)
+
+    def has_uncommitted_changes(self, repo_dir: Path) -> bool:
+        """Return True if there are staged or unstaged changes in the working tree."""
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        return bool(result.stdout.strip())
 
     def commit(self, repo_dir: Path, message: str, add_all: bool = True) -> str:
         if add_all:
@@ -245,12 +265,12 @@ class GitHubClient:
 
     @staticmethod
     def read_repo_file(repo_dir: Path, relative_path: str) -> str:
-        target = GitHubClient._safe_repo_path(repo_dir, relative_path)
+        target = AsyncGitHubClient._safe_repo_path(repo_dir, relative_path)
         return target.read_text(encoding="utf-8")
 
     @staticmethod
     def write_repo_file(repo_dir: Path, relative_path: str, content: str) -> None:
-        target = GitHubClient._safe_repo_path(repo_dir, relative_path)
+        target = AsyncGitHubClient._safe_repo_path(repo_dir, relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
@@ -265,3 +285,58 @@ class GitHubClient:
             check=False,
         )
         return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+class GitHubClient(AsyncGitHubClient):
+    """Synchronous bridge over ``AsyncGitHubClient``.
+
+    Every async REST method is surfaced as a synchronous call via
+    ``asyncio.run()``.  This is safe because kendr's multi-agent runtime
+    does not maintain a running event loop on the calling thread.
+    Callers inside an event loop should use ``AsyncGitHubClient`` directly.
+    """
+
+    def test_connection(self) -> dict:
+        return asyncio.run(super().test_connection())
+
+    def get_repo(self, owner: str, repo: str) -> dict:
+        return asyncio.run(super().get_repo(owner, repo))
+
+    def list_issues(self, owner: str, repo: str, state: str = "open", per_page: int = 30) -> list[dict]:
+        return asyncio.run(super().list_issues(owner, repo, state=state, per_page=per_page))
+
+    def get_issue(self, owner: str, repo: str, number: int) -> dict:
+        return asyncio.run(super().get_issue(owner, repo, number))
+
+    def add_comment(self, owner: str, repo: str, issue_number: int, body: str) -> dict:
+        return asyncio.run(super().add_comment(owner, repo, issue_number, body))
+
+    def list_pull_requests(self, owner: str, repo: str, state: str = "open") -> list[dict]:
+        return asyncio.run(super().list_pull_requests(owner, repo, state=state))
+
+    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict:
+        return asyncio.run(super().get_pull_request(owner, repo, pr_number))
+
+    def create_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str = "main",
+    ) -> dict:
+        return asyncio.run(super().create_pull_request(owner, repo, title, body, head, base))
+
+    def merge_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        commit_title: str = "",
+        merge_method: str = "merge",
+    ) -> dict:
+        return asyncio.run(super().merge_pull_request(owner, repo, pr_number, commit_title, merge_method))
+
+    def list_branches(self, owner: str, repo: str) -> list[dict]:
+        return asyncio.run(super().list_branches(owner, repo))

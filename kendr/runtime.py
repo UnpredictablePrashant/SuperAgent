@@ -931,11 +931,7 @@ class AgentRuntime:
         if any(m in text for m in strong_markers):
             return True
 
-        repo_pattern_present = bool(
-            __import__("re").search(r"\bgithub\.com/[\w.-]+/[\w.-]+", text)
-            or __import__("re").search(r"\b[\w.-]+/[\w.-]+\s+repo(sitory)?\b", text)
-        )
-        if repo_pattern_present:
+        if "github.com/" in text and "/" in text.split("github.com/", 1)[-1]:
             return True
 
         return False
