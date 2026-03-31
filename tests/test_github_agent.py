@@ -54,6 +54,21 @@ class TestGitHubRouting(unittest.TestCase):
             {"user_query": "fix github.com/octocat/hello-world"}
         ))
 
+    def test_canonical_fix_and_pr_phrase_routes_to_github(self):
+        rt = self._make_runtime()
+        canonical_phrases = [
+            "fix the broken test in repo acme/api and open a pull request",
+            "fix broken test in acme/api and open a pr",
+            "clone the repo acme/service and fix the failing test, then open a pr",
+            "git clone github.com/acme/service and fix the test",
+        ]
+        for phrase in canonical_phrases:
+            with self.subTest(phrase=phrase):
+                self.assertTrue(
+                    rt._is_github_request({"user_query": phrase}),
+                    f"Expected routing to github_agent for: {phrase}",
+                )
+
     def test_generic_requests_not_misrouted(self):
         rt = self._make_runtime()
         false_positive_cases = [

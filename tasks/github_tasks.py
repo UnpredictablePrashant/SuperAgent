@@ -336,6 +336,12 @@ def _execute_operations(
                 body = str(params.get("body") or "Automated PR created by kendr's github_agent.")
                 head = str(params.get("head") or client.current_branch(repo_dir))
                 base = str(params.get("base") or "main")
+                if repo_dir.exists() and not client.is_branch_ahead_of_base(repo_dir, head, base):
+                    log_lines.append(
+                        f"create_pr: WARNING — branch '{head}' has no commits ahead of '{base}'. "
+                        "The PR API call will proceed but may be rejected by GitHub "
+                        "(\"no commits between base and head\")."
+                    )
                 log_task_update("GitHub Agent", f"Opening PR: {title} …")
                 pr = client.create_pull_request(owner, repo, title, body, head, base)
                 pr_url = pr.get("html_url", "")
@@ -386,6 +392,14 @@ def github_agent(state):
 
     token = state.get("github_token") or os.getenv("GITHUB_TOKEN") or ""
     api_base = os.getenv("GITHUB_API_URL", "https://api.github.com")
+
+    if not token:
+        log_task_update(
+            "GitHub Agent",
+            "WARNING: GITHUB_TOKEN is not set. Clone, push, and PR operations against "
+            "private repos will fail. Set GITHUB_TOKEN via `kendr setup set github`.",
+        )
+
     client = GitHubClient(token=token, api_base=api_base)
 
     owner = str(state.get("github_owner") or "").strip()

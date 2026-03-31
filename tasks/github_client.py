@@ -229,6 +229,28 @@ class AsyncGitHubClient:
         )
         return bool(result.stdout.strip())
 
+    def is_branch_ahead_of_base(self, repo_dir: Path, head: str, base: str) -> bool:
+        """Return True when *head* has at least one commit not present in *base*.
+
+        Uses ``git log <base>..<head> --oneline`` to check for commits ahead.
+        Returns True if the check cannot be performed (e.g. base branch unknown),
+        so the PR creation attempt is not blocked by an unavailable base ref.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "log", f"{base}..{head}", "--oneline"],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if result.returncode != 0:
+                return True
+            return bool(result.stdout.strip())
+        except Exception:
+            return True
+
     def commit(self, repo_dir: Path, message: str, add_all: bool = True) -> str:
         if add_all:
             self._run_git(["add", "-A"], repo_dir)
