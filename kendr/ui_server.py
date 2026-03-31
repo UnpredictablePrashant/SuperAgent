@@ -1006,7 +1006,7 @@ class KendrUIHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    _CORS_SAFE_PREFIXES = ("/api/stream", "/stream", "/api/runs/", "/api/artifacts/")
+    _CORS_SAFE_PREFIXES = ("/api/stream", "/stream")
 
     def _send(self, status: int, content_type: str, body: bytes, cors: bool = False) -> None:
         self.send_response(status)
