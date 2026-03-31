@@ -1681,6 +1681,24 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
     run_parser.add_argument("--chat-id", default="", help="Chat/thread id used for session routing.")
     run_parser.add_argument("--session-key", default="", help="Explicit session key (channel:workspace:chat:scope).")
     run_parser.add_argument("--new-session", action="store_true", help="Force creation of a fresh session for this run.")
+    run_parser.add_argument(
+        "--sources",
+        default="",
+        help=(
+            "Comma-separated list of research sources for the multi-source pipeline. "
+            "Supported: web, arxiv, reddit, scholar, patents, openalex. "
+            "Example: --sources web,arxiv,reddit"
+        ),
+    )
+    run_parser.add_argument(
+        "--pages",
+        type=int,
+        default=0,
+        help=(
+            "Target page count for long-form document output. "
+            "Implies --long-document mode. Example: --pages 50"
+        ),
+    )
 
     agent_list = subparsers.add_parser("agents", help="List or inspect discovered agents.")
     command_parsers["agents"] = agent_list
@@ -1916,6 +1934,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
             base_ingest_payload["long_document_collect_sources_first"] = True
     if int(args.long_document_pages or 0) > 0:
         base_ingest_payload["long_document_pages"] = int(args.long_document_pages)
+    if int(getattr(args, "pages", 0) or 0) > 0:
+        base_ingest_payload["long_document_mode"] = True
+        base_ingest_payload["long_document_pages"] = int(args.pages)
+        if not bool(getattr(args, "long_document_no_collect_sources", False)):
+            base_ingest_payload["long_document_collect_sources_first"] = True
+    if str(getattr(args, "sources", "") or "").strip():
+        parsed_sources = [
+            s.strip().lower()
+            for s in str(args.sources).split(",")
+            if s.strip()
+        ]
+        if parsed_sources:
+            base_ingest_payload["research_sources"] = parsed_sources
+            base_ingest_payload["research_pipeline_enabled"] = True
     if int(args.long_document_sections or 0) > 0:
         base_ingest_payload["long_document_sections"] = int(args.long_document_sections)
     if int(args.long_document_section_pages or 0) > 0:

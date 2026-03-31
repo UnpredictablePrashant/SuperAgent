@@ -29,6 +29,8 @@ DEFAULT_QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 DEFAULT_QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "research_memory")
 SERP_API_URL = "https://serpapi.com/search.json"
 OPENALEX_API_URL = "https://api.openalex.org/works"
+ARXIV_API_URL = "http://export.arxiv.org/api/query"
+REDDIT_BASE_URL = "https://www.reddit.com"
 IMAGE_FILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
 LOCAL_DRIVE_SUPPORTED_EXTENSIONS = {
     ".txt",
@@ -272,6 +274,100 @@ def openalex_search(query: str, per_page: int = 10, filters: str | None = None) 
     )
     with urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def arxiv_search(query: str, max_results: int = 10, sort_by: str = "relevance") -> list[dict]:
+    """Search arXiv for academic papers using the public Atom feed API (no API key required)."""
+    params = {
+        "search_query": f"all:{query}",
+        "start": 0,
+        "max_results": max(1, min(50, max_results)),
+        "sortBy": sort_by,
+        "sortOrder": "descending",
+    }
+    request = Request(
+        f"{ARXIV_API_URL}?{urlencode(params)}",
+        headers={"User-Agent": os.getenv("RESEARCH_USER_AGENT", "multi-agent-research-bot/1.0 (+https://localhost)")},
+    )
+    with urlopen(request, timeout=30) as response:
+        xml_data = response.read().decode("utf-8")
+    root = ET.fromstring(xml_data)
+    ns = {
+        "atom": "http://www.w3.org/2005/Atom",
+        "arxiv": "http://arxiv.org/schemas/atom",
+    }
+    entries = []
+    for entry in root.findall("atom:entry", ns):
+        title = (entry.findtext("atom:title", "", ns) or "").strip().replace("\n", " ")
+        summary = (entry.findtext("atom:summary", "", ns) or "").strip().replace("\n", " ")
+        arxiv_url = (entry.findtext("atom:id", "", ns) or "").strip()
+        authors = [
+            (a.findtext("atom:name", "", ns) or "").strip()
+            for a in entry.findall("atom:author", ns)
+        ]
+        published = (entry.findtext("atom:published", "", ns) or "").strip()
+        categories = [c.attrib.get("term", "") for c in entry.findall("atom:category", ns)]
+        entries.append(
+            {
+                "title": title,
+                "summary": summary[:800],
+                "url": arxiv_url,
+                "authors": [a for a in authors if a][:6],
+                "published": published,
+                "categories": [c for c in categories if c][:5],
+                "source": "arxiv",
+            }
+        )
+    return entries
+
+
+def reddit_search(
+    query: str,
+    subreddit: str = "",
+    sort: str = "relevance",
+    limit: int = 10,
+) -> list[dict]:
+    """Search Reddit posts using the public JSON search API (no authentication required)."""
+    subreddit = str(subreddit or "").strip().lstrip("r/")
+    base = f"{REDDIT_BASE_URL}/r/{subreddit}" if subreddit else REDDIT_BASE_URL
+    params = {
+        "q": query,
+        "sort": sort,
+        "limit": max(1, min(100, limit)),
+        "type": "link",
+        "raw_json": 1,
+    }
+    url = f"{base}/search.json?{urlencode(params)}"
+    request = Request(
+        url,
+        headers={"User-Agent": os.getenv("RESEARCH_USER_AGENT", "multi-agent-research-bot/1.0 (+https://localhost)")},
+    )
+    with urlopen(request, timeout=30) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    posts = []
+    for child in data.get("data", {}).get("children", []) or []:
+        item = child.get("data", {})
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        selftext = str(item.get("selftext") or "").strip()[:800]
+        permalink = str(item.get("permalink") or "").strip()
+        post_url = f"https://www.reddit.com{permalink}" if permalink.startswith("/") else permalink
+        subreddit_name = str(item.get("subreddit") or "").strip()
+        score = int(item.get("score") or 0)
+        num_comments = int(item.get("num_comments") or 0)
+        posts.append(
+            {
+                "title": title,
+                "text": selftext,
+                "url": post_url,
+                "subreddit": subreddit_name,
+                "score": score,
+                "num_comments": num_comments,
+                "source": "reddit",
+            }
+        )
+    return posts
 
 
 def search_result_urls(payload: dict) -> list[str]:

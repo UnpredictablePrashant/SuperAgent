@@ -4,11 +4,13 @@ import os
 from fastmcp import FastMCP
 
 from tasks.research_infra import (
+    arxiv_search,
     crawl_urls,
     llm_json,
     llm_text,
     openai_ocr_image,
     parse_document,
+    reddit_search,
     search_result_urls,
     serp_search,
     summarize_pages,
@@ -56,6 +58,18 @@ def ingest_document(path: str) -> dict:
 @mcp.tool
 def ocr_image(path: str, instruction: str = "") -> dict:
     return openai_ocr_image(path, instruction or None)
+
+
+@mcp.tool
+def arxiv_papers(query: str, max_results: int = 10, sort_by: str = "relevance") -> dict:
+    papers = arxiv_search(query, max_results=max_results, sort_by=sort_by)
+    return {"query": query, "count": len(papers), "papers": papers}
+
+
+@mcp.tool
+def reddit_posts(query: str, subreddit: str = "", sort: str = "relevance", limit: int = 10) -> dict:
+    posts = reddit_search(query, subreddit=subreddit, sort=sort, limit=limit)
+    return {"query": query, "subreddit": subreddit or "all", "count": len(posts), "posts": posts}
 
 
 @mcp.tool

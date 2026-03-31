@@ -47,3 +47,28 @@ pip install -e ".[dev]"
 ```
 
 Key dependencies: `langgraph`, `langchain`, `langchain-openai`, `openai`, `fastmcp`, `qdrant-client`, `playwright`, `boto3`, `telethon`
+
+## Task #2: Deep Research & Document Generation Pipeline
+
+New capabilities added:
+
+### New functions in `tasks/research_infra.py`
+- **`arxiv_search(query, max_results, sort_by)`** — Fetches academic papers from the arXiv Atom API (no API key required)
+- **`reddit_search(query, subreddit, sort, limit)`** — Fetches Reddit posts from the public JSON search API (no auth required)
+
+### New file: `tasks/research_pipeline_tasks.py`
+- **`research_pipeline_agent(state)`** — Orchestrates multi-source evidence collection from any combination of: `web`, `arxiv`, `reddit`, `scholar`, `patents`, `openalex`
+- Builds a combined markdown evidence report with formatted results per source
+- Populates `long_document_evidence_bank_*` state keys when `long_document_collect_sources_first` is set
+
+### CLI additions to `kendr/cli.py`
+- **`--sources web,arxiv,reddit`** — Comma-separated source list for the research pipeline; sets `research_sources` in state
+- **`--pages 50`** — Shorthand for `--long-document --long-document-pages 50`; implies long-form document mode
+
+### State additions in `kendr/orchestration/state.py`
+- `research_sources: list[str]`
+- `research_pipeline_enabled: bool`
+
+### MCP server updates in `mcp_servers/research_server.py`
+- New `arxiv_papers` tool — fetches arXiv papers via MCP
+- New `reddit_posts` tool — fetches Reddit posts via MCP

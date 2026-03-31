@@ -104,6 +104,8 @@ class RuntimeState(TypedDict, total=False):
     long_document_compiled_docx_path: str
     long_document_compiled_pdf_path: str
     research_heartbeat_seconds: int
+    research_sources: list[str]
+    research_pipeline_enabled: bool
     user_cancelled: bool
 
 
