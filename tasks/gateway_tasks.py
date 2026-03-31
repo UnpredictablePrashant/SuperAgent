@@ -3,7 +3,7 @@ import json
 import os
 import re
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
@@ -25,7 +25,7 @@ from tasks.utils import log_task_update, resolve_output_path, write_text_file
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _write_outputs(agent_name: str, call_number: int, summary: str, payload: dict):
@@ -472,7 +472,7 @@ def scheduler_agent(state):
     if schedule_time:
         next_run_at = schedule_time
     elif state.get("schedule_in_minutes") is not None:
-        next_run_at = (datetime.now(UTC) + timedelta(minutes=int(state["schedule_in_minutes"]))).isoformat()
+        next_run_at = (datetime.now(timezone.utc) + timedelta(minutes=int(state["schedule_in_minutes"]))).isoformat()
     else:
         next_run_at = ""
 

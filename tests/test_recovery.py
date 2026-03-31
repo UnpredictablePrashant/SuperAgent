@@ -1,7 +1,7 @@
 import json
 import os
 import unittest
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -70,7 +70,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
             manifest_path = os.path.join(run_dir, RUN_MANIFEST_FILE)
             with open(manifest_path, encoding="utf-8") as handle:
                 manifest = json.loads(handle.read())
-            manifest["summary"]["updated_at"] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+            manifest["summary"]["updated_at"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
             with open(manifest_path, "w", encoding="utf-8") as handle:
                 json.dump(manifest, handle, indent=2, ensure_ascii=False)
 

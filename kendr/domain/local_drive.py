@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import os
 import re
 from pathlib import Path
@@ -163,7 +163,7 @@ def _is_hidden_path(path: Path) -> bool:
 
 def _iso_timestamp(value: float) -> str:
     try:
-        return datetime.fromtimestamp(value, UTC).isoformat()
+        return datetime.fromtimestamp(value, timezone.utc).isoformat()
     except Exception:
         return ""
 

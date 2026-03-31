@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from kendr.persistence import insert_artifact, insert_message, upsert_agent_card, upsert_task
 
 
 def _utc_timestamp() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def make_agent_card(
@@ -30,7 +30,7 @@ def make_agent_card(
 
 def make_message(sender: str, recipient: str, role: str, content: str) -> dict:
     return {
-        "message_id": f"msg_{datetime.now(UTC).timestamp()}",
+        "message_id": f"msg_{datetime.now(timezone.utc).timestamp()}",
         "timestamp": _utc_timestamp(),
         "sender": sender,
         "recipient": recipient,
@@ -42,7 +42,7 @@ def make_message(sender: str, recipient: str, role: str, content: str) -> dict:
 def make_artifact(name: str, kind: str, content: str, metadata: dict | None = None) -> dict:
     timestamp = _utc_timestamp()
     return {
-        "artifact_id": f"artifact_{datetime.now(UTC).timestamp()}",
+        "artifact_id": f"artifact_{datetime.now(timezone.utc).timestamp()}",
         "timestamp": timestamp,
         "name": name,
         "kind": kind,
@@ -59,7 +59,7 @@ def make_task(
     state_updates: dict | None = None,
 ) -> dict:
     return {
-        "task_id": f"task_{datetime.now(UTC).timestamp()}",
+        "task_id": f"task_{datetime.now(timezone.utc).timestamp()}",
         "timestamp": _utc_timestamp(),
         "sender": sender,
         "recipient": recipient,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 
@@ -10,15 +10,15 @@ DEFAULT_WORKSPACE_DIR = os.getenv("KENDR_MEMORY_WORKSPACE", os.path.join("output
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _today_utc() -> str:
-    return datetime.now(UTC).date().isoformat()
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _yesterday_utc() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
+    return (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
 
 
 def _safe_slug(value: str, default: str = "unknown") -> str:

@@ -1,0 +1,63 @@
+modules = ["python-3.10", "nodejs-20", "bash"]
+[agent]
+expertMode = true
+
+[nix]
+channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+SETUP_UI_HOST = "0.0.0.0"
+SETUP_UI_PORT = "5000"
+GATEWAY_HOST = "0.0.0.0"
+GATEWAY_PORT = "8000"
+KENDR_WORKING_DIR = "output/workspace"
+KENDR_HOME = "/home/runner/.kendr"
+OUTPUT_DIR = "output"
+RESEARCH_USER_AGENT = "multi-agent-research-bot/1.0"
+OPENAI_MODEL_GENERAL = "gpt-4o-mini"
+OPENAI_MODEL = "gpt-4o-mini"
+OPENAI_VISION_MODEL = "gpt-4o-mini"
+OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
+QDRANT_URL = "http://127.0.0.1:6333"
+QDRANT_COLLECTION = "research_memory"
+KENDR_PRIVILEGED_MODE = "false"
+KENDR_REQUIRE_APPROVALS = "true"
+KENDR_READ_ONLY_MODE = "false"
+KENDR_ALLOW_ROOT = "false"
+KENDR_ALLOW_DESTRUCTIVE = "false"
+KENDR_ENABLE_BACKUPS = "true"
+KENDR_KILL_SWITCH_FILE = "output/KENDR_STOP"
+DAEMON_POLL_INTERVAL = "30"
+DAEMON_HEARTBEAT_INTERVAL = "300"
+SECURITY_SCAN_PROFILE = "standard"
+SECURITY_AUTO_INSTALL_TOOLS = "true"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "SETUP_UI_HOST=0.0.0.0 SETUP_UI_PORT=5000 python3 setup_ui.py"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[ports]]
+localPort = 5000
+externalPort = 80

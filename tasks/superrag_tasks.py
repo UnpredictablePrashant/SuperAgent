@@ -5,7 +5,7 @@ import json
 import os
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -72,7 +72,7 @@ AGENT_METADATA = {
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_slug(value: str, default: str = "session") -> str:
@@ -225,7 +225,7 @@ def _discover_local_files(
 
 def _default_session_id(state: dict) -> str:
     owner = _safe_slug(_owner_key(state), default="owner").replace(":", "_")
-    return f"{owner}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+    return f"{owner}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
 
 def _ensure_session(state: dict, *, requested_session_id: str = "", create_if_missing: bool = True) -> dict:
@@ -708,7 +708,7 @@ def _summarize_session(session: dict) -> str:
 def _build_mode(state: dict, task_content: str, call_number: int) -> tuple[str, dict]:
     requested_session = str(state.get("superrag_session_id") or _extract_session_from_text(task_content) or "").strip()
     if bool(state.get("superrag_new_session", False)):
-        requested_session = f"{_safe_slug(requested_session or _default_session_id(state), default='session')}_{datetime.now(UTC).strftime('%H%M%S')}"
+        requested_session = f"{_safe_slug(requested_session or _default_session_id(state), default='session')}_{datetime.now(timezone.utc).strftime('%H%M%S')}"
 
     session = _ensure_session(state, requested_session_id=requested_session, create_if_missing=True)
     session_id = session.get("session_id", _default_session_id(state))

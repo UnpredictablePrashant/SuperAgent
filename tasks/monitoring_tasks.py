@@ -5,7 +5,7 @@ import io
 import json
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -42,7 +42,7 @@ AGENT_METADATA = {
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _write_outputs(agent_name: str, call_number: int, summary: str, payload: dict):

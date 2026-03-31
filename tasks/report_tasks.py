@@ -2,7 +2,7 @@ import json
 import re
 import textwrap
 import zipfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from html import escape
 from io import BytesIO
 from pathlib import Path
@@ -504,7 +504,7 @@ def _render_xlsx_bytes(report_data: dict, generated_at: str) -> bytes:
         '</styleSheet>'
     )
 
-    created_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     core_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
@@ -553,7 +553,7 @@ def report_agent(state):
     )
     report_title = state.get("report_title") or f"Workflow Report {call_number}"
     report_formats = _normalize_formats(state.get("report_formats"), requirement_text)
-    generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     context = _collect_report_context(state)
     target_pages = int(state.get("report_target_pages", 0) or 0)

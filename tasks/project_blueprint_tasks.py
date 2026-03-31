@@ -10,7 +10,7 @@ generated.  Once approved it feeds into the planner and builder agents.
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
@@ -593,7 +593,7 @@ def _unique_project_name(base_name: str, state: dict, working_directory: str) ->
     run_id = str(state.get("run_id", "") or "").strip()
     suffix = re.sub(r"[^a-zA-Z0-9]+", "", run_id)[-6:]
     if not suffix:
-        suffix = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     candidate = f"{base_name}-{suffix}"
     root = Path(working_directory).expanduser().resolve()
     unique = candidate

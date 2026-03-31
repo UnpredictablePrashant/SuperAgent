@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, NotRequired, TypedDict
+from typing import Any, Mapping, TypedDict
+try:
+    from typing import NotRequired
+except ImportError:
+    from typing_extensions import NotRequired
 
 
 class PlanStep(TypedDict, total=False):

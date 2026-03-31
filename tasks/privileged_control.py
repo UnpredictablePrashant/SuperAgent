@@ -7,7 +7,7 @@ import re
 import shutil
 import tarfile
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from kendr.persistence import insert_privileged_audit_event
@@ -182,7 +182,7 @@ def ensure_command_allowed(command: str, working_directory: str, policy: dict) -
 def create_backup_snapshot(state: dict, *, source_dir: str, reason: str) -> str:
     run_id = str(state.get("run_id", "no-run-id"))
     source = Path(source_dir).expanduser().resolve()
-    snapshot_name = f"snapshot_{run_id}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.tar.gz"
+    snapshot_name = f"snapshot_{run_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.tar.gz"
     snapshots_dir = Path("output").resolve() / "privileged_snapshots"
     snapshots_dir.mkdir(parents=True, exist_ok=True)
     target = snapshots_dir / snapshot_name
@@ -241,7 +241,7 @@ def _last_audit_hash(path: Path) -> str:
 def append_privileged_audit_event(state: dict, *, actor: str, action: str, status: str, detail: dict) -> dict:
     event_id = f"audit_{uuid.uuid4().hex}"
     run_id = str(state.get("run_id", ""))
-    timestamp = datetime.now(UTC).isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     run_output_dir = str(state.get("run_output_dir", "")).strip()
     base_dir = Path(run_output_dir).resolve() if run_output_dir else Path("output").resolve()
     base_dir.mkdir(parents=True, exist_ok=True)

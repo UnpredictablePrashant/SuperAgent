@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.research_infra import llm_text
@@ -211,7 +211,7 @@ def aws_cost_agent(state):
 
     session = _get_boto3_session(state)
     ce = _client(session, "ce", state)
-    end_date = datetime.now(UTC).date()
+    end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=int(state.get("aws_cost_days", 30)))
     granularity = state.get("aws_cost_granularity", "MONTHLY")
     metrics = state.get("aws_cost_metrics") or ["UnblendedCost"]

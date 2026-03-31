@@ -4,7 +4,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -220,7 +220,7 @@ def record_work_note(state: dict | None, actor: str, stage: str, details: str):
     if state and state.get("work_notes_file"):
         filename = state["work_notes_file"]
 
-    timestamp = datetime.now(UTC).isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     run_id = state.get("run_id", "no-run-id") if state else "no-run-id"
     note = (
         f"[{timestamp}] run={run_id} actor={actor} stage={stage}\n"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from kendr.persistence import initialize_db, list_monitor_rules
@@ -82,7 +82,7 @@ def run_daemon(*, poll_interval_seconds: int = 30, heartbeat_interval_seconds: i
     last_heartbeat_at: datetime | None = None
 
     while True:
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         if heartbeat_agent and (
             last_heartbeat_at is None or now >= last_heartbeat_at + timedelta(seconds=heartbeat_interval_seconds)
         ):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,7 @@ _STATE_BLACKLIST = {
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_json(value: Any) -> Any:
@@ -91,7 +91,7 @@ def _classify_status(summary: dict[str, Any], *, stale_after_seconds: int = DEFA
     updated_at = _parse_iso(str(summary.get("updated_at", "") or ""))
     if raw_status == "running":
         if updated_at:
-            age = (datetime.now(UTC) - updated_at).total_seconds()
+            age = (datetime.now(timezone.utc) - updated_at).total_seconds()
             if age >= max(60, stale_after_seconds):
                 return "running_stale", True, True, "takeover_resume"
         return "running", False, True, "takeover_required"

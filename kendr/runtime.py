@@ -4,7 +4,7 @@ import json
 import os
 import uuid
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -473,7 +473,7 @@ class AgentRuntime:
         )
 
     def _append_history(self, state: dict, agent_name: str, status: str, reason: str, output_text: str) -> dict:
-        timestamp = datetime.now(UTC).isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         history = state.get("agent_history", [])
         history.append(
             {
@@ -503,7 +503,7 @@ class AgentRuntime:
             "channel": state.get("incoming_channel", ""),
             "session_key": channel_session.get("session_key", ""),
             "started_at": state.get("session_started_at", ""),
-            "updated_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "completed_at": completed_at,
             "status": status,
             "active_agent": active_agent,
@@ -581,7 +581,7 @@ class AgentRuntime:
         if status == "completed":
             history.append(
                 {
-                    "timestamp": datetime.now(UTC).isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "run_id": state.get("run_id", ""),
                     "objective": state.get("current_objective", state.get("user_query", "")),
                     "final_output": self._truncate(state.get("final_output") or state.get("draft_response") or "", 600),
@@ -595,7 +595,7 @@ class AgentRuntime:
             "sender_id": state.get("incoming_sender_id", ""),
             "workspace_id": state.get("incoming_workspace_id", ""),
             "is_group": bool(state.get("incoming_is_group", False)),
-            "updated_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "state": {
                 **previous_state,
                 "last_text": state.get("user_query", ""),
@@ -671,7 +671,7 @@ class AgentRuntime:
         update_run(
             run_id,
             status=status,
-            updated_at=datetime.now(UTC).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
             working_directory=str(state.get("working_directory", "")).strip(),
             run_output_dir=str(state.get("run_output_dir", "")).strip(),
             session_id=str(state.get("session_id", "")).strip(),
@@ -684,7 +684,7 @@ class AgentRuntime:
                 {
                     "checkpoint_id": f"{run_id}_{uuid.uuid4().hex}",
                     "run_id": run_id,
-                    "created_at": datetime.now(UTC).isoformat(),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                     "checkpoint_kind": "session_update",
                     "step_index": int(state.get("plan_step_index", 0) or 0),
                     "status": status,
@@ -923,7 +923,7 @@ class AgentRuntime:
         block_reason = self._resume_block_reason(error_message)
         can_resume = not bool(block_reason)
         return {
-            "failed_at": datetime.now(UTC).isoformat(),
+            "failed_at": datetime.now(timezone.utc).isoformat(),
             "agent": agent_name,
             "step_index": step_index,
             "task_id": active_task.get("task_id") if isinstance(active_task, dict) else "",
@@ -2064,7 +2064,7 @@ Return ONLY valid JSON in this exact schema:
             logger.warning(f"Skipping graph export: {exc}")
 
     def new_run_id(self) -> str:
-        return f"run_{datetime.now(UTC).timestamp()}"
+        return f"run_{datetime.now(timezone.utc).timestamp()}"
 
     def _restore_pending_user_input(self, initial_state: RuntimeState, prior_channel_state: Mapping[str, Any], user_query: str) -> None:
         pending_kind = str(prior_channel_state.get("pending_user_input_kind", "") or "").strip()
@@ -2349,7 +2349,7 @@ Return ONLY valid JSON in this exact schema:
 
     def build_initial_state(self, user_query: str, **overrides: Any) -> RuntimeState:
         resolved_run_id = overrides.get("run_id", self.new_run_id())
-        session_started_at = overrides.get("session_started_at") or datetime.now(UTC).isoformat()
+        session_started_at = overrides.get("session_started_at") or datetime.now(timezone.utc).isoformat()
         initial_state: RuntimeState = {
             "run_id": resolved_run_id,
             "session_id": overrides.get("session_id") or f"session_{resolved_run_id}",
@@ -2608,7 +2608,7 @@ Return ONLY valid JSON in this exact schema:
                 overrides["channel_session"] = existing_channel_session
         working_directory = self._resolve_working_directory(overrides)
         run_id = overrides.get("run_id", self.new_run_id())
-        started_at = datetime.now(UTC).isoformat()
+        started_at = datetime.now(timezone.utc).isoformat()
         requested_output_dir = str(overrides.get("resume_output_dir") or overrides.get("run_output_dir") or "").strip()
         if requested_output_dir:
             run_output_dir = set_active_output_dir(str(Path(requested_output_dir).expanduser().resolve()), append=True)
@@ -2656,7 +2656,7 @@ Return ONLY valid JSON in this exact schema:
             final_output = result.get("final_output") or result.get("draft_response", "")
             if create_outputs:
                 write_text_file("final_output.txt", final_output)
-            completed_at = datetime.now(UTC).isoformat()
+            completed_at = datetime.now(timezone.utc).isoformat()
             final_status = "awaiting_user_input" if self._awaiting_user_input(result) else "completed"
             update_run(run_id, status=final_status, completed_at=completed_at, final_output=final_output)
             append_daily_memory_note(result, "system", f"run_{final_status}", self._truncate(final_output, 1000))
@@ -2681,7 +2681,7 @@ Return ONLY valid JSON in this exact schema:
             )
             return result
         except Exception:
-            update_run(run_id, status="failed", completed_at=datetime.now(UTC).isoformat(), final_output="workflow failed")
+            update_run(run_id, status="failed", completed_at=datetime.now(timezone.utc).isoformat(), final_output="workflow failed")
             if not initial_state.get("failure_checkpoint"):
                 fallback_error = initial_state.get("last_error", "workflow failed")
                 initial_state["failure_checkpoint"] = self._build_failure_checkpoint(
@@ -2691,7 +2691,7 @@ Return ONLY valid JSON in this exact schema:
                     active_task=initial_state.get("active_task"),
                 )
             append_daily_memory_note(initial_state, "system", "run_failed", initial_state.get("last_error", "workflow failed"))
-            self._write_session_record(initial_state, status="failed", completed_at=datetime.now(UTC).isoformat())
+            self._write_session_record(initial_state, status="failed", completed_at=datetime.now(timezone.utc).isoformat())
             update_planning_file(
                 initial_state,
                 status="failed",
