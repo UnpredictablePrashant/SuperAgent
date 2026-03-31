@@ -4105,6 +4105,8 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             from kendr import cli_output as _setup_out
             _setup_out.startup_banner(
                 version=_cli_version(),
+                model=os.getenv("KENDR_MODEL", os.getenv("OPENAI_MODEL", "")),
+                working_dir=os.getenv("KENDR_WORKING_DIR", ""),
                 tagline=f"setup {action}",
             )
         except Exception:
