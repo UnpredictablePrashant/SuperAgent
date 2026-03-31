@@ -986,26 +986,33 @@ class KendrUIHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def _send(self, status: int, content_type: str, body: bytes) -> None:
+    _CORS_SAFE_PREFIXES = ("/api/stream", "/stream", "/api/runs/", "/api/artifacts/")
+
+    def _send(self, status: int, content_type: str, body: bytes, cors: bool = False) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
     def _json(self, status: int, payload: dict | list) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        self._send(status, "application/json; charset=utf-8", body)
+        path = getattr(self, "path", "")
+        cors = any(path.startswith(p) for p in self._CORS_SAFE_PREFIXES)
+        self._send(status, "application/json; charset=utf-8", body, cors=cors)
 
     def _html(self, status: int, content: str) -> None:
-        self._send(status, "text/html; charset=utf-8", content.encode("utf-8"))
+        self._send(status, "text/html; charset=utf-8", content.encode("utf-8"), cors=False)
 
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        path = getattr(self, "path", "")
+        if any(path.startswith(p) for p in self._CORS_SAFE_PREFIXES):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
     def do_GET(self):
@@ -1067,7 +1074,6 @@ class KendrUIHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(data)
             except Exception as exc:
@@ -1119,11 +1125,12 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             if not snap:
                 self._json(404, {"error": "component_not_found"})
                 return
+            snap = dict(snap)
+            snap.pop("raw_values", None)
             oauth_path = _OAUTH_PATH_MAP.get(comp_id, "")
             if oauth_path and snap.get("component") is not None:
                 parts = oauth_path.strip("/").split("/")
                 provider = parts[1] if len(parts) >= 2 else ""
-                snap = dict(snap)
                 snap["component"] = dict(snap["component"])
                 if provider:
                     snap["component"]["oauth_start_path"] = f"/api/oauth/{provider}/start"
@@ -1216,7 +1223,6 @@ class KendrUIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
         def write_event(event_type: str, data: dict) -> bool:
