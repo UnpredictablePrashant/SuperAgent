@@ -1264,10 +1264,30 @@ class AgentRuntime:
             )
             return state
 
+        # --- Dev pipeline: finalization — terminate when pipeline is done ---
+        dev_pipeline_status = str(state.get("dev_pipeline_status", "")).strip().lower()
+        if (
+            bool(state.get("dev_pipeline_mode", False))
+            and dev_pipeline_status in ("complete", "partial", "error", "cancelled", "waiting_for_approval")
+        ):
+            final_output = (
+                state.get("draft_response")
+                or state.get("final_output")
+                or state.get("dev_pipeline_error")
+                or f"Dev pipeline finished with status: {dev_pipeline_status}."
+            )
+            state["next_agent"] = "__finish__"
+            state["final_output"] = final_output
+            log_task_update(
+                "Orchestrator",
+                f"Dev pipeline completed with status={dev_pipeline_status}; routing to __finish__.",
+            )
+            return state
+
         # --- Dev pipeline: full end-to-end orchestration (blueprint → build → verify → zip) ---
         if (
             bool(state.get("dev_pipeline_mode", False))
-            and not str(state.get("dev_pipeline_status", "")).strip()
+            and not dev_pipeline_status
             and state.get("last_agent") != "dev_pipeline_agent"
             and self._is_agent_available(state, "dev_pipeline_agent")
         ):

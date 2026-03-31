@@ -99,4 +99,11 @@ STACK_TEMPLATE = {
             },
         },
     ],
+    "feature_flags": {
+        "has_auth": True,
+        "has_frontend": False,
+        "has_docker": True,
+        "has_tests": True,
+        "has_migrations": True,
+    },
 }

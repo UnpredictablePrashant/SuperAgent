@@ -4,12 +4,29 @@ dev_pipeline_tasks.py — Multi-agent dev project pipeline orchestrator.
 Provides `dev_pipeline_agent(state)` which orchestrates the complete
 end-to-end project generation flow in a single agent call:
 
-  blueprint → [y/n approval] → scaffold → db → auth → backend →
+  blueprint → [approval gate] → scaffold → db → auth → backend →
   frontend → deps → tests → security_scan → devops → verify →
   [auto-fix + retest loop ×N] → post_setup → zip export
 
 Activated when state["dev_pipeline_mode"] is True.
 Intended for `kendr run --dev "…"` or `kendr generate "…"`.
+
+Blueprint approval:
+- auto_approve=True → skip gate, continue immediately.
+- auto_approve=False → set pending_user_input_kind="blueprint_approval",
+  set dev_pipeline_status="waiting_for_approval", and return.
+  The next orchestrator turn (after user replies) should set
+  blueprint_status="approved" and re-dispatch dev_pipeline_agent.
+
+Auto-fix retry loop:
+- Triggers when verifier_status != "pass" OR test_agent_status indicates failure.
+- Builds rich context (verifier report + failed checks + test output) for coding_agent.
+- Re-runs test_agent and project_verifier_agent after each fix attempt.
+- On persistent failure: dev_pipeline_status="partial" with diagnostic summary.
+
+Zip export:
+- Written to state["run_output_dir"] (falls back to get_output_dir()).
+- dev_pipeline_zip_path persisted in state and written to dev_pipeline_zip_path.txt.
 """
 
 from __future__ import annotations
@@ -31,7 +48,7 @@ AGENT_METADATA = {
         "display_name": "Dev Pipeline Agent",
         "description": (
             "End-to-end multi-agent software project generation pipeline. "
-            "Orchestrates blueprint → [y/n approval] → scaffold → build → "
+            "Orchestrates blueprint → approval → scaffold → build → "
             "test → verify (with auto-fix retry) → zip export."
         ),
         "skills": [
@@ -77,17 +94,6 @@ def _print_banner(message: str, width: int = 72) -> None:
     sys.stdout.flush()
 
 
-def _ask_yn(prompt: str) -> bool:
-    """Block for an interactive y/n answer. Returns True on yes."""
-    sys.stdout.write(f"\n{prompt}\n\nApprove? [y/N]: ")
-    sys.stdout.flush()
-    try:
-        answer = sys.stdin.readline().strip().lower()
-    except (EOFError, OSError):
-        answer = ""
-    return answer in ("y", "yes", "approve", "ok")
-
-
 def _run_stage(
     name: str,
     agent_fn: Callable[[dict], dict],
@@ -116,8 +122,8 @@ def _run_stage(
 
 def _zip_project(project_root: Path, output_dir: Path) -> str:
     """
-    Create a zip archive of the generated project in output_dir.
-    Returns the zip file path string.
+    Create a zip archive of the project in output_dir (the run output directory).
+    Returns the zip file path as a string.
     """
     project_name = project_root.name or "project"
     zip_path = output_dir / f"{project_name}.zip"
@@ -138,18 +144,25 @@ def _zip_project(project_root: Path, output_dir: Path) -> str:
 
 def _verifier_passed(state: dict) -> bool:
     """
-    Return True if verifier_status indicates success.
+    Return True when verifier_status indicates success.
     project_verifier_agent writes state["verifier_status"] = "pass" or "fail".
-    An absent/empty status is treated as pass (no checks run = nothing failed).
+    Empty/absent status = no checks ran = treated as pass.
     """
     status = str(state.get("verifier_status", "")).strip().lower()
     return not status or status in ("pass", "passed", "ok", "success")
 
 
+def _tests_passed(state: dict) -> bool:
+    """Return True when test_agent_status indicates success or tests were skipped."""
+    status = str(state.get("test_agent_status", "") or "").strip().lower()
+    return not status or status in ("pass", "passed", "ok", "success")
+
+
 def _build_fix_context(state: dict, fix_round: int) -> str:
     """
-    Build a rich fix context string for coding_agent.
-    Combines verifier failures AND test_agent failures with concrete file paths.
+    Build a rich fix-context string for coding_agent.
+    Combines verifier failures AND test_agent failures.
+    Handles test_agent_results as list[str] (as written by test_tasks.py).
     """
     lines = [
         f"Auto-fix round {fix_round}: Fix failures in the generated project.",
@@ -167,18 +180,19 @@ def _build_fix_context(state: dict, fix_round: int) -> str:
 
     failed_checks = [
         r for r in (state.get("verifier_check_results") or [])
-        if not r.get("success", True)
+        if isinstance(r, dict) and not r.get("success", True)
     ]
     if failed_checks:
         lines.append("Failed verification checks:")
         for check in failed_checks[:15]:
             lines.append(f"  [{check.get('label', '?')}]")
-            if check.get("stderr"):
-                for err_line in str(check["stderr"]).splitlines()[:5]:
+            stderr = str(check.get("stderr", "")).strip()
+            if stderr:
+                for err_line in stderr.splitlines()[:5]:
                     lines.append(f"    {err_line}")
         lines.append("")
 
-    issues = state.get("verifier_issues") or []
+    issues = [i for i in (state.get("verifier_issues") or []) if isinstance(i, dict)]
     if issues:
         lines.append("Specific issues to resolve:")
         for issue in issues[:15]:
@@ -189,29 +203,22 @@ def _build_fix_context(state: dict, fix_round: int) -> str:
         lines.append("")
 
     # ── Test agent failures ───────────────────────────────────────────────────
-    test_status = str(state.get("test_agent_status", "") or "").strip().lower()
-    if test_status and test_status not in ("pass", "passed", "ok", "success", ""):
+    # test_agent_results is a list[str] (each entry is a result line/message)
+    if not _tests_passed(state):
         lines.append("=== Test Failures ===")
         test_summary = str(state.get("test_agent_summary", "") or "").strip()
         if test_summary:
-            lines.append(test_summary[:2000])
+            lines.append(test_summary[:1000])
             lines.append("")
 
         test_results = state.get("test_agent_results") or []
-        failed_tests = [r for r in test_results if not r.get("success", True)]
-        if failed_tests:
-            lines.append("Failed test files/suites:")
-            for result in failed_tests[:10]:
-                file_path = str(result.get("file") or result.get("path") or result.get("test_file", "")).strip()
-                if file_path:
-                    lines.append(f"  File: {file_path}")
-                error_msg = str(result.get("stderr") or result.get("error") or result.get("message", "")).strip()
-                if error_msg:
-                    for err_line in error_msg.splitlines()[:5]:
-                        lines.append(f"    {err_line}")
+        if test_results:
+            lines.append("Test output:")
+            for line in test_results[:30]:
+                lines.append(f"  {str(line)[:300]}")
             lines.append("")
 
-    lines.append("Fix all issues listed above and ensure all checks pass.")
+    lines.append("Fix all failures listed above and ensure all checks pass.")
     return "\n".join(lines)
 
 
@@ -219,25 +226,28 @@ def dev_pipeline_agent(state: dict) -> dict:
     """
     End-to-end project generation pipeline agent.
 
-    Runs synchronously through all build stages in sequence. Activates when
-    state["dev_pipeline_mode"] is True.
+    Blueprint approval gate:
+    - If auto_approve=True: blueprint auto-approved, pipeline continues immediately.
+    - If auto_approve=False: sets pending_user_input_kind="blueprint_approval",
+      pending_user_question=(blueprint summary + approval prompt),
+      dev_pipeline_status="waiting_for_approval", and returns. The orchestrator
+      exposes this to the user; the next run should have blueprint_status="approved".
 
-    Blueprint approval gate (interactive y/n):
-    - Renders the blueprint summary and prompts the user to approve or abort.
-    - Skipped (auto-approved) when auto_approve=True in state.
-
-    Auto-fix retry loop:
-    - Triggers when verifier OR tests fail.
-    - Passes failing verifier details AND failing test results (including file
-      paths) to coding_agent.
-    - Re-runs test_agent and project_verifier_agent after each fix.
-    - Repeats up to dev_pipeline_max_fix_rounds times (default 3).
+    Auto-fix retry loop (max_fix_rounds, default 3):
+    - Triggers when verifier_status != pass OR test failures detected.
+    - coding_agent receives full failure context (verifier + test output).
+    - test_agent and project_verifier_agent are re-run after each fix.
+    - test_agent_results handled as list[str] (test_tasks.py format).
     - On persistent failure: dev_pipeline_status="partial" with diagnostics.
 
-    Zip export:
-    - Archives project into run_output_dir (state["run_output_dir"]).
-    - Falls back to the active output dir, then project parent dir.
-    - Persists dev_pipeline_zip_path in state and writes dev_pipeline_zip_path.txt.
+    Zip export (run output directory):
+    - Archive written to state["run_output_dir"] (falls back to get_output_dir()).
+    - dev_pipeline_zip_path stored in state and written to dev_pipeline_zip_path.txt.
+
+    Orchestrator finalization:
+    - On return, dev_pipeline_status is set to a terminal value (complete/partial/
+      error/cancelled/waiting_for_approval). The orchestrator routing block checks
+      this and routes to __finish__ accordingly.
     """
     active_task, task_content, _ = begin_agent_session(state, _AGENT_NAME)
     state["dev_pipeline_agent_calls"] = state.get("dev_pipeline_agent_calls", 0) + 1
@@ -249,8 +259,12 @@ def dev_pipeline_agent(state: dict) -> dict:
 
     stages_completed: list[str] = list(state.get("dev_pipeline_stages_completed") or [])
     state["dev_pipeline_stages_completed"] = stages_completed
-    state["dev_pipeline_status"] = "running"
     state["dev_pipeline_error"] = ""
+
+    # ── Handle resume after blueprint approval ─────────────────────────────────
+    # If we're re-entering after the user approved the blueprint interactively,
+    # blueprint_status should already be "approved" so we skip the gate below.
+    already_approved = str(state.get("blueprint_status", "")).strip() == "approved"
 
     _print_banner("Kendr Dev Pipeline — starting full project generation")
 
@@ -275,38 +289,41 @@ def dev_pipeline_agent(state: dict) -> dict:
         log_task_update("DevPipeline", f"Import failure: {exc}")
         return state
 
-    # ── Stage 1: Blueprint ─────────────────────────────────────────────────────
-    try:
-        state = _run_stage("blueprint", project_blueprint_agent, state, stages_completed, fatal=True)
-    except Exception as exc:
-        state["dev_pipeline_status"] = "error"
-        state["dev_pipeline_error"] = f"Blueprint stage failed: {exc}"
-        return state
+    state["dev_pipeline_status"] = "running"
 
-    # ── Blueprint approval gate: interactive y/n prompt ────────────────────────
-    if auto_approve:
-        state["blueprint_status"] = "approved"
-        state["blueprint_waiting_for_approval"] = False
-        log_task_update("DevPipeline", "Blueprint auto-approved.")
-    else:
+    # ── Stage 1: Blueprint (only if not already done) ─────────────────────────
+    if not already_approved:
+        try:
+            state = _run_stage("blueprint", project_blueprint_agent, state, stages_completed, fatal=True)
+        except Exception as exc:
+            state["dev_pipeline_status"] = "error"
+            state["dev_pipeline_error"] = f"Blueprint stage failed: {exc}"
+            return state
+
+        # ── Blueprint approval gate ────────────────────────────────────────────
         blueprint_md = str(state.get("draft_response", "")).strip()
         project_root_display = str(state.get("project_root", "(working directory)"))
-        approval_prompt = (
-            f"Blueprint generated.\n\n"
-            f"{blueprint_md[:3000]}\n\n"
-            f"Project will be generated at: {project_root_display}"
-        )
-        _print_banner("Blueprint ready — review and approve")
-        approved = _ask_yn(approval_prompt)
-        if not approved:
-            state["dev_pipeline_status"] = "cancelled"
-            state["dev_pipeline_error"] = "Blueprint rejected by user at approval gate."
-            log_task_update("DevPipeline", "User rejected blueprint. Pipeline cancelled.")
-            _print_banner("Pipeline cancelled — blueprint not approved.")
+
+        if auto_approve:
+            state["blueprint_status"] = "approved"
+            state["blueprint_waiting_for_approval"] = False
+            log_task_update("DevPipeline", "Blueprint auto-approved.")
+        else:
+            approval_prompt = (
+                f"Blueprint ready for review:\n\n"
+                f"{blueprint_md[:4000]}\n\n"
+                f"Project will be generated at: {project_root_display}\n\n"
+                "Reply **approve** (or yes/y) to proceed, or describe changes to regenerate."
+            )
+            state["pending_user_question"] = approval_prompt
+            state["pending_user_input_kind"] = "blueprint_approval"
+            state["approval_pending_scope"] = "dev_pipeline_blueprint"
+            state["blueprint_waiting_for_approval"] = True
+            state["dev_pipeline_status"] = "waiting_for_approval"
+            state["draft_response"] = approval_prompt
+            log_task_update("DevPipeline", "Blueprint awaiting user approval.")
+            _print_banner("Blueprint generated — awaiting approval.")
             return state
-        state["blueprint_status"] = "approved"
-        state["blueprint_waiting_for_approval"] = False
-        log_task_update("DevPipeline", "Blueprint approved — continuing to build.")
 
     # ── Stage 2: Scaffold (fatal — no scaffold means no project) ───────────────
     try:
@@ -349,21 +366,19 @@ def dev_pipeline_agent(state: dict) -> dict:
 
     # ── Stage 11: Initial verify ──────────────────────────────────────────────
     state = _run_stage("verify_0", project_verifier_agent, state, stages_completed)
-    verifier_passed = _verifier_passed(state)
 
     # ── Auto-fix + retest loop ────────────────────────────────────────────────
-    # Triggers on verifier failure OR test failure.
-    test_status = str(state.get("test_agent_status", "") or "").strip().lower()
-    tests_failed = bool(test_status) and test_status not in ("pass", "passed", "ok", "success")
+    # Triggers on verifier_status=fail OR test_agent_status indicating failure.
+    all_passing = _verifier_passed(state) and (skip_tests or _tests_passed(state))
 
-    if not verifier_passed or tests_failed:
+    if not all_passing:
         for fix_round in range(1, max_fix_rounds + 1):
             fix_context = _build_fix_context(state, fix_round)
             log_task_update(
                 "DevPipeline",
                 f"Auto-fix round {fix_round}/{max_fix_rounds} — "
-                f"verifier={'fail' if not verifier_passed else 'pass'}, "
-                f"tests={'fail' if tests_failed else 'pass'}.",
+                f"verifier={'pass' if _verifier_passed(state) else 'fail'}, "
+                f"tests={'pass' if _tests_passed(state) else 'fail'}.",
             )
             state["current_objective"] = fix_context
             state["task"] = fix_context
@@ -372,23 +387,21 @@ def dev_pipeline_agent(state: dict) -> dict:
 
             if not skip_tests:
                 state = _run_stage(f"retest_{fix_round}", test_agent, state, stages_completed)
-                test_status = str(state.get("test_agent_status", "") or "").strip().lower()
-                tests_failed = bool(test_status) and test_status not in ("pass", "passed", "ok", "success")
 
             state = _run_stage(f"verify_{fix_round}", project_verifier_agent, state, stages_completed)
-            verifier_passed = _verifier_passed(state)
 
-            if verifier_passed and not tests_failed:
+            all_passing = _verifier_passed(state) and (skip_tests or _tests_passed(state))
+            if all_passing:
                 log_task_update("DevPipeline", f"All checks passed after fix round {fix_round}.")
                 break
 
-        if not verifier_passed or tests_failed:
+        if not all_passing:
             log_task_update("DevPipeline", "Max auto-fix rounds exhausted; proceeding to post-setup.")
 
     # ── Stage 12: Post-setup ──────────────────────────────────────────────────
     state = _run_stage("post_setup", post_setup_agent, state, stages_completed)
 
-    # ── Zip export (into run_output_dir) ──────────────────────────────────────
+    # ── Zip export (into run output directory) ────────────────────────────────
     project_root_str = str(state.get("project_root", "")).strip()
     project_name = str(state.get("project_name", "")).strip()
     zip_path_result = ""
@@ -418,25 +431,24 @@ def dev_pipeline_agent(state: dict) -> dict:
         state["dev_pipeline_zip_path"] = ""
 
     # ── Final status ──────────────────────────────────────────────────────────
-    pipeline_success = verifier_passed and not tests_failed
-    if pipeline_success:
+    if all_passing:
         state["dev_pipeline_status"] = "complete"
         final_label = "COMPLETE"
     else:
         state["dev_pipeline_status"] = "partial"
         final_label = "PARTIAL (some checks still failing)"
-        failure_detail_lines = []
-        if not verifier_passed:
-            failure_detail_lines.append(
+        failure_parts = []
+        if not _verifier_passed(state):
+            failure_parts.append(
                 f"Verifier: {state.get('verifier_status', 'fail')}\n"
-                f"{str(state.get('verifier_summary', ''))[:500]}"
+                f"{str(state.get('verifier_summary', ''))[:400]}"
             )
-        if tests_failed:
-            failure_detail_lines.append(
+        if not skip_tests and not _tests_passed(state):
+            failure_parts.append(
                 f"Tests: {state.get('test_agent_status', 'fail')}\n"
-                f"{str(state.get('test_agent_summary', ''))[:500]}"
+                f"{str(state.get('test_agent_summary', ''))[:400]}"
             )
-        state["dev_pipeline_error"] = "\n\n".join(failure_detail_lines)
+        state["dev_pipeline_error"] = "\n\n".join(failure_parts)
 
     state["dev_pipeline_stages_completed"] = stages_completed
 
@@ -446,9 +458,9 @@ def dev_pipeline_agent(state: dict) -> dict:
     ]
     if zip_path_result:
         summary_lines.append(f"Project archive: {zip_path_result}")
-    if not pipeline_success:
+    if not all_passing:
         summary_lines.append(
-            "Remaining failures:\n" + str(state.get("dev_pipeline_error", ""))[:600]
+            "Remaining failures:\n" + str(state.get("dev_pipeline_error", ""))[:500]
         )
 
     summary = "\n".join(summary_lines)
