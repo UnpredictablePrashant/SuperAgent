@@ -70,6 +70,7 @@ logs/
 *.db-journal
 *.db-wal
 *.db-shm
+*replit*
 
 # Generated agents and plugin state
 tasks/generated_agents/manifest.json
