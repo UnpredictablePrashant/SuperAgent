@@ -341,6 +341,39 @@ INTEGRATION_DEFINITIONS: tuple[IntegrationDefinition, ...] = (
         health_description="OWASP Dependency-Check available on PATH.",
     ),
     IntegrationDefinition(
+        id="github",
+        title="GitHub",
+        category="Code & SCM",
+        description=(
+            "GitHub repository operations: clone, pull, push, branch management, commit, "
+            "pull request create/merge, issue tracking, and code review automation."
+        ),
+        provider_name="github",
+        auth_mode="api_key",
+        docs_path="docs/integrations.md#github",
+        setup_hint=(
+            "Create a GitHub personal access token (classic) with 'repo' scope "
+            "at https://github.com/settings/tokens and set GITHUB_TOKEN."
+        ),
+        setup_url="https://github.com/settings/tokens/new",
+        fields=(
+            _field(
+                "GITHUB_TOKEN",
+                "Personal Access Token",
+                "GitHub token with repo scope for reading and writing repositories.",
+                secret=True,
+                required=True,
+            ),
+            _field(
+                "GITHUB_API_URL",
+                "API Base URL",
+                "Override for GitHub Enterprise Server (defaults to https://api.github.com).",
+            ),
+        ),
+        env_all=("GITHUB_TOKEN",),
+        health_description="GitHub token available for repository and issue management.",
+    ),
+    IntegrationDefinition(
         id="privileged_control",
         title="Privileged Control",
         category="Security",
@@ -506,6 +539,7 @@ def _legacy_requirements() -> dict[str, list[str]]:
     assign(["openai_or_codex_cli"], "coding_agent", "master_coding_agent")
     assign(["openai", "aws"], "aws_scope_guard_agent", "aws_inventory_agent", "aws_cost_agent", "aws_automation_agent")
     assign(["openai", "nmap_or_zap"], "scanner_agent")
+    assign(["openai", "github"], "github_agent")
     return mapping
 
 

@@ -18,6 +18,7 @@ IGNORE_TASK_MODULES = {
     "__pycache__",
     "a2a_agent_utils",
     "a2a_protocol",
+    "github_client",
     "research_infra",
     "setup_registry",
     "sqlite_store",
