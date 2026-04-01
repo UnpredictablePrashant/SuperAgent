@@ -242,7 +242,10 @@ class ProjectGenerationOrchestrator:
             fix_report = self._step_error_fix_loop()
             if fix_report.get("errors"):
                 result["errors"].extend(fix_report["errors"])
-            self._log(f"[5/7] error-fix loop done: {fix_report.get('iterations', 0)} iterations, {'pass' if fix_report.get('ok') else 'some errors remain'}")
+            fix_ok = fix_report.get("ok", True)
+            self._log(f"[5/7] error-fix loop done: {fix_report.get('iterations', 0)} iterations, {'pass' if fix_ok else 'some errors remain'}")
+            if not fix_ok:
+                result["ok"] = False
 
             if not self.skip_tests:
                 self._log("[6/7] generating tests…")
@@ -268,8 +271,10 @@ class ProjectGenerationOrchestrator:
                     self._log("[github] push skipped (no token or error)")
 
             elapsed = round(time.time() - start, 1)
-            result["ok"] = True
-            self._log(f"[orchestrator] done in {elapsed}s  ✓  {self.project_root}")
+            if result["ok"] is not False:
+                result["ok"] = True
+            status_mark = "✓" if result["ok"] else "⚠"
+            self._log(f"[orchestrator] done in {elapsed}s  {status_mark}  {self.project_root}")
 
             install_hint = self._install_hint()
             if install_hint:
@@ -614,7 +619,13 @@ Return ONLY the Dockerfile content, no explanation, no markdown fences.
 
         return written
 
-    def _detect_run_command(self) -> tuple[list[str], str] | None:
+    def _detect_run_command(self) -> tuple[list[str] | None, str]:
+        """Return (command, cwd) or (None, error_message).
+
+        Returns (None, "") when no verification is applicable (e.g. Flutter,
+        no entry point found).  Returns (None, error_text) when install fails —
+        the caller should treat a non-empty error string as a failure to report.
+        """
         tech = self._blueprint.get("tech_stack", {})
         lang = str(tech.get("language", "")).lower()
         fw = str(tech.get("framework", "")).lower()
@@ -628,7 +639,7 @@ Return ONLY the Dockerfile content, no explanation, no markdown fences.
             if (self.project_root / "requirements.txt").exists():
                 ok, _, err = _run_subprocess(["pip", "install", "-r", "requirements.txt"], root, timeout=120)
                 if not ok:
-                    return None, err
+                    return None, f"pip install failed: {err[:400]}"
             main_candidates = ["app/main.py", "main.py", "manage.py", "wsgi.py"]
             for candidate in main_candidates:
                 p = self.project_root / candidate
@@ -645,9 +656,8 @@ Return ONLY the Dockerfile content, no explanation, no markdown fences.
             ok, _, err = _run_subprocess([pm, "install", "--prefer-offline"], root, timeout=180)
             if not ok:
                 ok, _, err = _run_subprocess(["npm", "install", "--prefer-offline"], root, timeout=180)
-            install_ok = ok
-            if not install_ok:
-                return None, err
+            if not ok:
+                return None, f"npm install failed: {err[:400]}"
             if (self.project_root / "tsconfig.json").exists():
                 return ["npx", "tsc", "--noEmit"], root
             return ["npx", "eslint", "--max-warnings", "9999", "."], root
@@ -658,10 +668,13 @@ Return ONLY the Dockerfile content, no explanation, no markdown fences.
         report: dict = {"ok": True, "iterations": 0, "errors": []}
         for iteration in range(self.max_fix_iters):
             report["iterations"] = iteration + 1
-            run_result = self._detect_run_command()
-            if run_result is None:
+            command, cwd_or_err = self._detect_run_command()
+            if command is None:
+                if cwd_or_err:
+                    report["ok"] = False
+                    report["errors"].append(cwd_or_err)
                 break
-            command, cwd = run_result
+            cwd = cwd_or_err
             if not command:
                 break
 
@@ -831,6 +844,13 @@ Return ONLY the TypeScript/JavaScript file content.
         return True
 
     def _step_github_push(self) -> str:
+        """Create/find a GitHub repo and push the generated project.
+
+        Authentication is handled exclusively via ``GitHubClient._git_env()``,
+        which injects the token as an HTTP Authorization header through git's
+        GIT_CONFIG_COUNT environment-variable mechanism.  The token is never
+        embedded in any remote URL, git config file, or command-line argument.
+        """
         if not self.github_repo or not self.github_token:
             return ""
         try:
@@ -838,25 +858,32 @@ Return ONLY the TypeScript/JavaScript file content.
             owner, repo_name = self.github_repo.split("/", 1)
             client = GitHubClient(token=self.github_token)
 
-            repos_url = f"https://api.github.com/repos/{owner}/{repo_name}"
+            clone_url = f"https://github.com/{owner}/{repo_name}.git"
             try:
-                existing = client._get(repos_url)
-                clone_url = existing.get("clone_url", "")
-                self._log(f"  [github] repo exists: {clone_url}")
-            except Exception:
-                create_url = (
-                    "https://api.github.com/user/repos"
-                    if "/" not in self.github_repo or owner == client._get_login()
-                    else f"https://api.github.com/orgs/{owner}/repos"
-                )
-                new_repo = client._post(create_url, {
-                    "name": repo_name,
-                    "description": self._blueprint.get("description", self.description[:80]),
-                    "private": False,
-                    "auto_init": False,
-                })
-                clone_url = new_repo.get("clone_url", "")
-                self._log(f"  [github] repo created: {clone_url}")
+                existing = client.get_repo(owner, repo_name)
+                self._log(f"  [github] repo exists: {existing.get('html_url', '')}")
+            except RuntimeError as exc:
+                if "404" in str(exc) or "Not Found" in str(exc):
+                    try:
+                        user_info = client._request_sync("GET", "/user", None, 30)
+                        authenticated_login = str(user_info.get("login", ""))
+                    except Exception:
+                        authenticated_login = owner
+
+                    create_path = (
+                        "/user/repos"
+                        if authenticated_login.lower() == owner.lower()
+                        else f"/orgs/{owner}/repos"
+                    )
+                    new_repo = client._request_sync("POST", create_path, {
+                        "name": repo_name,
+                        "description": self._blueprint.get("description", self.description[:80]),
+                        "private": False,
+                        "auto_init": False,
+                    }, 30)
+                    self._log(f"  [github] repo created: {new_repo.get('html_url', '')}")
+                else:
+                    raise
 
             if not shutil.which("git"):
                 self._log("  [github] git not found, skipping push")
@@ -864,35 +891,32 @@ Return ONLY the TypeScript/JavaScript file content.
 
             git_dir = self.project_root / ".git"
             if not git_dir.exists():
-                _run_subprocess(["git", "init"], str(self.project_root), timeout=10)
-                _run_subprocess(
-                    ["git", "config", "user.email", "kendr-bot@users.noreply.github.com"],
-                    str(self.project_root), timeout=5,
-                )
-                _run_subprocess(
-                    ["git", "config", "user.name", "Kendr Project Builder"],
-                    str(self.project_root), timeout=5,
-                )
+                client._run_git(["init", "-b", "main"], self.project_root)
 
-            _run_subprocess(["git", "add", "-A"], str(self.project_root), timeout=30)
-            _run_subprocess(
-                ["git", "commit", "-m", f"feat: initial project scaffold — {self.project_name}"],
-                str(self.project_root), timeout=20,
-            )
+            try:
+                client.commit(self.project_root, f"feat: initial project scaffold — {self.project_name}", add_all=True)
+            except RuntimeError as exc:
+                if "nothing to commit" not in str(exc):
+                    raise
 
-            auth_url = clone_url.replace("https://", f"https://oauth2:{self.github_token}@")
-            _run_subprocess(
-                ["git", "remote", "add", "origin", auth_url],
-                str(self.project_root), timeout=5,
-            )
-            ok, stdout, stderr = _run_subprocess(
-                ["git", "push", "-u", "origin", "HEAD:main"],
-                str(self.project_root), timeout=60,
-            )
-            if ok:
+            try:
+                client._run_git(["remote", "remove", "origin"], self.project_root)
+            except RuntimeError:
+                pass
+            client._run_git(["remote", "add", "origin", clone_url], self.project_root)
+
+            try:
+                client.push_set_upstream(self.project_root, "main")
                 return f"https://github.com/{self.github_repo}"
-            self._log(f"  [github] push error: {stderr[:200]}")
-            return ""
+            except RuntimeError as push_err:
+                if "main" in str(push_err):
+                    try:
+                        client.push_set_upstream(self.project_root, "master")
+                        return f"https://github.com/{self.github_repo}"
+                    except RuntimeError:
+                        pass
+                self._log(f"  [github] push error: {push_err}")
+                return ""
         except Exception as exc:
             self._log(f"  [github] error: {exc}")
             return ""
