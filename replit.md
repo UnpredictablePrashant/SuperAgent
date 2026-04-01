@@ -274,6 +274,29 @@ Explicit management: `kendr gateway start` (pre-launch) / `kendr gateway stop` (
 Default: `openai:text-embedding-3-small` (requires `OPENAI_API_KEY`).
 Local fallback uses existing `tasks/research_infra.py` chunking utilities.
 
+## Task #14: MCP Server Manager (UI + CLI)
+
+### CLI commands added to `kendr/cli.py`
+- **`kendr mcp add <name> <connection>`** — Register a new MCP server (HTTP or stdio). Runs tool discovery immediately. Use `--no-discover` to skip.
+- **`kendr mcp list`** — List all registered servers with status, tool count, and up to 5 tools per server.
+- **`kendr mcp remove <name|id>`** — Remove a registered server.
+- **`kendr mcp test <name|id>`** — Ping the server and list all its tools.
+- **`kendr mcp discover <name|id>`** — Re-run tool discovery without removing/re-adding.
+- **`kendr mcp enable/disable <name|id>`** — Toggle a server's enabled state.
+
+### Runtime tool injection in `kendr/discovery.py`
+- **`_register_mcp_tools()`** — Called by `build_registry()`. Reads enabled MCP servers from the registry, iterates their discovered tools, and registers each tool as a synthetic `AgentDefinition` named `mcp_<server_slug>_<tool_slug>_agent`. The planner can route to these like any native agent. Tool handlers call the MCP server via `fastmcp.Client` at invocation time.
+
+### Chat UI MCP step cards in `kendr/ui_server.py`
+- **MCP step cards** — When a step's agent name starts with `mcp_` and ends with `_agent`, a purple 🧩 MCP pill badge is rendered in the step card alongside the tool name.
+- **CSS**: `.step-card.mcp-step` — purple border/background for MCP step cards.
+- **`renderMcpInvocationsCard()`** — Collapsible card in the finalized run result showing which MCP tools were invoked, their server, success/failure status.
+- **MCP invocations extraction** — After a run completes, `_run()` scans the DB steps for MCP agent names and injects `mcp_invocations` into the result event payload.
+
+### MCP manager (`kendr/mcp_manager.py`) — already complete
+- Registry: `~/.kendr/mcp_registry.json` (env: `KENDR_MCP_REGISTRY`)
+- Web UI panel at `/mcp` — already complete (from previous iteration)
+
 ## Task #10: Software Project Creation Suite
 
 `tasks/project_generation_orchestrator.py` — Standalone `ProjectGenerationOrchestrator` class.

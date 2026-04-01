@@ -2512,6 +2512,41 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
     t_regression.add_argument("--context-files", default="", help="Comma-separated source files to provide as context.")
     t_regression.add_argument("--json", action="store_true", help="Emit JSON report.")
 
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="Manage MCP server connections: add, list, remove, test.",
+        formatter_class=_KendrHelpFormatter,
+    )
+    command_parsers["mcp"] = mcp_parser
+    mcp_sub = mcp_parser.add_subparsers(dest="mcp_action", metavar="ACTION")
+
+    mcp_add = mcp_sub.add_parser("add", help="Register a new MCP server.")
+    mcp_add.add_argument("name", help="Human-readable server name.")
+    mcp_add.add_argument("connection", help="HTTP endpoint (http://host:port/mcp) or stdio shell command.")
+    mcp_add.add_argument(
+        "--type", dest="server_type", default="http", choices=["http", "stdio"],
+        help="Connection type: 'http' (default) or 'stdio'.",
+    )
+    mcp_add.add_argument("--description", default="", help="Optional description.")
+    mcp_add.add_argument("--no-discover", action="store_true", help="Register without running tool discovery.")
+
+    mcp_sub.add_parser("list", help="List all registered MCP servers and their tools.")
+
+    mcp_rm = mcp_sub.add_parser("remove", help="Remove a registered MCP server.")
+    mcp_rm.add_argument("server_id_or_name", help="Server ID or name to remove.")
+
+    mcp_test = mcp_sub.add_parser("test", help="Ping an MCP server and list its tools.")
+    mcp_test.add_argument("server_id_or_name", help="Server ID or name to test.")
+
+    mcp_discover = mcp_sub.add_parser("discover", help="Re-run tool discovery for a registered server.")
+    mcp_discover.add_argument("server_id_or_name", help="Server ID or name.")
+
+    mcp_enable = mcp_sub.add_parser("enable", help="Enable a registered MCP server.")
+    mcp_enable.add_argument("server_id_or_name", help="Server ID or name.")
+
+    mcp_disable = mcp_sub.add_parser("disable", help="Disable a registered MCP server.")
+    mcp_disable.add_argument("server_id_or_name", help="Server ID or name.")
+
     return parser, command_parsers
 
 
@@ -2661,6 +2696,162 @@ def _cmd_test(args: argparse.Namespace) -> int:
 
     ok = report.get("status") in ("PASS", "generated") or bool(state.get("test_passed"))
     return 0 if ok else 1
+
+
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    style = _style_from_args(args)
+    action = getattr(args, "mcp_action", None)
+
+    if not action:
+        style2 = _cli_style(None)
+        _, cp = _build_parser(style2)
+        if "mcp" in cp:
+            cp["mcp"].print_help()
+        return 0
+
+    try:
+        from kendr.mcp_manager import (
+            list_servers,
+            get_server,
+            add_server,
+            remove_server,
+            toggle_server,
+            discover_tools,
+        )
+    except ImportError as exc:
+        print(style.fail(f"MCP manager not available: {exc}"))
+        return 1
+
+    def _resolve_server(name_or_id: str) -> dict | None:
+        servers = list_servers()
+        for srv in servers:
+            if srv["id"] == name_or_id or srv["name"].lower() == name_or_id.lower():
+                return srv
+        return None
+
+    if action == "list":
+        servers = list_servers()
+        if not servers:
+            print(style.muted("No MCP servers registered. Use: kendr mcp add <name> <connection>"))
+            return 0
+        print(style.heading(f"{'NAME':<28} {'TYPE':<6} {'STATUS':<12} {'TOOLS':>5}  {'ID'}"))
+        print(style.muted("-" * 72))
+        for srv in servers:
+            status = srv.get("status", "unknown")
+            enabled = srv.get("enabled", True)
+            status_label = status if enabled else "disabled"
+            tool_count = srv.get("tool_count", 0)
+            name_col = srv["name"][:28]
+            line = f"{name_col:<28} {srv.get('type','http'):<6} {status_label:<12} {tool_count:>5}  {srv['id']}"
+            if status == "connected" and enabled:
+                print(style.ok(line))
+            elif not enabled:
+                print(style.muted(line))
+            elif status == "error":
+                print(style.warn(line))
+            else:
+                print(line)
+            tools = srv.get("tools", [])
+            if tools:
+                for t in tools[:5]:
+                    tname = t.get("name", "?")
+                    tdesc = (t.get("description", "") or "")[:60]
+                    print(style.muted(f"    • {tname:<20}  {tdesc}"))
+                if len(tools) > 5:
+                    print(style.muted(f"    … {len(tools) - 5} more tools"))
+        return 0
+
+    if action == "add":
+        name = str(getattr(args, "name", "")).strip()
+        connection = str(getattr(args, "connection", "")).strip()
+        server_type = str(getattr(args, "server_type", "http"))
+        description = str(getattr(args, "description", ""))
+        no_discover = bool(getattr(args, "no_discover", False))
+
+        if not name:
+            print(style.fail("Server name is required."))
+            return 1
+        if not connection:
+            print(style.fail("Connection (URL or command) is required."))
+            return 1
+
+        srv = add_server(name=name, connection=connection, server_type=server_type, description=description)
+        print(style.ok(f"Registered: {srv['name']}  (ID: {srv['id']})"))
+        print(style.muted(f"  Type:       {srv['type']}"))
+        print(style.muted(f"  Connection: {srv['connection']}"))
+
+        if not no_discover:
+            print(style.muted("  Discovering tools…"))
+            result = discover_tools(srv["id"])
+            if result.get("ok"):
+                tool_count = result.get("tool_count", 0)
+                print(style.ok(f"  ✓ {tool_count} tool(s) discovered"))
+                for t in result.get("tools", [])[:8]:
+                    tname = t.get("name", "?")
+                    tdesc = (t.get("description", "") or "")[:60]
+                    print(style.muted(f"    • {tname:<20}  {tdesc}"))
+                if tool_count > 8:
+                    print(style.muted(f"    … {tool_count - 8} more"))
+            else:
+                err = result.get("error", "unknown error")
+                print(style.warn(f"  ⚠ Discovery failed: {err}"))
+                print(style.muted("  Server registered. Run 'kendr mcp discover <id>' later."))
+        return 0
+
+    if action == "remove":
+        key = str(getattr(args, "server_id_or_name", "")).strip()
+        srv = _resolve_server(key)
+        if srv is None:
+            print(style.fail(f"Server not found: {key}"))
+            return 1
+        removed = remove_server(srv["id"])
+        if removed:
+            print(style.ok(f"Removed: {srv['name']}  (ID: {srv['id']})"))
+        else:
+            print(style.fail(f"Failed to remove: {srv['name']}"))
+            return 1
+        return 0
+
+    if action in ("test", "discover"):
+        key = str(getattr(args, "server_id_or_name", "")).strip()
+        srv = _resolve_server(key)
+        if srv is None:
+            print(style.fail(f"Server not found: {key}"))
+            return 1
+        verb = "Testing" if action == "test" else "Discovering tools on"
+        print(style.muted(f"  {verb}: {srv['name']}  ({srv['connection']})"))
+        result = discover_tools(srv["id"])
+        if result.get("ok"):
+            tool_count = result.get("tool_count", 0)
+            print(style.ok(f"  ✓ {tool_count} tool(s) available"))
+            for t in result.get("tools", []):
+                tname = t.get("name", "?")
+                tdesc = (t.get("description", "") or "")[:70]
+                print(f"    {style.ok('•')} {style.heading(tname):<22}  {style.muted(tdesc)}")
+        else:
+            err = result.get("error", "unknown error")
+            print(style.fail(f"  ✗ {err}"))
+            return 1
+        return 0
+
+    if action in ("enable", "disable"):
+        key = str(getattr(args, "server_id_or_name", "")).strip()
+        srv = _resolve_server(key)
+        if srv is None:
+            print(style.fail(f"Server not found: {key}"))
+            return 1
+        enabled = action == "enable"
+        ok = toggle_server(srv["id"], enabled)
+        if ok:
+            state_label = "enabled" if enabled else "disabled"
+            print(style.ok(f"  {srv['name']} is now {state_label}."))
+        else:
+            print(style.fail(f"  Toggle failed for {srv['name']}."))
+            return 1
+        return 0
+
+    print(style.fail(f"Unknown mcp action: {action}"))
+    return 1
 
 
 def _cmd_generate_standalone(
@@ -5578,6 +5769,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_research(args)
         if args.command == "test":
             return _cmd_test(args)
+        if args.command == "mcp":
+            return _cmd_mcp(args)
         if args.command == "agents":
             return _cmd_agents(args)
         if args.command == "plugins":

@@ -270,6 +270,25 @@ def _start_run_background(run_id: str, payload: dict) -> None:
                                 pass
             if test_report:
                 result["test_report"] = test_report
+            try:
+                mcp_invocations = []
+                for step in _list_run_steps(run_id):
+                    aname = step.get("agent_name", "")
+                    if aname.startswith("mcp_") and aname.endswith("_agent"):
+                        inner = aname[4:-6]
+                        parts = inner.split("_", 1)
+                        server_slug = parts[0] if parts else ""
+                        tool_slug = parts[1] if len(parts) > 1 else inner
+                        mcp_invocations.append({
+                            "tool": tool_slug.replace("_", " "),
+                            "server": server_slug.replace("_", " "),
+                            "ok": step.get("status") not in ("failed", "error"),
+                            "error": step.get("error") or "",
+                        })
+                if mcp_invocations:
+                    result["mcp_invocations"] = mcp_invocations
+            except Exception:
+                pass
             with _pending_lock:
                 _pending_runs[run_id] = {"status": "completed", "result": result}
             _push_event(run_id, "result", result)
@@ -411,6 +430,7 @@ a:hover { text-decoration: underline; }
 .step-card.running { border-color: rgba(255,179,71,0.4); }
 .step-card.done { border-color: rgba(0,201,167,0.3); }
 .step-card.failed { border-color: rgba(255,71,87,0.4); }
+.step-card.mcp-step { border-color: rgba(167,139,250,0.35); background: rgba(167,139,250,0.05); }
 .step-icon { font-size: 14px; flex-shrink: 0; }
 .step-info { flex: 1; }
 .step-name { font-weight: 600; color: var(--text); }
@@ -653,11 +673,20 @@ function addStreamStep(runId, step) {
   const icons = { running: '\u2699\uFE0F', done: '\u2713', failed: '\u2717', completed: '\u2713' };
   const cssClass = step.status || 'running';
   const icon = icons[cssClass] || '\u2699\uFE0F';
+  const agentName = step.agent || step.name || 'agent';
+  const isMcp = agentName.startsWith('mcp_') && agentName.endsWith('_agent');
   const div = document.createElement('div');
-  div.className = 'step-card ' + cssClass;
-  div.id = 'step-' + runId + '-' + (step.agent || step.name || Math.random().toString(36).slice(2));
+  div.className = 'step-card ' + cssClass + (isMcp ? ' mcp-step' : '');
+  div.id = 'step-' + runId + '-' + agentName;
+  let displayName = agentName;
+  let mcpPill = '';
+  if (isMcp) {
+    const parts = agentName.replace(/^mcp_/, '').replace(/_agent$/, '').split('_');
+    displayName = parts.join(' \u2192 ');
+    mcpPill = '<span style="display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(167,139,250,0.15);color:#a78bfa;margin-left:6px;vertical-align:middle">\uD83E\uDDE9 MCP</span>';
+  }
   div.innerHTML = '<div class="step-icon">' + icon + '</div><div class="step-info"><div class="step-name">' +
-    esc(step.agent || step.name || 'agent') + '</div>' +
+    esc(displayName) + mcpPill + '</div>' +
     (step.message ? '<div class="step-desc">' + esc(step.message) + '</div>' : '') + '</div>';
   container.appendChild(div);
   scrollDown();
@@ -712,7 +741,27 @@ function renderTestReportCard(report) {
   return cardHtml;
 }
 
-function finalizeStreamRow(runId, output, error, artifactFiles, testReport) {
+function renderMcpInvocationsCard(invocations) {
+  if (!invocations || !invocations.length) return '';
+  let html = '<details style="margin-top:10px;background:rgba(167,139,250,0.05);border:1px solid rgba(167,139,250,0.3);border-radius:8px;overflow:hidden">';
+  html += '<summary style="padding:9px 12px;cursor:pointer;font-size:13px;font-weight:600;list-style:none;display:flex;align-items:center;gap:6px">';
+  html += '\uD83E\uDDE9 <span style="color:#a78bfa">MCP Tools Invoked</span> <span style="color:var(--muted);font-size:11px;margin-left:4px">(' + invocations.length + ')</span></summary>';
+  html += '<div style="padding:8px 12px;border-top:1px solid rgba(167,139,250,0.2)">';
+  invocations.forEach(inv => {
+    const ok = inv.ok !== false;
+    const dotColor = ok ? '#a78bfa' : '#ef4444';
+    html += '<div style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid rgba(167,139,250,0.1)">';
+    html += '<span style="color:' + dotColor + ';font-size:12px">' + (ok ? '\u2713' : '\u2717') + '</span>';
+    html += '<div style="flex:1"><div style="font-family:monospace;font-size:12px;color:#a78bfa">' + esc(inv.tool || inv.name || '?') + '</div>';
+    if (inv.server) html += '<div style="font-size:11px;color:var(--muted)">via ' + esc(inv.server) + '</div>';
+    if (!ok && inv.error) html += '<div style="font-size:11px;color:#ef4444;margin-top:2px">' + esc(inv.error) + '</div>';
+    html += '</div></div>';
+  });
+  html += '</div></details>';
+  return html;
+}
+
+function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpInvocations) {
   const row = document.getElementById('stream-row-' + runId);
   if (!row) return;
   const typing = row.querySelector('.typing-indicator');
@@ -728,6 +777,9 @@ function finalizeStreamRow(runId, output, error, artifactFiles, testReport) {
     }
     if (testReport) {
       resultEl.innerHTML += renderTestReportCard(testReport);
+    }
+    if (mcpInvocations && mcpInvocations.length) {
+      resultEl.innerHTML += renderMcpInvocationsCard(mcpInvocations);
     }
     if (artifactFiles && artifactFiles.length > 0) {
       let artHtml = '<div style="margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px"><div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">\ud83d\udcc1 Artifact Files</div>';
@@ -768,7 +820,7 @@ function openEventStream(runId) {
       const d = JSON.parse(e.data);
       const output = d.final_output || d.output || d.draft_response || '';
       updateStreamStatus(runId, 'Completed.');
-      finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null);
+      finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null, d.mcp_invocations || null);
     } catch(_) {}
   });
 

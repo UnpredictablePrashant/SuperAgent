@@ -166,9 +166,144 @@ def _discover_external_plugins(registry: Registry) -> None:
             _load_external_plugin(registry, plugin_path)
 
 
+def _register_mcp_tools(registry: Registry) -> None:
+    """Register tools from enabled MCP servers as synthetic agents.
+
+    Each MCP tool becomes an ``AgentDefinition`` with a generated handler that
+    calls the tool via the fastmcp client.  This lets the planner route to MCP
+    tools the same way it routes to native agents.
+
+    The function is silent on any import/connectivity errors — MCP tools are
+    best-effort at build_registry() time.
+    """
+    try:
+        from kendr.mcp_manager import list_servers as _mcp_list_servers
+    except Exception:
+        return
+
+    try:
+        servers = _mcp_list_servers()
+    except Exception:
+        return
+
+    plugin_name = "builtin.mcp"
+    registry.register_plugin(
+        PluginDefinition(
+            name=plugin_name,
+            source="mcp",
+            description="Synthetic agents injected from registered MCP servers.",
+        )
+    )
+
+    for server in servers:
+        if not server.get("enabled", True):
+            continue
+        tools = server.get("tools", [])
+        if not tools:
+            continue
+
+        server_name = server.get("name", "mcp")
+        server_id = server.get("id", "")
+        connection = server.get("connection", "")
+        server_type = server.get("type", "http")
+
+        for tool in tools:
+            tool_name = str(tool.get("name", "")).strip()
+            if not tool_name:
+                continue
+
+            # Build a safe agent name: mcp_<server_slug>_<tool_name>_agent
+            server_slug = "".join(c if c.isalnum() else "_" for c in server_name.lower()).strip("_")[:20]
+            tool_slug = "".join(c if c.isalnum() else "_" for c in tool_name.lower()).strip("_")
+            agent_name = f"mcp_{server_slug}_{tool_slug}_agent"
+
+            tool_desc = str(tool.get("description", "") or "").strip()
+            full_desc = tool_desc or f"MCP tool '{tool_name}' from server '{server_name}'."
+
+            _tool_name_captured = tool_name
+            _connection_captured = connection
+            _server_type_captured = server_type
+            _server_name_captured = server_name
+
+            def _make_handler(
+                tname: str,
+                conn: str,
+                stype: str,
+                sname: str,
+            ):
+                def _mcp_tool_handler(state: dict) -> dict:
+                    import asyncio as _asyncio
+                    import json as _json
+
+                    try:
+                        from fastmcp import Client as _MCPClient
+                    except ImportError:
+                        state["error"] = "fastmcp is not installed"
+                        return state
+
+                    tool_input: dict = state.get(f"mcp_input_{tname}", state.get("mcp_tool_input", {}))
+                    if not isinstance(tool_input, dict):
+                        tool_input = {}
+
+                    async def _call():
+                        async with _MCPClient(conn, timeout=30) as client:
+                            return await client.call_tool(tname, tool_input)
+
+                    try:
+                        result = _asyncio.run(_call())
+                        if hasattr(result, "content"):
+                            parts = result.content
+                            text_parts = [
+                                p.text if hasattr(p, "text") else str(p)
+                                for p in (parts if isinstance(parts, list) else [parts])
+                            ]
+                            state[f"mcp_result_{tname}"] = "\n".join(text_parts)
+                        else:
+                            state[f"mcp_result_{tname}"] = str(result)
+                        state["mcp_tool_name"] = tname
+                        state["mcp_server_name"] = sname
+                        state["mcp_tool_ok"] = True
+                    except Exception as exc:
+                        state["mcp_tool_ok"] = False
+                        state["mcp_tool_error"] = str(exc)
+                    return state
+
+                _mcp_tool_handler.__name__ = f"mcp_{sname}_{tname}_handler"
+                return _mcp_tool_handler
+
+            handler = _make_handler(
+                _tool_name_captured,
+                _connection_captured,
+                _server_type_captured,
+                _server_name_captured,
+            )
+
+            skills = [tool_slug, server_slug, "mcp"]
+            registry.register_agent(
+                AgentDefinition(
+                    name=agent_name,
+                    handler=handler,
+                    description=full_desc,
+                    skills=skills,
+                    input_keys=[f"mcp_input_{tool_name}", "mcp_tool_input"],
+                    output_keys=[f"mcp_result_{tool_name}", "mcp_tool_name", "mcp_tool_ok"],
+                    plugin_name=plugin_name,
+                    requirements=[],
+                    metadata={
+                        "mcp_tool": True,
+                        "mcp_server_id": server_id,
+                        "mcp_server_name": server_name,
+                        "mcp_tool_name": tool_name,
+                        "mcp_connection": connection,
+                    },
+                )
+            )
+
+
 def build_registry() -> Registry:
     registry = Registry()
     _register_builtin_capabilities(registry)
     _discover_builtin_task_agents(registry)
     _discover_external_plugins(registry)
+    _register_mcp_tools(registry)
     return registry
