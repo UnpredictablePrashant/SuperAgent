@@ -28,19 +28,25 @@ from tasks.setup_config_store import (
 
 try:
     from kendr.persistence import (
+        cleanup_stale_runs as _db_cleanup_stale_runs,
         delete_chat_session as _db_delete_chat_session,
         list_agent_executions_for_run as _list_run_steps,
         list_artifacts_for_run as _list_run_artifacts,
+        list_run_messages as _db_list_run_messages,
         get_run as _db_get_run,
     )
     _HAS_PERSISTENCE = True
 except Exception:
     _HAS_PERSISTENCE = False
+    def _db_cleanup_stale_runs(**kw):  # type: ignore[misc]
+        return 0
     def _db_delete_chat_session(chat_session_id, **kw):  # type: ignore[misc]
         return {"deleted_runs": [], "deleted_dirs": [], "errors": []}
     def _list_run_steps(run_id):  # type: ignore[misc]
         return []
     def _list_run_artifacts(run_id):  # type: ignore[misc]
+        return []
+    def _db_list_run_messages(run_id, **kw):  # type: ignore[misc]
         return []
     def _db_get_run(run_id):  # type: ignore[misc]
         return None
@@ -498,12 +504,34 @@ a:hover { text-decoration: underline; }
 .bubble { padding: 14px 18px; border-radius: 4px 18px 18px 18px; border: 1px solid var(--border); background: var(--surface); max-width: 680px; font-size: 14px; line-height: 1.65; }
 .bubble-meta { font-size: 11px; color: var(--muted); margin-top: 8px; }
 .bubble pre { background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow-x: auto; font-size: 13px; margin: 8px 0; white-space: pre-wrap; }
-.steps-wrapper { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
-.step-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; font-size: 12px; display: flex; align-items: center; gap: 8px; }
-.step-card.running { border-color: rgba(255,179,71,0.4); }
-.step-card.done { border-color: rgba(0,201,167,0.3); }
-.step-card.failed { border-color: rgba(255,71,87,0.4); }
-.step-card.mcp-step { border-color: rgba(167,139,250,0.35); background: rgba(167,139,250,0.05); }
+.steps-wrapper { display: flex; flex-direction: column; gap: 0; margin-top: 10px; position: relative; }
+.step-card { background: transparent; border: none; border-radius: 0; padding: 0 0 4px 28px; font-size: 12px; position: relative; }
+.step-card::before { content: ''; position: absolute; left: 7px; top: 20px; bottom: -4px; width: 1px; background: var(--border); }
+.step-card:last-child::before { display: none; }
+.step-dot { position: absolute; left: 0; top: 6px; width: 15px; height: 15px; border-radius: 50%; background: var(--surface2); border: 2px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 9px; }
+.step-card.running .step-dot { border-color: var(--amber); background: rgba(255,179,71,0.15); }
+.step-card.done .step-dot, .step-card.completed .step-dot, .step-card.success .step-dot { border-color: var(--teal); background: rgba(0,201,167,0.15); }
+.step-card.failed .step-dot, .step-card.error .step-dot { border-color: var(--crimson); background: rgba(255,71,87,0.15); }
+.step-card.mcp-step .step-dot { border-color: #a78bfa; background: rgba(167,139,250,0.15); }
+.step-inner { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-left: 4px; }
+.step-card.running .step-inner { border-color: rgba(255,179,71,0.35); }
+.step-card.done .step-inner, .step-card.completed .step-inner, .step-card.success .step-inner { border-color: rgba(0,201,167,0.25); }
+.step-card.failed .step-inner, .step-card.error .step-inner { border-color: rgba(255,71,87,0.3); }
+.step-card.mcp-step .step-inner { border-color: rgba(167,139,250,0.3); background: rgba(167,139,250,0.04); }
+.step-reason { margin-top: 5px; font-size: 11px; color: var(--muted); }
+.step-reason summary { cursor: pointer; color: var(--teal); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; user-select: none; list-style: none; display: flex; align-items: center; gap: 4px; }
+.step-reason summary::after { content: '▸'; font-size: 9px; transition: transform .2s; }
+.step-reason[open] summary::after { transform: rotate(90deg); }
+.step-reason p { margin: 4px 0 0; padding: 5px 8px; background: rgba(255,255,255,0.03); border-left: 2px solid var(--teal); border-radius: 0 4px 4px 0; line-height: 1.5; }
+.step-output { margin-top: 5px; font-size: 11px; color: var(--muted); }
+.step-output summary { cursor: pointer; color: var(--muted); font-size: 10px; font-weight: 600; list-style: none; display: flex; align-items: center; gap: 4px; user-select: none; }
+.step-output summary::after { content: '▸'; font-size: 9px; transition: transform .2s; }
+.step-output[open] summary::after { transform: rotate(90deg); }
+.step-output p { margin: 4px 0 0; padding: 5px 8px; background: rgba(0,0,0,0.2); border-radius: 4px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+@keyframes thinking-pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
+.thinking-dots span { animation: thinking-pulse 1.2s ease-in-out infinite; }
+.thinking-dots span:nth-child(2){animation-delay:.2s}
+.thinking-dots span:nth-child(3){animation-delay:.4s}
 .step-icon { font-size: 14px; flex-shrink: 0; }
 .step-info { flex: 1; }
 .step-name { font-weight: 600; color: var(--text); }
@@ -946,12 +974,13 @@ function _agentDisplayName(agentName) {
 function addStreamStep(runId, step) {
   const container = document.getElementById('stream-steps-' + runId);
   if (!container) return;
-  const cssClass = step.status || 'running';
+  const rawStatus = step.status || 'running';
   const agentName = step.agent || step.name || 'agent';
   const isMcp = agentName.startsWith('mcp_') && agentName.endsWith('_agent');
-  const isRunning = cssClass === 'running';
-  const isDone = cssClass === 'done' || cssClass === 'completed';
-  const isFailed = cssClass === 'failed';
+  const isRunning = rawStatus === 'running' || rawStatus === 'started';
+  const isDone = rawStatus === 'done' || rawStatus === 'completed' || rawStatus === 'success';
+  const isFailed = rawStatus === 'failed' || rawStatus === 'error';
+  const cssClass = isRunning ? 'running' : isDone ? 'done' : isFailed ? 'failed' : rawStatus;
   const existingId = 'step-' + runId + '-' + (step.execution_id || agentName);
   const existing = document.getElementById(existingId);
   let div = existing || document.createElement('div');
@@ -960,36 +989,60 @@ function addStreamStep(runId, step) {
     container.appendChild(div);
   }
   div.className = 'step-card ' + cssClass + (isMcp ? ' mcp-step' : '');
+
   let displayName = isMcp
     ? agentName.replace(/^mcp_/, '').replace(/_agent$/, '').split('_').join(' \u2192 ')
     : _agentDisplayName(agentName);
-  const mcpPill = isMcp ? '<span style="display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(167,139,250,0.15);color:#a78bfa;margin-left:6px">\uD83E\uDDE9 MCP</span>' : '';
-  const statusIcon = isRunning ? '<span class="spinner" style="width:13px;height:13px;display:inline-block"></span>'
-    : isDone ? '<span style="color:#22c55e;font-size:14px">\u2713</span>'
-    : '<span style="color:#ef4444;font-size:14px">\u2717</span>';
+
+  const dotIcon = isRunning
+    ? '<span class="spinner" style="width:9px;height:9px;display:inline-block;vertical-align:middle"></span>'
+    : isDone ? '\u2713' : '\u2717';
+  const nameColor = isRunning ? 'var(--teal)' : isDone ? '#ccc' : 'var(--crimson)';
+
+  const mcpPill = isMcp
+    ? '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(167,139,250,0.15);color:#a78bfa;margin-left:6px">\uD83E\uDDE9 MCP</span>'
+    : '';
+
   const reason = step.reason || '';
   const message = step.message || '';
-  let thinkHtml = '';
+
+  let reasonHtml = '';
   if (reason) {
-    thinkHtml += '<div style="margin-top:4px;padding:5px 8px;background:rgba(255,255,255,0.04);border-left:2px solid var(--teal);border-radius:0 4px 4px 0;font-size:11px;color:var(--muted)">'
-      + '<span style="color:var(--teal);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em">Why </span>'
-      + esc(reason.slice(0, 200)) + (reason.length > 200 ? '…' : '') + '</div>';
+    const reasonShort = reason.slice(0, 160) + (reason.length > 160 ? '…' : '');
+    const reasonFull = reason.length > 160
+      ? '<details class="step-reason"><summary>Why</summary><p>' + esc(reason) + '</p></details>'
+      : '<div class="step-reason" style="margin-top:5px"><span style="color:var(--teal);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em">Why </span>' + esc(reasonShort) + '</div>';
+    reasonHtml = reasonFull;
   }
+
+  let outputHtml = '';
   if (message && message !== reason) {
-    const previewLen = isRunning ? 120 : 240;
-    const preview = message.slice(0, previewLen) + (message.length > previewLen ? '…' : '');
-    thinkHtml += '<div style="margin-top:4px;font-size:11px;color:var(--muted)">' + esc(preview) + '</div>';
+    if (isRunning) {
+      outputHtml = '<div style="margin-top:5px;font-size:11px;color:var(--muted)">' + esc(message.slice(0, 180)) + (message.length > 180 ? '…' : '') + '</div>';
+    } else if (message.length > 320) {
+      const preview = esc(message.slice(0, 320));
+      outputHtml = '<details class="step-output"><summary>Output (' + message.length.toLocaleString() + ' chars)</summary><p>' + esc(message) + '</p></details>';
+    } else {
+      outputHtml = '<div style="margin-top:5px;font-size:11px;color:var(--muted);white-space:pre-wrap;word-break:break-word">' + esc(message) + '</div>';
+    }
   }
-  if (isRunning && !reason && !message) {
-    thinkHtml += '<div style="margin-top:4px;font-size:11px;color:var(--muted);font-style:italic">Working\u2026</div>';
+
+  let pulseHtml = '';
+  if (isRunning && !message) {
+    pulseHtml = '<div class="thinking-dots" style="margin-top:5px;font-size:11px;color:var(--muted)">'
+      + 'Thinking<span>.</span><span>.</span><span>.</span></div>';
   }
-  div.innerHTML = '<div style="display:flex;align-items:flex-start;gap:10px">'
-    + '<div style="margin-top:1px;min-width:16px;text-align:center">' + statusIcon + '</div>'
-    + '<div style="flex:1;min-width:0">'
-    + '<div style="font-size:12px;font-weight:600;color:' + (isRunning ? 'var(--teal)' : isDone ? '#ccc' : '#ef4444') + '">'
-    + esc(displayName) + mcpPill + '</div>'
-    + thinkHtml
-    + '</div></div>';
+
+  div.innerHTML = '<div class="step-dot">' + dotIcon + '</div>'
+    + '<div class="step-inner">'
+    + '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+    + '<span style="font-size:12px;font-weight:600;color:' + nameColor + '">' + esc(displayName) + '</span>'
+    + mcpPill
+    + '</div>'
+    + reasonHtml
+    + outputHtml
+    + pulseHtml
+    + '</div>';
   scrollDown();
 }
 
@@ -3886,6 +3939,14 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json(500, {"error": str(exc)})
             return
+        if path.startswith("/api/runs/") and path.endswith("/messages"):
+            run_id = path[len("/api/runs/"):-len("/messages")]
+            try:
+                msgs = _db_list_run_messages(run_id, limit=300)
+            except Exception:
+                msgs = []
+            self._json(200, {"run_id": run_id, "messages": msgs})
+            return
         if path.startswith("/api/runs/") and path.endswith("/artifacts"):
             run_id = path[len("/api/runs/"):-len("/artifacts")]
             db_artifacts, file_list = [], []
@@ -4981,6 +5042,13 @@ class KendrUIHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     apply_setup_env_defaults()
+    try:
+        cleaned = _db_cleanup_stale_runs(stale_minutes=20)
+        if cleaned:
+            import logging as _logging
+            _logging.getLogger(__name__).info("[ui] Cleaned up %d stale run(s) on startup", cleaned)
+    except Exception:
+        pass
     host = os.getenv("KENDR_UI_HOST", _UI_HOST)
     port = int(os.getenv("KENDR_UI_PORT", str(_UI_PORT)))
     server = ThreadingHTTPServer((host, port), KendrUIHandler)

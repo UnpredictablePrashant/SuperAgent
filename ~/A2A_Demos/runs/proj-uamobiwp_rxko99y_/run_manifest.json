@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "summary": {
+    "schema_version": 1,
+    "run_id": "proj-uamobiwp",
+    "session_id": "webchat:default:project_ui:main",
+    "session_started_at": "2026-04-01T08:58:41.173778+00:00",
+    "status": "running",
+    "updated_at": "2026-04-01T09:00:18.802532+00:00",
+    "completed_at": "",
+    "working_directory": "/home/runner/workspace/~/A2A_Demos",
+    "run_output_dir": "/home/runner/workspace/~/A2A_Demos/runs/proj-uamobiwp_rxko99y_",
+    "channel_session_key": "webchat:default:project_ui:main",
+    "parent_run_id": "",
+    "objective": "Write a comprehensive, well-structured, easy-to-read report that analyzes the A2A_Demos project, providing available details, assessing its significance, and making concrete recommendations for further investigation.",
+    "user_query": "[Project: A2A_Demos at /home/runner/workspace/~/A2A_Demos]\nanalyse the project..",
+    "active_agent": "worker_agent",
+    "last_agent": "reviewer_agent",
+    "last_error": "",
+    "awaiting_user_input": false,
+    "pending_user_input_kind": "",
+    "pending_user_question": "",
+    "approval_pending_scope": "",
+    "plan_step_index": 0,
+    "plan_step_count": 0,
+    "current_plan_step_id": "",
+    "current_plan_step_title": "",
+    "last_completed_plan_step_id": "",
+    "last_completed_plan_step_title": "",
+    "failure_checkpoint": {},
+    "resume_status": "running",
+    "resumable": false,
+    "branchable": true,
+    "resume_strategy": "takeover_required"
+  },
+  "files": {
+    "run_output_dir": "/home/runner/workspace/~/A2A_Demos/runs/proj-uamobiwp_rxko99y_",
+    "manifest": "/home/runner/workspace/~/A2A_Demos/runs/proj-uamobiwp_rxko99y_/run_manifest.json",
+    "checkpoint": "/home/runner/workspace/~/A2A_Demos/runs/proj-uamobiwp_rxko99y_/checkpoint.json",
+    "heartbeat": "/home/runner/workspace/~/A2A_Demos/runs/proj-uamobiwp_rxko99y_/heartbeat.json",
+    "summary": "/home/runner/workspace/~/A2A_Demos/runs/proj-uamobiwp_rxko99y_/resume_summary.json"
+  }
+}

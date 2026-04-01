@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "run_id": "proj-uamobiwp",
+  "status": "running",
+  "resumable": false,
+  "branchable": true,
+  "resume_strategy": "takeover_required",
+  "objective": "Write a comprehensive, well-structured, easy-to-read report that analyzes the A2A_Demos project, providing available details, assessing its significance, and making concrete recommendations for further investigation.",
+  "active_agent": "worker_agent",
+  "last_agent": "reviewer_agent",
+  "last_error": "",
+  "pending_user_input_kind": "",
+  "pending_user_question": "",
+  "plan_step_index": 0,
+  "plan_step_count": 0,
+  "current_plan_step_title": "",
+  "last_completed_plan_step_title": "",
+  "updated_at": "2026-04-01T09:00:18.802532+00:00",
+  "working_directory": "/home/runner/workspace/~/A2A_Demos",
+  "run_output_dir": "/home/runner/workspace/~/A2A_Demos/runs/proj-uamobiwp_rxko99y_"
+}

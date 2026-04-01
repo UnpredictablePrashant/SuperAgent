@@ -1608,6 +1608,11 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
     run_parser.add_argument("query", nargs="*", help="User query to process.")
     run_parser.add_argument("--max-steps", type=int, default=20, help="Maximum orchestration steps.")
     run_parser.add_argument(
+        "--background", "-b",
+        action="store_true",
+        help="Submit run and exit immediately (returns run_id). Check status with: kendr status <run_id>",
+    )
+    run_parser.add_argument(
         "--auto-approve",
         action="store_true",
         help="Auto-approve blueprint and plan gates (no interactive approval prompts).",
@@ -3930,6 +3935,37 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from kendr import cli_output as out
 
     query = " ".join(args.query).strip() or input("Enter your query: ").strip()
+
+    if bool(getattr(args, "background", False)):
+        bg_args = [sys.executable, "-m", "kendr.cli", "run"] + list(args.query)
+        for flag_name in (
+            "working_directory", "max_steps", "channel", "workspace_id",
+            "sender_id", "chat_id",
+        ):
+            val = str(getattr(args, flag_name, "") or "").strip()
+            if val:
+                bg_args += [f"--{flag_name.replace('_', '-')}", val]
+        for bool_flag in ("auto_approve", "skip_reviews", "current_folder"):
+            if bool(getattr(args, bool_flag, False)):
+                bg_args.append(f"--{bool_flag.replace('_', '-')}")
+        log_dir = Path.home() / ".kendr" / "bg_runs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        run_ts = int(time.time())
+        log_file = log_dir / f"bg_run_{run_ts}.log"
+        with open(log_file, "w") as lf:
+            proc = subprocess.Popen(
+                bg_args,
+                stdout=lf,
+                stderr=lf,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        sys.stdout.write(f"[kendr] Background run started (pid={proc.pid})\n")
+        sys.stdout.write(f"[kendr] Log: {log_file}\n")
+        sys.stdout.write(f"[kendr] Check status: kendr status\n")
+        sys.stdout.flush()
+        return 0
+
     configured_working_dir = ""
     if bool(args.current_folder):
         configured_working_dir = str(Path.cwd())

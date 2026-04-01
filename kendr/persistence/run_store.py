@@ -566,6 +566,44 @@ def list_recent_runs(limit: int = 20, db_path: str = DB_PATH) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def cleanup_stale_runs(stale_minutes: int = 20, db_path: str = DB_PATH) -> int:
+    """Mark runs that have been stuck in 'running'/'started' status for too long as failed."""
+    import datetime as _dt
+    initialize_db(db_path)
+    cutoff = (_dt.datetime.utcnow() - _dt.timedelta(minutes=stale_minutes)).strftime("%Y-%m-%dT%H:%M:%S")
+    now = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    with _connect(db_path) as conn:
+        result = conn.execute(
+            """
+            UPDATE runs
+            SET status = 'failed',
+                completed_at = ?,
+                final_output = 'Run was interrupted (server restart or timeout).'
+            WHERE status IN ('running', 'started')
+              AND COALESCE(updated_at, started_at) < ?
+            """,
+            (now, cutoff),
+        )
+        return result.rowcount
+
+
+def list_run_messages(run_id: str, limit: int = 200, db_path: str = DB_PATH) -> list[dict]:
+    """Return messages for a run ordered by timestamp."""
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT message_id, run_id, timestamp, sender, recipient, role, content, task_id
+            FROM messages
+            WHERE run_id = ?
+            ORDER BY timestamp ASC
+            LIMIT ?
+            """,
+            (run_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def list_channel_sessions(limit: int = 50, db_path: str = DB_PATH) -> list[dict]:
     initialize_db(db_path)
     with _connect(db_path) as conn:
