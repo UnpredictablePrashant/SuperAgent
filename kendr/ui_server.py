@@ -28,6 +28,7 @@ from tasks.setup_config_store import (
 
 try:
     from kendr.persistence import (
+        delete_chat_session as _db_delete_chat_session,
         list_agent_executions_for_run as _list_run_steps,
         list_artifacts_for_run as _list_run_artifacts,
         get_run as _db_get_run,
@@ -35,6 +36,8 @@ try:
     _HAS_PERSISTENCE = True
 except Exception:
     _HAS_PERSISTENCE = False
+    def _db_delete_chat_session(chat_session_id, **kw):  # type: ignore[misc]
+        return {"deleted_runs": [], "deleted_dirs": [], "errors": []}
     def _list_run_steps(run_id):  # type: ignore[misc]
         return []
     def _list_run_artifacts(run_id):  # type: ignore[misc]
@@ -554,7 +557,7 @@ a:hover { text-decoration: underline; }
       <div class="chat-subtitle">Powered by kendr multi-agent runtime</div>
     </div>
     <div class="header-status">
-      <button class="clear-chat-btn" id="clearChatBtn" onclick="clearChat()" title="Clear chat" style="display:none">&#x1F5D1; Clear</button>
+      <button class="clear-chat-btn" id="clearChatBtn" onclick="deleteChat()" title="Delete this chat and all its data" style="display:none">&#x1F5D1; Delete</button>
       <div class="status-dot" id="gatewayDot"></div>
       <span id="gatewayStatus">Checking gateway...</span>
     </div>
@@ -778,16 +781,15 @@ function newChat() {
   document.getElementById('userInput').focus();
 }
 
-function clearChat() {
+async function deleteChat() {
   const msgs = document.getElementById('messages');
   const welcome = document.getElementById('welcome');
   const alreadyClear = welcome && msgs.contains(welcome) && msgs.children.length === 1;
   if (alreadyClear) return;
-  if (!confirm('Clear this chat? All messages in this view will be removed.')) return;
+  if (!confirm('Delete this chat? This will permanently remove all messages, runs, and output files.')) return;
+  const sessionToDelete = chatSessionId;
   _loadRunToken++;
   isAwaitingInput = false;
-  chatSessionId = _newChatSessionId();
-  sessionStorage.setItem('kendr_chat_session_id', chatSessionId);
   if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
   stopPlanPolling();
   isRunning = false;
@@ -797,8 +799,19 @@ function clearChat() {
   clearMessages();
   document.getElementById('chatTitle').textContent = 'New Chat';
   document.getElementById('clearChatBtn').style.display = 'none';
+  chatSessionId = _newChatSessionId();
+  sessionStorage.setItem('kendr_chat_session_id', chatSessionId);
   document.getElementById('userInput').focus();
+  try {
+    await fetch(API + '/api/chat/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ chat_session_id: sessionToDelete })
+    });
+  } catch(e) { }
 }
+
+function clearChat() { deleteChat(); }
 
 function clearMessages() {
   const msgs = document.getElementById('messages');
@@ -3786,6 +3799,17 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/chat/resume":
             self._handle_chat_resume(body)
+            return
+        if path == "/api/chat/delete":
+            chat_session_id = str(body.get("chat_session_id", "")).strip()
+            if not chat_session_id:
+                self._json(400, {"error": "missing_chat_session_id"})
+                return
+            try:
+                result = _db_delete_chat_session(chat_session_id)
+                self._json(200, {"ok": True, **result})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
             return
         if path == "/api/setup/save":
             self._handle_setup_save(body)

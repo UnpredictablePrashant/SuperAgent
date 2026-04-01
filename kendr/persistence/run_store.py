@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 
 from .core import DB_PATH, _connect, initialize_db
 
@@ -686,3 +688,55 @@ def list_heartbeat_events(limit: int = 50, db_path: str = DB_PATH) -> list[dict]
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def delete_chat_session(
+    chat_session_id: str,
+    channel: str = "webchat",
+    workspace_id: str = "default",
+    db_path: str = DB_PATH,
+) -> dict:
+    initialize_db(db_path)
+    session_key = f"{channel}:{workspace_id}:{chat_session_id}:main"
+    deleted_runs: list[str] = []
+    deleted_dirs: list[str] = []
+    errors: list[str] = []
+
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT run_id, run_output_dir FROM runs WHERE session_id = ?",
+            (chat_session_id,),
+        ).fetchall()
+        run_ids = [row["run_id"] for row in rows]
+        run_dirs = [row["run_output_dir"] for row in rows if row["run_output_dir"]]
+
+    for run_dir in run_dirs:
+        try:
+            p = Path(run_dir)
+            if p.exists() and p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+                deleted_dirs.append(str(p))
+        except Exception as exc:
+            errors.append(str(exc))
+
+    if run_ids:
+        placeholders = ",".join("?" * len(run_ids))
+        with _connect(db_path) as conn:
+            for table in ("run_checkpoints", "artifacts", "agent_executions", "messages", "tasks"):
+                conn.execute(f"DELETE FROM {table} WHERE run_id IN ({placeholders})", run_ids)
+            try:
+                conn.execute(f"DELETE FROM task_sessions WHERE run_id IN ({placeholders})", run_ids)
+            except Exception:
+                pass
+            conn.execute(f"DELETE FROM runs WHERE run_id IN ({placeholders})", run_ids)
+            deleted_runs = run_ids
+
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM channel_sessions WHERE session_key = ?", (session_key,))
+
+    return {
+        "deleted_runs": deleted_runs,
+        "deleted_dirs": deleted_dirs,
+        "session_key": session_key,
+        "errors": errors,
+    }
