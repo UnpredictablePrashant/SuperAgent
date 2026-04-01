@@ -113,6 +113,11 @@ def add_project(path: str, name: str = "") -> dict:
     return entry
 
 
+def get_project(project_id: str) -> dict | None:
+    store = _load_store()
+    return store.get("projects", {}).get(project_id)
+
+
 def remove_project(project_id: str) -> bool:
     with _store_lock:
         store = _load_store()
@@ -124,6 +129,29 @@ def remove_project(project_id: str) -> bool:
             store["active"] = remaining[0] if remaining else None
         _save_store(store)
     return True
+
+
+def delete_project_and_files(project_id: str) -> dict:
+    """Remove from store and permanently delete all project files from disk."""
+    import shutil as _shutil
+    with _store_lock:
+        store = _load_store()
+        entry = store.get("projects", {}).get(project_id)
+        if not entry:
+            return {"ok": False, "error": "Project not found"}
+        project_path = entry.get("path", "")
+        del store["projects"][project_id]
+        if store.get("active") == project_id:
+            remaining = list(store.get("projects", {}).keys())
+            store["active"] = remaining[0] if remaining else None
+        _save_store(store)
+    if project_path and os.path.isdir(project_path):
+        try:
+            _shutil.rmtree(project_path)
+            return {"ok": True, "deleted_path": project_path}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "deleted_path": project_path}
+    return {"ok": True, "deleted_path": None, "warning": "Directory not found on disk"}
 
 
 def init_project_from_scratch(name: str, parent_dir: str = "", stack: str = "") -> dict:

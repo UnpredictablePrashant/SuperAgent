@@ -1,0 +1,14 @@
+**Summary of Inbound Channel Message Normalization Result:**
+
+- **Channel:** Webchat
+- **Sender ID:** project_ui
+- **Chat ID:** project_ui
+- **Workspace ID:** (not specified)
+- **Text:** The message indicates a request to analyze a project titled "A2A_Demos", located at the specified path.
+- **Is Group:** false (the message is from an individual user, not a group chat)
+- **Mentioned:** false (no other users were mentioned in the message)
+- **Should Activate:** true (this message should activate the main workflow)
+
+**Should the message activate the main workflow?**
+
+Yes, the message should activate the main workflow because the "should_activate" property is set to true. Additionally, the content of the message clearly requests an action (analyzing a project), which aligns with the functionality of the main workflow designed for handling such requests. The lack of group context and direct request for analysis further supports the decision to proceed with workflow activation.

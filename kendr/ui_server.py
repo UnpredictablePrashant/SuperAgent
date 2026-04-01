@@ -97,6 +97,8 @@ try:
         set_active_project as _pm_set_active,
         add_project as _pm_add_project,
         remove_project as _pm_remove_project,
+        delete_project_and_files as _pm_delete_files,
+        get_project as _pm_get_project,
         init_project_from_scratch as _pm_init_project,
         read_file_tree as _pm_file_tree,
         read_file_content as _pm_read_file,
@@ -1760,6 +1762,44 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
   </div>
 </div>
 
+<!-- Delete project confirmation modal -->
+<div class="modal-overlay" id="projDeleteModal">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-title" style="color:var(--crimson)">Remove Project</div>
+    <p style="margin:0 0 12px;font-size:14px;line-height:1.5">What would you like to do with <strong id="deleteProjName"></strong>?</p>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:16px;padding:10px 12px;background:rgba(255,255,255,0.04);border-radius:6px;border-left:3px solid var(--crimson)">
+      <strong>Delete files</strong> permanently removes the folder and all its contents from disk. This cannot be undone.
+    </div>
+    <div id="deleteProjMsg" style="font-size:12px;min-height:18px;margin-bottom:8px"></div>
+    <div class="modal-actions" style="flex-wrap:wrap;gap:8px">
+      <button class="btn btn-outline" onclick="closeDeleteProjModal()" style="flex:0">Cancel</button>
+      <button class="btn btn-outline" onclick="removeProjectFromList()" style="flex:1">Remove from list only</button>
+      <button class="btn" onclick="deleteProjectAndFiles()" style="flex:1;background:var(--crimson);border-color:var(--crimson);color:#fff">&#x1F5D1; Delete files &amp; remove</button>
+    </div>
+  </div>
+</div>
+
+<!-- Download project modal -->
+<div class="modal-overlay" id="projDownloadModal">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-title">&#x2B07; Download Project</div>
+    <p style="margin:0 0 14px;font-size:14px"><strong id="downloadProjName"></strong></p>
+    <div class="form-field">
+      <label>Archive format</label>
+      <select id="downloadFmtSelect" style="width:100%;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:13px">
+        <option value="zip">ZIP (.zip) — most compatible</option>
+        <option value="tar.gz">Gzip tarball (.tar.gz) — common on Linux/Mac</option>
+        <option value="tar.bz2">Bzip2 tarball (.tar.bz2) — smaller size</option>
+      </select>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-bottom:16px">Excludes <code>.git</code>, <code>node_modules</code>, <code>__pycache__</code>, and virtual environments.</div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeDownloadModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="downloadProject()">&#x2B07; Download</button>
+    </div>
+  </div>
+</div>
+
 <!-- Add / Clone modal -->
 <div class="modal-overlay" id="addModal">
   <div class="modal">
@@ -1822,15 +1862,23 @@ async function loadProjects() {
       `<div class="proj-item ${p.id === _activeProjectId ? 'active' : ''}" onclick="openProject('${p.id}','${esc(p.path)}','${esc(p.name)}')">
         <span style="font-size:14px">&#x1F4C1;</span>
         <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="${esc(p.path)}">${esc(p.name)}</span>
-        <button onclick="event.stopPropagation();deleteProject('${p.id}','${esc(p.name)}')" title="Remove project" style="background:none;border:none;color:var(--muted);cursor:pointer;padding:0 2px;font-size:13px;line-height:1;opacity:0.6" onmouseover="this.style.color='var(--crimson)';this.style.opacity='1'" onmouseout="this.style.color='var(--muted)';this.style.opacity='0.6'">&#x1F5D1;</button>
+        <button onclick="event.stopPropagation();openDownloadModal('${p.id}','${esc(p.name)}')" title="Download / export project" style="background:none;border:none;color:var(--muted);cursor:pointer;padding:0 2px;font-size:12px;line-height:1;opacity:0.6" onmouseover="this.style.color='var(--teal)';this.style.opacity='1'" onmouseout="this.style.color='var(--muted)';this.style.opacity='0.6'">&#x2B07;</button>
+        <button onclick="event.stopPropagation();openDeleteProjectModal('${p.id}','${esc(p.name)}')" title="Remove / delete project" style="background:none;border:none;color:var(--muted);cursor:pointer;padding:0 2px;font-size:13px;line-height:1;opacity:0.6" onmouseover="this.style.color='var(--crimson)';this.style.opacity='1'" onmouseout="this.style.color='var(--muted)';this.style.opacity='0.6'">&#x1F5D1;</button>
       </div>`
     ).join('') || '<div style="padding:8px 10px;font-size:12px;color:var(--muted)">No projects yet.</div>';
   } catch(e) { console.warn('load projects error', e); }
 }
 
-async function deleteProject(id, name) {
-  if (!confirm('Remove "' + name + '" from the project list? (Files are not deleted.)')) return;
-  await fetch(API + '/api/projects/' + id + '/remove', { method: 'POST' });
+let _deleteProjId = null, _deleteProjName = '';
+function openDeleteProjectModal(id, name) {
+  _deleteProjId = id; _deleteProjName = name;
+  document.getElementById('deleteProjName').textContent = name;
+  document.getElementById('deleteProjMsg').textContent = '';
+  document.getElementById('projDeleteModal').classList.add('open');
+}
+function closeDeleteProjModal() { document.getElementById('projDeleteModal').classList.remove('open'); }
+
+async function _clearProjectUI(id) {
   if (_activeProjectId === id) {
     _activeProjectId = null; _activeProjectPath = null; _activeProjectName = '';
     document.getElementById('wsTitle').textContent = 'Projects';
@@ -1839,7 +1887,37 @@ async function deleteProject(id, name) {
     document.getElementById('filePanelTitle').textContent = 'No project open';
     document.getElementById('fileTree').innerHTML = '<div style="padding:14px;font-size:12px;color:var(--muted)">Open a project to see its files.</div>';
   }
+}
+async function removeProjectFromList() {
+  closeDeleteProjModal();
+  await fetch(API + '/api/projects/' + _deleteProjId + '/remove', { method: 'POST' });
+  await _clearProjectUI(_deleteProjId);
   await loadProjects();
+}
+async function deleteProjectAndFiles() {
+  const msg = document.getElementById('deleteProjMsg');
+  msg.style.color = 'var(--muted)'; msg.textContent = 'Deleting files...';
+  const r = await fetch(API + '/api/projects/' + _deleteProjId + '/delete-files', { method: 'POST' });
+  const d = await r.json();
+  if (!d.ok) { msg.style.color = 'var(--crimson)'; msg.textContent = d.error || 'Delete failed'; return; }
+  closeDeleteProjModal();
+  await _clearProjectUI(_deleteProjId);
+  await loadProjects();
+}
+
+// ── Download modal ────────────────────────────────────────────────────────────
+let _downloadProjId = null;
+function openDownloadModal(id, name) {
+  _downloadProjId = id;
+  document.getElementById('downloadProjName').textContent = name;
+  document.getElementById('projDownloadModal').classList.add('open');
+}
+function closeDownloadModal() { document.getElementById('projDownloadModal').classList.remove('open'); }
+function downloadProject() {
+  const fmt = document.getElementById('downloadFmtSelect').value;
+  const url = API + '/api/projects/' + _downloadProjId + '/download?format=' + encodeURIComponent(fmt);
+  const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); a.remove();
+  closeDownloadModal();
 }
 
 async function openProject(id, path, name) {
@@ -3798,6 +3876,12 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             project_id = path[len("/api/projects/"):-len("/files")]
             self._handle_project_file_tree(project_id)
             return
+        if path.startswith("/api/projects/") and path.endswith("/download"):
+            project_id = path[len("/api/projects/"):-len("/download")]
+            params = parse_qs(parsed.query or "")
+            fmt = (params.get("format") or ["zip"])[0].lower().strip()
+            self._handle_project_download(project_id, fmt)
+            return
         if path.startswith("/api/projects/") and path.endswith("/git/status"):
             project_id = path[len("/api/projects/"):-len("/git/status")]
             self._handle_project_git_status(project_id)
@@ -3879,6 +3963,10 @@ class KendrUIHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/projects/") and path.endswith("/remove"):
             project_id = path[len("/api/projects/"):-len("/remove")]
             self._handle_project_remove(project_id)
+            return
+        if path.startswith("/api/projects/") and path.endswith("/delete-files"):
+            project_id = path[len("/api/projects/"):-len("/delete-files")]
+            self._handle_project_delete_files(project_id)
             return
         if path.startswith("/api/projects/") and path.endswith("/git/pull"):
             project_id = path[len("/api/projects/"):-len("/git/pull")]
@@ -4284,6 +4372,71 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             self._json(200, entry)
         except Exception as exc:
             self._json(400, {"error": str(exc)})
+
+    def _handle_project_delete_files(self, project_id: str) -> None:
+        if not _HAS_PROJECT_MANAGER:
+            self._json(503, {"error": "Project manager not available"})
+            return
+        try:
+            result = _pm_delete_files(project_id)
+            self._json(200, result)
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
+
+    def _handle_project_download(self, project_id: str, fmt: str) -> None:
+        if not _HAS_PROJECT_MANAGER:
+            self._json(503, {"error": "Project manager not available"})
+            return
+        import io as _io
+        import zipfile as _zipfile
+        import tarfile as _tarfile
+        entry = _pm_get_project(project_id)
+        if not entry:
+            self._json(404, {"error": "Project not found"})
+            return
+        project_path = entry.get("path", "")
+        proj_name = entry.get("name", project_id)
+        if not os.path.isdir(project_path):
+            self._json(404, {"error": "Project directory not found on disk"})
+            return
+        valid_fmts = ("zip", "tar.gz", "tar.bz2", "tgz")
+        if fmt not in valid_fmts:
+            fmt = "zip"
+        buf = _io.BytesIO()
+        arcname_root = proj_name.replace(" ", "_")
+        try:
+            if fmt == "zip":
+                with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as zf:
+                    for dirpath, dirnames, filenames in os.walk(project_path):
+                        dirnames[:] = [d for d in dirnames if d not in (".git", "__pycache__", "node_modules", ".venv", "venv")]
+                        for fname in filenames:
+                            full = os.path.join(dirpath, fname)
+                            rel = os.path.relpath(full, project_path)
+                            zf.write(full, os.path.join(arcname_root, rel))
+                content_type = "application/zip"
+                dl_name = arcname_root + ".zip"
+            else:
+                mode = "w:bz2" if fmt == "tar.bz2" else "w:gz"
+                with _tarfile.open(fileobj=buf, mode=mode) as tf:
+                    for dirpath, dirnames, filenames in os.walk(project_path):
+                        dirnames[:] = [d for d in dirnames if d not in (".git", "__pycache__", "node_modules", ".venv", "venv")]
+                        for fname in filenames:
+                            full = os.path.join(dirpath, fname)
+                            rel = os.path.relpath(full, project_path)
+                            tf.add(full, arcname=os.path.join(arcname_root, rel))
+                content_type = "application/x-bzip2" if fmt == "tar.bz2" else "application/gzip"
+                ext = ".tar.bz2" if fmt == "tar.bz2" else ".tar.gz"
+                dl_name = arcname_root + ext
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
+            return
+        data = buf.getvalue()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{dl_name}"')
+        self.end_headers()
+        self.wfile.write(data)
 
     def _handle_project_activate(self, project_id: str) -> None:
         if not _HAS_PROJECT_MANAGER:
