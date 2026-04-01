@@ -812,6 +812,7 @@ async function deleteChat() {
       body: JSON.stringify({ chat_session_id: sessionToDelete })
     });
   } catch(e) { }
+  loadRuns();
 }
 
 function clearChat() { deleteChat(); }

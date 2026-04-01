@@ -704,8 +704,8 @@ def delete_chat_session(
 
     with _connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT run_id, run_output_dir FROM runs WHERE session_id = ?",
-            (chat_session_id,),
+            "SELECT run_id, run_output_dir FROM runs WHERE session_id = ? OR session_id = ?",
+            (session_key, chat_session_id),
         ).fetchall()
         run_ids = [row["run_id"] for row in rows]
         run_dirs = [row["run_output_dir"] for row in rows if row["run_output_dir"]]
