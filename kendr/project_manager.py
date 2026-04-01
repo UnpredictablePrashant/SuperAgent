@@ -20,6 +20,12 @@ from typing import Any
 
 _log = logging.getLogger("kendr.project_manager")
 
+
+def _normalize_path(path: str) -> str:
+    """Expand ~ and resolve to an absolute real path."""
+    return str(Path(path).expanduser().resolve())
+
+
 _DEFAULT_STORE = os.path.join(os.path.expanduser("~"), ".kendr", "projects.json")
 _PROJECTS_STORE = os.getenv("KENDR_PROJECTS_STORE", _DEFAULT_STORE)
 _store_lock = threading.Lock()
@@ -65,6 +71,25 @@ def _save_store(store: dict) -> None:
 def list_projects() -> list[dict]:
     with _store_lock:
         store = _load_store()
+        # Auto-migrate any stored paths that still contain un-expanded ~ or
+        # were stored relative to cwd (e.g. /workspace/~/foo).
+        dirty = False
+        for proj in store.get("projects", {}).values():
+            raw = proj.get("path", "")
+            if not raw:
+                continue
+            try:
+                fixed = _normalize_path(raw)
+                if fixed != raw and os.path.isdir(fixed):
+                    proj["path"] = fixed
+                    dirty = True
+            except Exception:
+                pass
+        if dirty:
+            try:
+                _save_store(store)
+            except Exception:
+                pass
     projects = list(store.get("projects", {}).values())
     projects.sort(key=lambda p: p.get("name", "").lower())
     return projects
@@ -91,7 +116,7 @@ def set_active_project(project_id: str) -> bool:
 
 
 def add_project(path: str, name: str = "") -> dict:
-    path = os.path.abspath(path)
+    path = _normalize_path(path)
     if not os.path.isdir(path):
         raise ValueError(f"Directory does not exist: {path}")
     project_id = _path_to_id(path)
@@ -316,6 +341,7 @@ def _build_shell_env() -> dict:
 
 def run_shell(command: str, cwd: str, timeout: int = 60) -> dict:
     """Run a shell command in the given directory via bash. Returns stdout, stderr, exit code."""
+    cwd = _normalize_path(cwd)
     try:
         result = subprocess.run(
             ["/bin/bash", "-c", command],
@@ -345,6 +371,8 @@ def run_shell(command: str, cwd: str, timeout: int = 60) -> dict:
 
 def git_status(project_path: str) -> dict:
     """Return a structured git status for the project."""
+    project_path = _normalize_path(project_path)
+
     def _run(cmd: list[str]) -> str:
         try:
             r = subprocess.run(cmd, cwd=project_path, capture_output=True, text=True, timeout=10)
@@ -352,7 +380,22 @@ def git_status(project_path: str) -> dict:
         except Exception:
             return ""
 
-    if not os.path.isdir(os.path.join(project_path, ".git")):
+    if not os.path.isdir(project_path):
+        return {"ok": False, "error": f"Directory not found: {project_path}", "is_git": False}
+    # Also accept worktrees / git repos without a .git dir (submodules use .git files)
+    git_dir = os.path.join(project_path, ".git")
+    if not os.path.exists(git_dir):
+        # Try: git rev-parse to detect any git repo (handles worktrees, submodules)
+        try:
+            r = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=project_path, capture_output=True, text=True, timeout=5
+            )
+            if r.returncode != 0:
+                return {"ok": False, "error": "Not a git repository", "is_git": False}
+        except Exception:
+            return {"ok": False, "error": "Not a git repository", "is_git": False}
+    elif not os.path.isdir(git_dir) and not os.path.isfile(git_dir):
         return {"ok": False, "error": "Not a git repository", "is_git": False}
 
     branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
@@ -434,7 +477,7 @@ def git_commit_and_push(project_path: str, message: str) -> dict:
 
 
 def git_clone(url: str, dest_parent: str, name: str = "") -> dict:
-    dest_parent = os.path.abspath(dest_parent)
+    dest_parent = _normalize_path(dest_parent)
     os.makedirs(dest_parent, exist_ok=True)
     cmd = f"git clone {url}" + (f" {name}" if name else "")
     result = run_shell(cmd, dest_parent, timeout=120)
