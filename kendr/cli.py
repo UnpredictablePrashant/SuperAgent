@@ -1003,7 +1003,9 @@ def _run_test_intent_standalone(
             state["test_openapi_source"] = source
             state["test_base_url"] = base_url_match.group(0) if base_url_match else "http://localhost:8000"
             state["test_output_dir"] = working_dir
-            state["test_language"] = "typescript" if ("typescript" in text or "ts" in text or "jest" in text) else "python"
+            state["test_language"] = "typescript" if (
+                "typescript" in text or " ts " in text or ".ts " in text or ".tsx" in text or "jest" in text or "vitest" in text
+            ) else "python"
             state["test_run_after_generate"] = True
             state["test_timeout"] = 120
             _emit_status(args, f"[test] generating API tests for {source or 'URL from query'}")
@@ -1017,7 +1019,10 @@ def _run_test_intent_standalone(
                 file_matches = cwd_files
             state["test_source_files"] = file_matches or []
             state["test_output_dir"] = working_dir
-            state["test_language"] = "typescript" if "typescript" in text else "python"
+            state["test_language"] = "typescript" if (
+                "typescript" in text or " ts " in text or ".ts " in text or ".tsx" in text or "jest" in text or "vitest" in text
+                or any(str(f).endswith((".ts", ".tsx", ".js", ".jsx")) for f in file_matches)
+            ) else "python"
             _emit_status(args, f"[test] generating unit tests for {file_matches[:3] if file_matches else 'project files'}")
             state = unit_test_agent(state)
 
@@ -1037,7 +1042,9 @@ def _run_test_intent_standalone(
         elif intent_type == "regression_test":
             state["test_bug_description"] = query
             state["test_output_dir"] = working_dir
-            state["test_language"] = "typescript" if "typescript" in text else "python"
+            state["test_language"] = "typescript" if (
+                "typescript" in text or " ts " in text or ".ts " in text or ".tsx" in text or "jest" in text or "vitest" in text
+            ) else "python"
             _emit_status(args, "[test] writing regression test...")
             state = regression_test_agent(state)
 

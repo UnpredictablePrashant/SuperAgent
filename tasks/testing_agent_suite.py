@@ -508,9 +508,11 @@ Return ONLY valid TypeScript code. No explanation, no markdown fences.
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         if "python" in language:
             test_cmd = ["python", "-m", "pytest", "-q", "--tb=short", str(tests_dir)]
+            run_cwd = str(tests_dir)
         else:
-            test_cmd = ["npm", "test"]
-        run_ok, stdout, stderr = _run_cmd(test_cmd, str(tests_dir), timeout=int(state.get("test_timeout", 120) or 120), env=env)
+            test_cmd = ["npm", "test", "--", "--testPathPattern=__tests__"]
+            run_cwd = str(output_dir)
+        run_ok, stdout, stderr = _run_cmd(test_cmd, run_cwd, timeout=int(state.get("test_timeout", 120) or 120), env=env)
         if "python" in language:
             run_report = _parse_pytest_output(stdout, stderr)
         else:
@@ -523,17 +525,27 @@ Return ONLY valid TypeScript code. No explanation, no markdown fences.
     status = "PASS" if run_ok is True else ("FAIL" if run_ok is False else "generated")
     summary = f"API test suite {status} ({framework}): {len(written)} file(s)"
 
+    passed_count = run_report.get("passed", 0) if run_report else 0
+    failed_count = (run_report.get("failed", 0) + run_report.get("error", 0)) if run_report else 0
+    skipped_count = run_report.get("skipped", 0) if run_report else 0
+    total_count = run_report.get("total", passed_count + failed_count + skipped_count) if run_report else 0
     json_report = {
         "status": status,
         "framework": framework,
         "source": source,
         "base_url": base_url,
+        "generated_files": written,
         "files": written,
+        "passed": passed_count,
+        "failed": failed_count,
+        "skipped": skipped_count,
+        "total": total_count,
+        "duration": run_report.get("duration") if run_report else None,
+        "runner": run_report.get("framework", framework) if run_report else framework,
+        "agent": "api_test_agent",
         "run_result": run_report if run_report else None,
         "failures": run_errs,
     }
-    passed_count = run_report.get("passed", 0) if run_report else 0
-    failed_count = (run_report.get("failed", 0) + run_report.get("error", 0)) if run_report else 0
     run_row = f"| Run passed | {passed_count} |" if run_ok is not None else ""
     run_fail_row = f"| Run failed | {failed_count} |" if run_ok is not None else ""
     md_summary = f"""## API Test Suite — {status}

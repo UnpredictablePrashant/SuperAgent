@@ -685,7 +685,7 @@ function renderTestReportCard(report) {
   if (failures.length > 0) {
     cardHtml += '<details style="margin-top:6px"><summary style="font-size:12px;cursor:pointer;color:#ef4444">' + failures.length + ' failure(s)</summary>';
     cardHtml += '<div style="margin-top:6px;font-size:11px;font-family:monospace;max-height:200px;overflow-y:auto;background:var(--surface);padding:8px;border-radius:4px">';
-    cardHtml += failures.slice(0, 10).map(f => '<div style="margin-bottom:6px"><b style="color:#ef4444">' + esc(f.name || '') + '</b><br>' + esc((f.message || '').slice(0, 300)) + '</div>').join('');
+    cardHtml += failures.slice(0, 10).map(f => '<div style="margin-bottom:6px"><b style="color:#ef4444">' + esc(f.name || f.test || '') + '</b><br>' + esc((f.message || f.error || '').slice(0, 300)) + '</div>').join('');
     cardHtml += '</div></details>';
   }
 
