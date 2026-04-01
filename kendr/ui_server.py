@@ -222,11 +222,13 @@ def _push_event(run_id: str, event_type: str, data: dict) -> None:
 
 def _format_step(step: dict) -> dict:
     excerpt = str(step.get("output_excerpt") or "").strip()
+    reason = str(step.get("reason") or "").strip()
     agent = step.get("agent_name", "agent")
     return {
         "agent": agent,
         "status": step.get("status", "running"),
-        "message": excerpt or f"Running {agent}...",
+        "message": excerpt or (f"Running {agent}..." if not reason else ""),
+        "reason": reason,
         "execution_id": step.get("execution_id"),
     }
 
@@ -646,6 +648,16 @@ async function checkGateway() {
   }
 }
 
+function _relTime(iso) {
+  if (!iso) return '';
+  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (diff < 5) return 'just now';
+  if (diff < 60) return diff + 's ago';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
 async function loadRuns() {
   try {
     const r = await fetch(API + '/api/runs');
@@ -653,14 +665,34 @@ async function loadRuns() {
     const runs = await r.json();
     const list = document.getElementById('runList');
     list.innerHTML = '';
-    (runs || []).slice(0, 20).forEach(run => {
+    if (!runs || !runs.length) {
+      list.innerHTML = '<div style="padding:12px 10px;font-size:12px;color:var(--muted)">No runs yet. Start a chat to begin.</div>';
+      return;
+    }
+    (runs || []).slice(0, 30).forEach(run => {
       const div = document.createElement('div');
-      div.className = 'run-item' + (run.run_id === currentRunId ? ' active' : '');
-      const text = (run.query || run.text || 'Run').substring(0, 50);
-      const ts = run.created_at ? new Date(run.created_at).toLocaleTimeString() : '';
       const status = (run.status || 'completed').toLowerCase();
-      div.innerHTML = '<div class="run-item-title">' + esc(text) + '</div>' +
-        '<div class="run-item-meta"><span class="run-badge ' + status + '">' + status + '</span>' + (ts ? ' \xB7 ' + ts : '') + '</div>';
+      const isActive = run.run_id === currentRunId;
+      const isRunning = status === 'running' || status === 'started';
+      div.className = 'run-item' + (isActive ? ' active' : '');
+      const rawText = run.user_query || run.query || run.text || '';
+      const title = rawText.trim().split('\n')[0].substring(0, 70) || 'Untitled run';
+      const ts = _relTime(run.started_at || run.updated_at || run.created_at);
+      const statusColor = isRunning ? 'var(--teal)' : status === 'failed' ? '#ef4444' : '#6b7280';
+      const statusDot = isRunning
+        ? '<span class="spinner" style="width:10px;height:10px;display:inline-block;flex-shrink:0"></span>'
+        : '<span style="width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0;background:' + statusColor + '"></span>';
+      const statusLabel = isRunning ? 'running' : status;
+      const wdLabel = run.working_directory ? '<span style="color:var(--muted);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px" title="' + esc(run.working_directory) + '">&#x1F4C1; ' + esc(run.working_directory.split('/').pop()) + '</span>' : '';
+      div.innerHTML =
+        '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">'
+        + statusDot
+        + '<div class="run-item-title" style="flex:1;font-size:12px;font-weight:' + (isRunning ? '600' : '500') + ';color:' + (isRunning ? 'var(--teal)' : '#ccc') + '">' + esc(title) + '</div></div>'
+        + '<div class="run-item-meta" style="display:flex;justify-content:space-between;align-items:center">'
+        + '<span style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em">' + statusLabel + '</span>'
+        + '<span style="font-size:10px;color:var(--muted)">' + ts + '</span>'
+        + '</div>'
+        + (wdLabel ? '<div style="margin-top:2px">' + wdLabel + '</div>' : '');
       div.onclick = () => loadRun(run.run_id);
       list.appendChild(div);
     });
@@ -890,11 +922,13 @@ function createStreamingRow(runId) {
   const row = document.createElement('div');
   row.className = 'message-row kendr';
   row.id = 'stream-row-' + runId;
-  row.innerHTML = '<div class="avatar kendr">&#x26A1;</div><div class="bubble" id="stream-bubble-' + runId + '">' +
-    '<div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>' +
-    '<div class="streaming-status" id="stream-status-' + runId + '">Starting agents...</div>' +
-    '<div class="steps-wrapper" id="stream-steps-' + runId + '"></div>' +
-    '<div id="stream-result-' + runId + '"></div></div>';
+  row.innerHTML = '<div class="avatar kendr">&#x26A1;</div><div class="bubble" id="stream-bubble-' + runId + '">'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
+    + '<span class="spinner" style="width:14px;height:14px;flex-shrink:0"></span>'
+    + '<div class="streaming-status" id="stream-status-' + runId + '" style="font-size:12px;color:var(--teal);font-weight:600">Starting agents\u2026</div>'
+    + '</div>'
+    + '<div class="steps-wrapper" id="stream-steps-' + runId + '" style="display:flex;flex-direction:column;gap:6px"></div>'
+    + '<div id="stream-result-' + runId + '"></div></div>';
   msgs.appendChild(row);
   scrollDown();
   return row;
@@ -905,28 +939,57 @@ function updateStreamStatus(runId, msg) {
   if (el) el.textContent = msg;
 }
 
+function _agentDisplayName(agentName) {
+  return agentName.replace(/_agent$/, '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
 function addStreamStep(runId, step) {
   const container = document.getElementById('stream-steps-' + runId);
   if (!container) return;
-  const icons = { running: '\u2699\uFE0F', done: '\u2713', failed: '\u2717', completed: '\u2713' };
   const cssClass = step.status || 'running';
-  const icon = icons[cssClass] || '\u2699\uFE0F';
   const agentName = step.agent || step.name || 'agent';
   const isMcp = agentName.startsWith('mcp_') && agentName.endsWith('_agent');
-  const div = document.createElement('div');
-  div.className = 'step-card ' + cssClass + (isMcp ? ' mcp-step' : '');
-  div.id = 'step-' + runId + '-' + agentName;
-  let displayName = agentName;
-  let mcpPill = '';
-  if (isMcp) {
-    const parts = agentName.replace(/^mcp_/, '').replace(/_agent$/, '').split('_');
-    displayName = parts.join(' \u2192 ');
-    mcpPill = '<span style="display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(167,139,250,0.15);color:#a78bfa;margin-left:6px;vertical-align:middle">\uD83E\uDDE9 MCP</span>';
+  const isRunning = cssClass === 'running';
+  const isDone = cssClass === 'done' || cssClass === 'completed';
+  const isFailed = cssClass === 'failed';
+  const existingId = 'step-' + runId + '-' + (step.execution_id || agentName);
+  const existing = document.getElementById(existingId);
+  let div = existing || document.createElement('div');
+  if (!existing) {
+    div.id = existingId;
+    container.appendChild(div);
   }
-  div.innerHTML = '<div class="step-icon">' + icon + '</div><div class="step-info"><div class="step-name">' +
-    esc(displayName) + mcpPill + '</div>' +
-    (step.message ? '<div class="step-desc">' + esc(step.message) + '</div>' : '') + '</div>';
-  container.appendChild(div);
+  div.className = 'step-card ' + cssClass + (isMcp ? ' mcp-step' : '');
+  let displayName = isMcp
+    ? agentName.replace(/^mcp_/, '').replace(/_agent$/, '').split('_').join(' \u2192 ')
+    : _agentDisplayName(agentName);
+  const mcpPill = isMcp ? '<span style="display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(167,139,250,0.15);color:#a78bfa;margin-left:6px">\uD83E\uDDE9 MCP</span>' : '';
+  const statusIcon = isRunning ? '<span class="spinner" style="width:13px;height:13px;display:inline-block"></span>'
+    : isDone ? '<span style="color:#22c55e;font-size:14px">\u2713</span>'
+    : '<span style="color:#ef4444;font-size:14px">\u2717</span>';
+  const reason = step.reason || '';
+  const message = step.message || '';
+  let thinkHtml = '';
+  if (reason) {
+    thinkHtml += '<div style="margin-top:4px;padding:5px 8px;background:rgba(255,255,255,0.04);border-left:2px solid var(--teal);border-radius:0 4px 4px 0;font-size:11px;color:var(--muted)">'
+      + '<span style="color:var(--teal);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em">Why </span>'
+      + esc(reason.slice(0, 200)) + (reason.length > 200 ? '…' : '') + '</div>';
+  }
+  if (message && message !== reason) {
+    const previewLen = isRunning ? 120 : 240;
+    const preview = message.slice(0, previewLen) + (message.length > previewLen ? '…' : '');
+    thinkHtml += '<div style="margin-top:4px;font-size:11px;color:var(--muted)">' + esc(preview) + '</div>';
+  }
+  if (isRunning && !reason && !message) {
+    thinkHtml += '<div style="margin-top:4px;font-size:11px;color:var(--muted);font-style:italic">Working\u2026</div>';
+  }
+  div.innerHTML = '<div style="display:flex;align-items:flex-start;gap:10px">'
+    + '<div style="margin-top:1px;min-width:16px;text-align:center">' + statusIcon + '</div>'
+    + '<div style="flex:1;min-width:0">'
+    + '<div style="font-size:12px;font-weight:600;color:' + (isRunning ? 'var(--teal)' : isDone ? '#ccc' : '#ef4444') + '">'
+    + esc(displayName) + mcpPill + '</div>'
+    + thinkHtml
+    + '</div></div>';
   scrollDown();
 }
 
@@ -1025,7 +1088,14 @@ function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpI
   const typing = row.querySelector('.typing-indicator');
   if (typing) typing.remove();
   const statusEl = document.getElementById('stream-status-' + runId);
-  if (statusEl) statusEl.remove();
+  if (statusEl) {
+    const statusWrapper = statusEl.closest('div[style]') || statusEl.parentElement;
+    if (statusWrapper && statusWrapper !== document.getElementById('stream-bubble-' + runId)) {
+      statusWrapper.remove();
+    } else {
+      statusEl.remove();
+    }
+  }
   const resultEl = document.getElementById('stream-result-' + runId);
   if (resultEl) {
     if (error) {
@@ -1163,8 +1233,9 @@ function openEventStream(runId) {
         _showAwaitingBanner();
       } else {
         isAwaitingInput = false;
+        sessionStorage.removeItem('kendr_active_run_id');
       }
-    } catch(_) {}
+    } catch(_) { sessionStorage.removeItem('kendr_active_run_id'); }
     stopPlanPolling();
     evtSrc.close();
     activeEvtSource = null;
@@ -1176,6 +1247,7 @@ function openEventStream(runId) {
   evtSrc.addEventListener('ping', () => {});
 
   evtSrc.onerror = () => {
+    sessionStorage.removeItem('kendr_active_run_id');
     if (evtSrc.readyState === EventSource.CLOSED) {
       stopPlanPolling();
       isRunning = false;
@@ -1201,6 +1273,7 @@ async function sendMessage() {
   appendUserMsg(text);
   const runId = 'ui-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   currentRunId = runId;
+  sessionStorage.setItem('kendr_active_run_id', runId);
   if (!isContinuation) {
     document.getElementById('chatTitle').textContent = text.substring(0, 40) + (text.length > 40 ? '...' : '');
   }
@@ -1251,7 +1324,36 @@ async function sendMessage() {
 checkGateway();
 loadRuns();
 setInterval(checkGateway, 30000);
-setInterval(loadRuns, 10000);
+setInterval(loadRuns, 15000);
+
+// ── Reconnect to active run on page load ──────────────────────────────────────
+(async () => {
+  const savedRunId = sessionStorage.getItem('kendr_active_run_id');
+  if (!savedRunId) return;
+  try {
+    const r = await fetch(API + '/api/runs/' + encodeURIComponent(savedRunId));
+    if (!r.ok) { sessionStorage.removeItem('kendr_active_run_id'); return; }
+    const run = await r.json();
+    if (!run || !run.run_id) { sessionStorage.removeItem('kendr_active_run_id'); return; }
+    const status = (run.status || '').toLowerCase();
+    if (status === 'running' || status === 'started') {
+      currentRunId = run.run_id;
+      const query = run.user_query || run.query || 'Running…';
+      document.getElementById('chatTitle').textContent = query.substring(0, 40) + (query.length > 40 ? '...' : '');
+      document.getElementById('clearChatBtn').style.display = '';
+      createStreamingRow(run.run_id);
+      updateStreamStatus(run.run_id, 'Reconnecting to active run\u2026');
+      isRunning = true;
+      document.getElementById('sendBtn').disabled = true;
+      openEventStream(run.run_id);
+    } else if (status === 'completed' || status === 'failed') {
+      sessionStorage.removeItem('kendr_active_run_id');
+      loadRun(run.run_id);
+    } else {
+      sessionStorage.removeItem('kendr_active_run_id');
+    }
+  } catch(e) { sessionStorage.removeItem('kendr_active_run_id'); }
+})();
 </script>
 </body>
 </html>"""
