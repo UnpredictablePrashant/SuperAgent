@@ -289,6 +289,35 @@ def _start_run_background(run_id: str, payload: dict) -> None:
                     result["mcp_invocations"] = mcp_invocations
             except Exception:
                 pass
+            # Inject long_document exports into artifact_files for download
+            try:
+                doc_files = result.get("artifact_files") or []
+                existing_names = {f.get("name") for f in doc_files}
+                doc_keys = [
+                    ("long_document_compiled_path", "md", "Markdown"),
+                    ("long_document_compiled_pdf_path", "pdf", "PDF"),
+                    ("long_document_compiled_docx_path", "docx", "Word (DOCX)"),
+                ]
+                long_doc_exports = []
+                for key, ext, label in doc_keys:
+                    fpath = str(result.get(key) or "").strip()
+                    if fpath and os.path.isfile(fpath):
+                        fname = os.path.basename(fpath)
+                        if fname not in existing_names:
+                            doc_files.append({
+                                "name": fname,
+                                "path": fpath,
+                                "size": os.path.getsize(fpath),
+                                "label": label,
+                                "ext": ext,
+                            })
+                            existing_names.add(fname)
+                            long_doc_exports.append({"ext": ext, "label": label, "name": fname})
+                if long_doc_exports:
+                    result["artifact_files"] = doc_files
+                    result["long_document_exports"] = long_doc_exports
+            except Exception:
+                pass
             with _pending_lock:
                 _pending_runs[run_id] = {"status": "completed", "result": result}
             _push_event(run_id, "result", result)
@@ -761,7 +790,27 @@ function renderMcpInvocationsCard(invocations) {
   return html;
 }
 
-function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpInvocations) {
+function renderDocumentDownloadCard(runId, exports) {
+  if (!exports || !exports.length) return '';
+  const EXT_ICON = { md: '📝', pdf: '📄', docx: '📘' };
+  const EXT_COLOR = { md: '#4ade80', pdf: '#f87171', docx: '#60a5fa' };
+  let html = '<div style="margin-top:12px;padding:14px 16px;background:linear-gradient(135deg,#1a2a1a,#0d1f2d);border:1px solid #2dd4bf44;border-radius:10px">';
+  html += '<div style="font-size:12px;font-weight:700;color:#2dd4bf;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px">📥 Download Document</div>';
+  html += '<div style="display:flex;gap:10px;flex-wrap:wrap">';
+  for (const ex of exports) {
+    const icon = EXT_ICON[ex.ext] || '📄';
+    const color = EXT_COLOR[ex.ext] || '#a3a3a3';
+    html += '<a href="/api/artifacts/download?run_id=' + encodeURIComponent(runId) + '&name=' + encodeURIComponent(ex.name) + '" download="' + esc(ex.name) + '" ';
+    html += 'style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:#ffffff12;border:1px solid ' + color + '44;border-radius:7px;color:' + color + ';text-decoration:none;font-size:13px;font-weight:600;transition:background 0.15s" ';
+    html += 'onmouseover="this.style.background=\'#ffffff20\'" onmouseout="this.style.background=\'#ffffff12\'">';
+    html += icon + ' ' + esc(ex.label || ex.ext.toUpperCase());
+    html += '</a>';
+  }
+  html += '</div></div>';
+  return html;
+}
+
+function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpInvocations, docExports) {
   const row = document.getElementById('stream-row-' + runId);
   if (!row) return;
   const typing = row.querySelector('.typing-indicator');
@@ -781,9 +830,16 @@ function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpI
     if (mcpInvocations && mcpInvocations.length) {
       resultEl.innerHTML += renderMcpInvocationsCard(mcpInvocations);
     }
-    if (artifactFiles && artifactFiles.length > 0) {
+    if (docExports && docExports.length > 0) {
+      resultEl.innerHTML += renderDocumentDownloadCard(runId, docExports);
+    }
+    const nonDocFiles = (artifactFiles || []).filter(f => {
+      if (!docExports || !docExports.length) return true;
+      return !docExports.some(ex => ex.name === f.name);
+    });
+    if (nonDocFiles.length > 0) {
       let artHtml = '<div style="margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px"><div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">\ud83d\udcc1 Artifact Files</div>';
-      artHtml += artifactFiles.map(f => '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">' +
+      artHtml += nonDocFiles.map(f => '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">' +
         '<span style="color:var(--teal)">\ud83d\udcc4</span>' +
         '<a href="/api/artifacts/download?run_id=' + encodeURIComponent(runId) + '&name=' + encodeURIComponent(f.name) + '" download="' + esc(f.name) + '" style="color:var(--teal);text-decoration:underline">' + esc(f.name) + '</a>' +
         (f.size ? '<span style="color:var(--muted)">(' + (f.size > 1024 ? Math.round(f.size/1024) + ' KB' : f.size + ' B') + ')</span>' : '') + '</div>').join('');
@@ -820,7 +876,7 @@ function openEventStream(runId) {
       const d = JSON.parse(e.data);
       const output = d.final_output || d.output || d.draft_response || '';
       updateStreamStatus(runId, 'Completed.');
-      finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null, d.mcp_invocations || null);
+      finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null, d.mcp_invocations || null, d.long_document_exports || null);
     } catch(_) {}
   });
 
@@ -3082,19 +3138,43 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query or "")
             run_id = (params.get("run_id") or [""])[0]
             name = (params.get("name") or [""])[0]
-            if not run_id or not name or "/" in name or "\\" in name or name.startswith("."):
+            if not run_id or not name or "\\" in name or name.startswith(".") or ".." in name:
                 self._json(400, {"error": "invalid_request"})
                 return
+            file_path = ""
+            # Primary search: look inside the run's output_dir from DB
             try:
                 run_row = _db_get_run(run_id)
                 output_dir = run_row.get("run_output_dir", "") if run_row else ""
+                if output_dir:
+                    candidate = os.path.join(output_dir, name)
+                    if os.path.isfile(candidate):
+                        file_path = candidate
             except Exception:
-                output_dir = ""
-            if not output_dir:
-                self._json(404, {"error": "run_not_found_or_no_output_dir"})
-                return
-            file_path = os.path.join(output_dir, name)
-            if not os.path.isfile(file_path):
+                pass
+            # Secondary search: scan artifact_files list stored in pending run result
+            if not file_path:
+                with _pending_lock:
+                    run_state = _pending_runs.get(run_id, {})
+                result_data = run_state.get("result", {})
+                for af in result_data.get("artifact_files", []):
+                    if af.get("name") == name:
+                        cand = af.get("path", "")
+                        if cand and os.path.isfile(cand):
+                            file_path = cand
+                            break
+                # Fallback: search common output subdirectories
+                if not file_path:
+                    for key in (
+                        "long_document_compiled_path",
+                        "long_document_compiled_pdf_path",
+                        "long_document_compiled_docx_path",
+                    ):
+                        cand = str(result_data.get(key) or "").strip()
+                        if cand and os.path.basename(cand) == name and os.path.isfile(cand):
+                            file_path = cand
+                            break
+            if not file_path:
                 self._json(404, {"error": "file_not_found", "name": name})
                 return
             try:

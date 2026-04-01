@@ -351,9 +351,19 @@ Requirements:
 - Build a detailed top-level plan with explicit success criteria.
 - Add substeps for complex deliverables, especially long reports, multi-document outputs, or 50-page style requests.
 - If a step has substeps, treat the parent step as structural and make the substeps the real executable work. Do not rely on the parent wrapper step being dispatched separately.
-- If the request is ambiguous, ask clarification questions instead of guessing.
-- Do not assign planner_agent as a step agent in steps or substeps. Planning happens before execution.
+- Do NOT assign planner_agent as a step agent in steps or substeps. Planning happens before execution.
 - Do not start execution. Only plan.
+
+CLARIFICATION POLICY — be very strict about when to ask:
+- Set "needs_clarification": true ONLY when the task CANNOT PHYSICALLY PROCEED without a specific piece of information from the user that you have absolutely no way to infer or assume. This means: missing credentials/API keys, a specific file path that was referenced but not provided, a target URL for a security scan, a specific codebase you have no access to.
+- For ALL content/research/writing requests: make the best reasonable assumptions and state them clearly in your plan summary. NEVER stop for content decisions. Examples of things you should ASSUME and proceed:
+  * "5 summer fruits" → assume the 5 most common globally (mango, watermelon, strawberry, peach, cherry) and state this in the plan
+  * "a complete document" → assume professional long-form with sections, appropriate length
+  * "for farmers" → assume general audience, practical tone
+  * region not specified → assume a broad/global context or the most common growing regions
+  * format not specified → assume Markdown with PDF/DOCX export options
+- If the user's intent is clear enough that a domain expert could begin working on it immediately without asking a clarifying question, do NOT ask — just plan it with your best assumptions.
+- Asking unnecessary clarification questions is a serious failure mode that wastes the user's time and breaks their workflow. When in doubt, assume and proceed.
 
 AGENT ROUTING HINTS — prefer these agents for the matching intent keywords:
 - github_agent: "github", "repository", "repo", "pull request", "PR", "commit", "push", "branch", "clone", "git", "issue", "open a PR", "merge", "code review", "fork"
@@ -361,6 +371,8 @@ AGENT ROUTING HINTS — prefer these agents for the matching intent keywords:
 - aws_automation_agent / aws_inventory_agent: "AWS", "EC2", "S3", "Lambda", "CloudFormation", "IAM"
 - security_scanner_agent: "security scan", "vulnerability", "CVE", "OWASP", "pen test"
 - devops_agent: "Dockerfile", "docker-compose", "CI/CD", "GitHub Actions", "deployment pipeline"
+- long_document_agent: "complete document", "full document", "detailed document", "report", "handbook", "guide", "whitepaper", "farmer document", requests requiring research + long-form writing in one pipeline with PDF/DOCX export
+- document_formatter_agent: ALWAYS use as the FINAL step in any plan that produces a document, report, guide, or handbook. It exports the output as Markdown + PDF + DOCX for download. Do not skip this step for any document-producing workflow.
 Use these hints only when the query semantics clearly match; still defer to available_agents list for exact names.
 
 PROJECT BUILD MODE:

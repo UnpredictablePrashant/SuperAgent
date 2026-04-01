@@ -533,6 +533,7 @@ def _legacy_requirements() -> dict[str, list[str]]:
         "monitor_rule_agent",
         "stock_monitor_agent",
         "long_document_agent",
+        "document_formatter_agent",
         "superrag_agent",
         "local_drive_agent",
         "memory_index_agent",

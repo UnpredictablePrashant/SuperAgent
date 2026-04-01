@@ -795,6 +795,69 @@ class AgentRuntime:
         research_markers = ("research", "investigate", "investigation", "literature review", "prior art")
         return any(marker in text for marker in citation_markers) and any(marker in text for marker in research_markers)
 
+    def _is_document_generation_request(self, state: dict) -> bool:
+        """Return True when the user wants a researched document/report produced as a file.
+
+        Only fires on strong explicit document-generation signals combined with research intent,
+        or on very specific document phrases. Never fires on simple chat or coding questions.
+        """
+        text = " ".join(
+            [
+                str(state.get("user_query", "") or ""),
+                str(state.get("current_objective", "") or ""),
+            ]
+        ).lower()
+        if not text.strip():
+            return False
+
+        if self._is_project_build_request(state) or self._is_github_request(state):
+            return False
+
+        strong_doc_markers = (
+            "complete document",
+            "full document",
+            "write a document",
+            "prepare a document",
+            "create a document",
+            "generate a document",
+            "give me a document",
+            "write me a document",
+            "write a report",
+            "full report",
+            "prepare a report",
+            "create a report",
+            "give me a report",
+            "write me a report",
+            "write a guide",
+            "write a handbook",
+            "write a manual",
+            "write a whitepaper",
+            "white paper",
+            "farmer guide",
+            "farmer handbook",
+            "farmer document",
+            "share with farmers",
+        )
+        if any(m in text for m in strong_doc_markers):
+            return True
+
+        soft_doc_markers = (
+            "detailed document",
+            "detailed report",
+            "detailed guide",
+        )
+        research_markers = (
+            "research",
+            "investigate",
+            "study",
+            "look into",
+            "gather information",
+            "collect information",
+        )
+        has_soft_doc = any(m in text for m in soft_doc_markers)
+        has_research = any(m in text for m in research_markers)
+        return has_soft_doc and has_research
+
     def _is_superrag_request(self, state: dict) -> bool:
         superrag_keys = (
             "superrag_mode",
@@ -1788,6 +1851,46 @@ class AgentRuntime:
                     state_updates=updates,
                 ),
             )
+            return state
+
+        # --- Document-generation fast-path: route to long_document_agent when the user
+        # wants a researched document/report as a file (MD + PDF + DOCX output). This
+        # bypasses the planner entirely — long_document_agent handles its own planning,
+        # multi-source research, writing, and format export internally. ---
+        if (
+            not state.get("plan_steps")
+            and not state.get("long_document_mode")
+            and not state.get("long_document_job_started")
+            and state.get("last_agent") not in {"long_document_agent"}
+            and self._is_document_generation_request(state)
+            and self._is_agent_available(state, "long_document_agent")
+        ):
+            doc_query = str(state.get("current_objective") or state.get("user_query", "")).strip()
+            reason = (
+                "The request asks for a researched document/report to be produced as a file. "
+                "Routing directly to long_document_agent which will research, write, and export "
+                "the document as Markdown, PDF, and DOCX."
+            )
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "long_document_agent"
+            state["long_document_mode"] = True
+            state["long_document_job_started"] = True
+            state["long_document_collect_sources_first"] = True
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="long_document_agent",
+                    intent="long-document-dispatch",
+                    content=doc_query,
+                    state_updates={
+                        "long_document_mode": True,
+                        "long_document_collect_sources_first": True,
+                        "current_objective": doc_query,
+                    },
+                ),
+            )
+            log_task_update("Orchestrator", reason)
             return state
 
         # --- Research fast-path: bypass planner for clear information / research requests ---
