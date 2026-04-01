@@ -1279,8 +1279,55 @@ function appendKendrMsg(output, runId) {
   scrollDown();
 }
 
+function _renderPlanCard(plan) {
+  const steps = plan.steps || plan.plan_steps || (plan.plan_data && plan.plan_data.execution_steps) || [];
+  const summary = plan.summary || (plan.plan_data && plan.plan_data.summary) || '';
+  const scope = plan.scope || 'execution plan';
+  const msg = plan.message || 'Reply <code>approve</code> to continue, or describe changes to regenerate.';
+  const STATUS_ICON = { pending:'\u23F3', running:'\u25B6\uFE0F', done:'\u2705', failed:'\u274C', skipped:'\u23ED\uFE0F' };
+  let html = '<div style="border:1px solid var(--teal);border-radius:10px;overflow:hidden;margin-top:8px">';
+  html += '<div style="background:rgba(0,201,167,0.12);padding:10px 14px;display:flex;align-items:center;gap:8px">';
+  html += '<span style="font-size:16px">\uD83D\uDDFA\uFE0F</span>';
+  html += '<div><div style="font-weight:700;font-size:13px;color:var(--teal)">' + esc(scope) + '</div>';
+  if (summary) html += '<div style="font-size:12px;color:var(--muted);margin-top:2px">' + esc(summary) + '</div>';
+  html += '</div></div>';
+  if (steps.length) {
+    html += '<div style="padding:10px 14px;display:flex;flex-direction:column;gap:6px">';
+    for (const s of steps) {
+      const icon = STATUS_ICON[s.status || 'pending'] || '\u23F3';
+      const sid = esc(s.id || '');
+      const title = esc(s.title || s.id || 'Step');
+      const agent = esc(s.agent || '');
+      const task = esc(s.task || '');
+      html += '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px">';
+      html += '<div style="display:flex;align-items:center;gap:6px">';
+      html += '<span>' + icon + '</span>';
+      html += '<span style="font-weight:600;font-size:12px">' + (sid ? sid + ': ' : '') + title + '</span>';
+      if (agent) html += '<span style="margin-left:auto;font-size:10px;color:var(--muted);background:var(--surface3);padding:1px 6px;border-radius:4px">' + agent + '</span>';
+      html += '</div>';
+      if (task) html += '<div style="font-size:11px;color:var(--muted);margin-top:4px;padding-left:20px">' + task + '</div>';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  html += '<div style="padding:10px 14px;border-top:1px solid var(--border);font-size:12px;color:var(--muted)">' + msg + '</div>';
+  html += '</div>';
+  return html;
+}
+
 function formatOutput(text) {
   if (!text) return '';
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && parsed.type === 'plan_approval') return _renderPlanCard(parsed);
+      if (parsed && parsed.type === 'clarification') {
+        const qs = (parsed.questions || []).map(q => '<li>' + esc(q) + '</li>').join('');
+        return '<div style="padding:10px;border:1px solid var(--amber);border-radius:8px"><b>\uD83D\uDCCB Clarification needed:</b><ul style="margin:8px 0 0 16px;padding:0">' + qs + '</ul></div>';
+      }
+    } catch(_) {}
+  }
   if (_looksLikeShellOutput(text)) return _renderTerminalBlock(text);
   let h = esc(text);
   h = h.replace(/```([\s\S]*?)```/g, '<pre style="background:rgba(0,0,0,0.3);padding:10px;border-radius:6px;overflow-x:auto;font-family:monospace;font-size:12px;margin:6px 0">$1</pre>');
@@ -2770,38 +2817,74 @@ async function sendChat() {
   const agentDiv = appendMsg('agent', '');
   const bubble = agentDiv.querySelector('.msg-bubble');
   bubble.innerHTML = '<span class="spinner"></span>';
+  const scroller = document.getElementById('chatMessages');
   try {
-    const payload = {
-      text,
-      project_root: _activeProjectPath,
-      project_name: _activeProjectName || ''
-    };
+    const payload = { text, project_root: _activeProjectPath, project_name: _activeProjectName || '' };
     if (_projSelectedModel) payload.model = _projSelectedModel;
     if (_projSelectedProvider) payload.provider = _projSelectedProvider;
     const resp = await fetch(API + '/api/project/ask', {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-    const d = await resp.json();
-    if (d.error && !d.answer) {
-      bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 ' + esc(d.error) + '</span>';
-      btn.disabled = false;
-      return;
+    if (!resp.ok || !resp.body) {
+      const txt = await resp.text();
+      bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 Server error: ' + esc(txt.slice(0, 200)) + '</span>';
+      btn.disabled = false; return;
     }
-    const answer = d.answer || '(No response)';
-    bubble.innerHTML = esc(answer).replace(/\n/g, '<br>');
-    if (d.context_tokens && d.model_context_limit) {
-      const ctxMeta = document.createElement('div');
-      ctxMeta.className = 'msg-ctx';
-      const pct = Math.round(d.context_pct || 0);
-      ctxMeta.innerHTML = '<span>&#x1F4AC; ' + esc(d.model || '') + '</span>'
-        + '<span style="opacity:0.6">&#x2022;</span>'
-        + '<span>' + _fmtTokens(d.context_tokens) + ' / ' + _fmtTokens(d.model_context_limit) + ' ctx (' + pct + '%)</span>';
-      bubble.appendChild(ctxMeta);
-      _updateCtxBadge(d.context_tokens, d.model_context_limit, d.model || '');
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let answered = false;
+    function _parseSseLine(chunk) {
+      const lines = chunk.split('\n');
+      let evName = '', evData = '';
+      for (const l of lines) {
+        if (l.startsWith('event: ')) evName = l.slice(7).trim();
+        else if (l.startsWith('data: ')) evData = l.slice(6).trim();
+      }
+      return { evName, evData };
     }
-    document.getElementById('chatMessages').scrollTop = 999999;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop() || '';
+      for (const chunk of parts) {
+        if (!chunk.trim()) continue;
+        const { evName, evData } = _parseSseLine(chunk);
+        if (!evName || !evData) continue;
+        try {
+          const d = JSON.parse(evData);
+          if (evName === 'log') {
+            if (!answered) {
+              bubble.innerHTML = '<span style="color:var(--muted);font-size:11px">' + esc(d.msg || 'Processing...') + '</span>';
+              scroller.scrollTop = 999999;
+            }
+          } else if (evName === 'result') {
+            answered = true;
+            const answer = d.answer || '(No response)';
+            bubble.innerHTML = esc(answer).replace(/\n/g, '<br>');
+            if (d.context_tokens && d.model_context_limit) {
+              const ctxMeta = document.createElement('div');
+              ctxMeta.className = 'msg-ctx';
+              const pct = Math.round(d.context_pct || 0);
+              ctxMeta.innerHTML = '<span>\uD83D\uDCAC ' + esc(d.model || '') + '</span>'
+                + '<span style="opacity:0.6">\u2022</span>'
+                + '<span>' + _fmtTokens(d.context_tokens) + ' / ' + _fmtTokens(d.model_context_limit) + ' ctx (' + pct + '%)'
+                + (d.kendr_md_generated ? ' \u2728 kendr.md created' : d.kendr_md_loaded ? ' \uD83D\uDCCB kendr.md' : '') + '</span>';
+              bubble.appendChild(ctxMeta);
+              _updateCtxBadge(d.context_tokens, d.model_context_limit, d.model || '');
+            }
+            scroller.scrollTop = 999999;
+          } else if (evName === 'error') {
+            bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 ' + esc(d.error || 'Unknown error') + '</span>';
+          }
+        } catch(_) {}
+      }
+    }
+    if (!answered) bubble.innerHTML = '<em style="color:var(--muted)">No response received.</em>';
     btn.disabled = false;
   } catch(e) {
     bubble.innerHTML = '<span style="color:var(--crimson)">Error: ' + esc(String(e)) + '</span>';
@@ -6153,6 +6236,23 @@ strong { color: var(--text); }
             return
         model_override = str(body.get("model") or "").strip() or None
         provider_override = str(body.get("provider") or "").strip() or None
+
+        # ── SSE setup ─────────────────────────────────────────────────────────
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        def emit(event: str, data: dict) -> None:
+            msg = "event: " + event + "\ndata: " + json.dumps(data) + "\n\n"
+            try:
+                self.wfile.write(msg.encode("utf-8"))
+                self.wfile.flush()
+            except Exception:
+                pass
+
         try:
             from kendr.llm_router import (
                 build_llm, get_active_provider, get_model_for_provider, get_context_window
@@ -6163,27 +6263,46 @@ strong { color: var(--text); }
             proj_root = str(body.get("project_root") or (proj.get("path") if proj else "") or "").strip()
             proj_name = str(body.get("project_name") or (proj.get("name") if proj else "") or "").strip()
 
+            emit("log", {"msg": "\U0001f4c1 Checking project directory...", "step": "init"})
+
             kendr_md = ""
+            kendr_md_generated = False
             file_tree = ""
             if proj_root and os.path.isdir(proj_root):
                 kpath = os.path.join(proj_root, "kendr.md")
                 if os.path.isfile(kpath):
+                    emit("log", {"msg": "\U0001f4cb Reading kendr.md context file...", "step": "kendr_md"})
                     try:
                         with open(kpath, "r", encoding="utf-8", errors="replace") as f:
                             kendr_md = f.read()[:12000]
-                    except Exception:
-                        pass
+                        emit("log", {"msg": "\u2705 kendr.md loaded (" + str(len(kendr_md)) + " chars)", "step": "kendr_md_ok"})
+                    except Exception as e:
+                        emit("log", {"msg": "\u26a0 Could not read kendr.md: " + str(e), "step": "kendr_md_err"})
+                else:
+                    emit("log", {"msg": "\U0001f527 kendr.md not found — generating project context...", "step": "kendr_md_gen"})
+                    try:
+                        from kendr.project_context import ensure_kendr_md
+                        kendr_md = ensure_kendr_md(proj_root, proj_name)[:12000]
+                        kendr_md_generated = True
+                        emit("log", {"msg": "\u2728 kendr.md created and loaded (" + str(len(kendr_md)) + " chars)", "step": "kendr_md_gen_ok"})
+                    except Exception as e:
+                        emit("log", {"msg": "\u26a0 Could not generate kendr.md: " + str(e), "step": "kendr_md_gen_err"})
+
+                emit("log", {"msg": "\U0001f4c2 Scanning project files...", "step": "file_tree"})
                 try:
                     entries = sorted(os.listdir(proj_root))[:60]
                     file_tree = "\n".join(entries)
+                    emit("log", {"msg": "\u2705 Found " + str(len(entries)) + " items in project root", "step": "file_tree_ok"})
                 except Exception:
                     pass
 
-            system_ctx = f"You are a knowledgeable assistant for the software project '{proj_name or 'this project'}'."
+            emit("log", {"msg": "\U0001f9e0 Building context and calling LLM...", "step": "llm"})
+
+            system_ctx = "You are a knowledgeable assistant for the software project '" + (proj_name or "this project") + "'."
             if kendr_md:
-                system_ctx += f"\n\nProject context (kendr.md):\n{kendr_md}"
+                system_ctx += "\n\nProject context (kendr.md):\n" + kendr_md
             if file_tree:
-                system_ctx += f"\n\nProject root files:\n{file_tree}"
+                system_ctx += "\n\nProject root files:\n" + file_tree
             system_ctx += (
                 "\n\nAnswer the user's question concisely and accurately. "
                 "If asked about what the project is or does, summarise from the kendr.md context above. "
@@ -6202,7 +6321,7 @@ strong { color: var(--text); }
             response = llm.invoke(messages)
             answer = response.content if hasattr(response, "content") else str(response)
 
-            self._json(200, {
+            emit("result", {
                 "answer": answer,
                 "model": model,
                 "provider": provider,
@@ -6210,9 +6329,12 @@ strong { color: var(--text); }
                 "model_context_limit": ctx_limit,
                 "context_pct": round(ctx_tokens / max(ctx_limit, 1) * 100, 1),
                 "kendr_md_loaded": bool(kendr_md),
+                "kendr_md_generated": kendr_md_generated,
             })
+            emit("done", {})
         except Exception as exc:
-            self._json(500, {"error": str(exc), "answer": None})
+            emit("error", {"error": str(exc)})
+            emit("done", {})
 
     def _handle_project_context_generate(self, body: dict) -> None:
         try:

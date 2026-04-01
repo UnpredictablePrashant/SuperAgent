@@ -467,18 +467,33 @@ Return ONLY valid JSON in this exact schema (no extra fields, no markdown, no ex
     state["_skip_review_once"] = True
 
     if state["plan_needs_clarification"]:
-        clarification = (
+        clarification_text = (
             "I need clarification before I can build an approval-ready plan:\n"
             + "\n".join(f"- {item}" for item in questions)
         ) if questions else "I need more detail before I can build an approval-ready plan."
-        state["pending_user_question"] = clarification
+        clarification_json = json.dumps({
+            "type": "clarification",
+            "questions": questions,
+            "message": clarification_text,
+        }, ensure_ascii=False)
+        state["pending_user_question"] = clarification_text
         state["pending_user_input_kind"] = "clarification"
         state["plan_approval_status"] = "clarification_needed"
-        state["draft_response"] = clarification
+        state["draft_response"] = clarification_json
         planning_status = "needs_clarification"
         execution_note = f"Plan version {plan_version} needs clarification."
     else:
         auto_approve = bool(state.get("auto_approve")) or bool(state.get("auto_approve_plan"))
+        plan_steps = plan_data.get("execution_steps", plan_data.get("steps", []))
+        plan_json_response = json.dumps({
+            "type": "plan_approval",
+            "scope": f"execution plan v{plan_version}",
+            "summary": plan_data.get("summary", ""),
+            "steps": plan_steps,
+            "plan_data": plan_data,
+            "status": "approved" if auto_approve else "pending",
+            "message": "Plan auto-approved — proceeding to execution." if auto_approve else "Reply `approve` to continue, or describe changes to regenerate the plan.",
+        }, ensure_ascii=False)
         if auto_approve:
             state["pending_user_question"] = ""
             state["pending_user_input_kind"] = ""
@@ -486,7 +501,7 @@ Return ONLY valid JSON in this exact schema (no extra fields, no markdown, no ex
             state["plan_waiting_for_approval"] = False
             state["plan_approval_status"] = "approved"
             state["plan_ready"] = True
-            state["draft_response"] = plan_md
+            state["draft_response"] = plan_json_response
             planning_status = "approved"
             execution_note = f"Plan version {plan_version} auto-approved."
             log_task_update("Planner", "Plan auto-approved; continuing to execution.")
@@ -504,7 +519,7 @@ Return ONLY valid JSON in this exact schema (no extra fields, no markdown, no ex
             state["approval_pending_scope"] = "root_plan"
             state["plan_waiting_for_approval"] = True
             state["plan_approval_status"] = "pending"
-            state["draft_response"] = approval_prompt
+            state["draft_response"] = plan_json_response
             planning_status = "awaiting_approval"
             execution_note = f"Plan version {plan_version} generated and queued for approval."
 
