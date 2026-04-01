@@ -918,6 +918,158 @@ def _resolve_working_dir(path_value: str) -> str:
     return str(resolved)
 
 
+def _is_test_intent(query: str) -> tuple[bool, str]:
+    """Detect if the query is a testing request.
+    Returns (is_test, intent_type) where intent_type in:
+    'api_test', 'unit_test', 'run_tests', 'fix_tests', 'regression_test'
+    """
+    text = str(query or "").lower()
+
+    api_markers = [
+        "api test", "api tests", "test the api", "test api",
+        "generate api test", "openapi test", "test endpoint", "test endpoint",
+        "write api test", "test suite for http", "test suite for api",
+    ]
+    unit_markers = [
+        "unit test", "write test", "write tests for", "generate test",
+        "test for this file", "test the function", "test coverage",
+        "write unit test", "add tests for", "test cases for",
+    ]
+    run_markers = [
+        "run test", "run our test", "run the test", "existing test suite",
+        "run pytest", "run jest", "execute test",
+    ]
+    fix_markers = [
+        "fix test", "fix failing test", "fix the test", "make test pass",
+        "fix test failure", "repair test", "auto-fix test",
+        "run and fix test", "run tests and fix", "run tests, fix",
+        "run test and fix", "fix any failure", "fix failing",
+    ]
+    regression_markers = [
+        "regression test", "add regression", "write regression",
+        "test for the bug", "test for bug where", "bug where",
+        "test for the issue where",
+    ]
+
+    for m in regression_markers:
+        if m in text:
+            return True, "regression_test"
+    for m in fix_markers:
+        if m in text:
+            return True, "fix_tests"
+    for m in run_markers:
+        if m in text:
+            return True, "run_tests"
+    for m in api_markers:
+        if m in text:
+            return True, "api_test"
+    for m in unit_markers:
+        if m in text:
+            return True, "unit_test"
+    return False, ""
+
+
+def _run_test_intent_standalone(
+    args: argparse.Namespace,
+    query: str,
+    intent_type: str,
+    working_dir: str,
+) -> int:
+    """Handle a testing intent directly without the gateway."""
+    style = _style_from_args(args)
+    text = str(query or "").lower()
+
+    try:
+        from tasks.testing_agent_suite import (
+            api_test_agent,
+            unit_test_agent,
+            test_runner_agent,
+            test_fix_agent,
+            regression_test_agent,
+        )
+    except ImportError as exc:
+        print(style.fail(f"Cannot import testing agents: {exc}"))
+        return 1
+
+    state: dict = {"test_working_directory": working_dir, "user_query": query}
+    emit_json = bool(getattr(args, "json", False))
+
+    try:
+        if intent_type == "api_test":
+            import re as _re
+            url_match = _re.search(r"https?://\S+", query)
+            source = url_match.group(0) if url_match else ""
+            base_url_match = _re.search(r"https?://[^/]+", source)
+            state["test_openapi_source"] = source
+            state["test_base_url"] = base_url_match.group(0) if base_url_match else "http://localhost:8000"
+            state["test_output_dir"] = working_dir
+            state["test_language"] = "typescript" if ("typescript" in text or "ts" in text or "jest" in text) else "python"
+            state["test_run_after_generate"] = True
+            state["test_timeout"] = 120
+            _emit_status(args, f"[test] generating API tests for {source or 'URL from query'}")
+            state = api_test_agent(state)
+
+        elif intent_type == "unit_test":
+            import re as _re
+            file_matches = _re.findall(r"[^\s'\"]+\.(?:py|ts|tsx|js|jsx)", query)
+            if not file_matches:
+                cwd_files = [str(p) for p in Path(working_dir).rglob("*.py") if not any(part in _IGNORE_DIRS_CLI for part in p.parts)][:5]
+                file_matches = cwd_files
+            state["test_source_files"] = file_matches or []
+            state["test_output_dir"] = working_dir
+            state["test_language"] = "typescript" if "typescript" in text else "python"
+            _emit_status(args, f"[test] generating unit tests for {file_matches[:3] if file_matches else 'project files'}")
+            state = unit_test_agent(state)
+
+        elif intent_type == "run_tests":
+            state["test_working_directory"] = working_dir
+            state["test_timeout"] = 300
+            _emit_status(args, "[test] running test suite...")
+            state = test_runner_agent(state)
+
+        elif intent_type == "fix_tests":
+            state["test_working_directory"] = working_dir
+            state["test_fix_max_iterations"] = 3
+            state["test_timeout"] = 300
+            _emit_status(args, "[test] running and fixing test suite...")
+            state = test_fix_agent(state)
+
+        elif intent_type == "regression_test":
+            state["test_bug_description"] = query
+            state["test_output_dir"] = working_dir
+            state["test_language"] = "typescript" if "typescript" in text else "python"
+            _emit_status(args, "[test] writing regression test...")
+            state = regression_test_agent(state)
+
+    except Exception as exc:
+        print(style.fail(f"[test] error: {exc}"))
+        return 1
+
+    report = state.get("test_report", {})
+
+    if emit_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        return 0 if report.get("status") in ("PASS", "generated") else 1
+
+    print()
+    print(_render_test_report(report, style))
+    print()
+
+    artifacts = state.get("a2a", {}).get("artifacts", [])
+    for art in artifacts[-1:]:
+        meta = art.get("metadata", {})
+        if meta.get("json_report"):
+            print(style.muted(f"  Report: {meta['json_report']}"))
+        if meta.get("md_summary"):
+            print(style.muted(f"  Summary: {meta['md_summary']}"))
+
+    ok = report.get("status") in ("PASS", "generated") or bool(state.get("test_passed"))
+    return 0 if ok else 1
+
+
+_IGNORE_DIRS_CLI = {"node_modules", ".git", ".venv", "venv", "__pycache__", ".pytest_cache", "dist", "build", ".next"}
+
+
 def _is_project_code_request(query: str) -> bool:
     text = str(query or "").lower()
     markers = [
@@ -2310,6 +2462,8 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
     t_api.add_argument("--base-url", default="http://localhost:8000", help="Base URL for the API under test.")
     t_api.add_argument("--output-dir", default=".", help="Directory to write generated test files.")
     t_api.add_argument("--language", default="python", choices=["python", "typescript"], help="Test language.")
+    t_api.add_argument("--no-run", action="store_true", help="Generate tests but do not run them.")
+    t_api.add_argument("--timeout", type=int, default=120, help="Timeout for the test run in seconds.")
     t_api.add_argument("--json", action="store_true", help="Emit JSON report.")
 
     t_unit = test_sub.add_parser("unit", help="Generate unit tests for one or more source files.")
@@ -2379,7 +2533,8 @@ def _cmd_test(args: argparse.Namespace) -> int:
     emit_json = bool(getattr(args, "json", False))
 
     if not action:
-        p, _ = _build_arg_parser()
+        style2 = _cli_style(None)
+        p, _ = _build_parser(style2)
         p.parse_args(["test", "--help"])
         return 0
 
@@ -2402,6 +2557,8 @@ def _cmd_test(args: argparse.Namespace) -> int:
         state["test_base_url"] = getattr(args, "base_url", "http://localhost:8000")
         state["test_output_dir"] = str(Path(getattr(args, "output_dir", ".")).resolve())
         state["test_language"] = getattr(args, "language", "python")
+        state["test_run_after_generate"] = not bool(getattr(args, "no_run", False))
+        state["test_timeout"] = getattr(args, "timeout", 120)
         try:
             state = api_test_agent(state)
         except Exception as exc:
@@ -3584,6 +3741,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 ),
             )
             resolved_working_dir = cwd
+
+    test_requested, test_intent_type = _is_test_intent(query)
+    if test_requested:
+        _emit_status(args, f"[run] detected testing intent ({test_intent_type}) — running test agent directly")
+        return _run_test_intent_standalone(args, query, test_intent_type, resolved_working_dir)
 
     security_requested = bool(args.security_authorized) or bool(args.security_target_url) or is_security_assessment_query(query)
     security_target_url = str(args.security_target_url or "").strip()

@@ -248,6 +248,14 @@ def _start_run_background(run_id: str, payload: dict) -> None:
             db_artifacts, file_list = _collect_artifacts(run_id, result.get("output_dir", ""))
             result["artifacts"] = db_artifacts
             result["artifact_files"] = file_list
+            test_report = None
+            for art in db_artifacts:
+                if art.get("kind") == "test_report" or "test_report" in str(art.get("name", "")):
+                    test_report = art.get("data") or art.get("payload") or art.get("content")
+            if not test_report and isinstance(result.get("test_report"), dict):
+                test_report = result["test_report"]
+            if test_report:
+                result["test_report"] = test_report
             with _pending_lock:
                 _pending_runs[run_id] = {"status": "completed", "result": result}
             _push_event(run_id, "result", result)
@@ -641,7 +649,56 @@ function addStreamStep(runId, step) {
   scrollDown();
 }
 
-function finalizeStreamRow(runId, output, error, artifactFiles) {
+function renderTestReportCard(report) {
+  if (!report) return '';
+  const status = report.status || 'unknown';
+  const isPass = status === 'PASS' || status === 'generated';
+  const statusColor = isPass ? 'var(--green, #22c55e)' : (status === 'FAIL' ? '#ef4444' : 'var(--muted)');
+  const statusIcon = isPass ? '\u2705' : (status === 'FAIL' ? '\u274c' : '\u23f3');
+  const total = report.total || 0;
+  const passed = report.passed || 0;
+  const failed = report.failed || 0;
+  const skipped = report.skipped || 0;
+  const duration = report.duration != null ? (parseFloat(report.duration).toFixed(2) + 's') : '';
+  const runner = report.runner || '';
+  const agentName = report.agent || '';
+
+  let cardHtml = '<div style="margin-top:10px;padding:12px;background:var(--surface2);border:1px solid var(--border);border-radius:8px">';
+  cardHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+  cardHtml += '<span style="font-size:16px">' + statusIcon + '</span>';
+  cardHtml += '<span style="font-weight:700;font-size:13px;color:' + statusColor + '">' + esc(status) + '</span>';
+  if (runner) cardHtml += '<span style="font-size:11px;color:var(--muted);margin-left:4px">' + esc(runner) + '</span>';
+  if (agentName) cardHtml += '<span style="font-size:11px;color:var(--muted);margin-left:auto">' + esc(agentName) + '</span>';
+  cardHtml += '</div>';
+
+  if (total > 0) {
+    cardHtml += '<div style="display:flex;gap:16px;font-size:12px;margin-bottom:8px">';
+    cardHtml += '<span>\ud83d\udcca Total: <b>' + total + '</b></span>';
+    cardHtml += '<span style="color:#22c55e">\u2713 ' + passed + ' passed</span>';
+    if (failed > 0) cardHtml += '<span style="color:#ef4444">\u2717 ' + failed + ' failed</span>';
+    if (skipped > 0) cardHtml += '<span style="color:var(--muted)">\u25e6 ' + skipped + ' skipped</span>';
+    if (duration) cardHtml += '<span style="color:var(--muted);margin-left:auto">\u23f1 ' + duration + '</span>';
+    cardHtml += '</div>';
+  }
+
+  const failures = report.failures || [];
+  if (failures.length > 0) {
+    cardHtml += '<details style="margin-top:6px"><summary style="font-size:12px;cursor:pointer;color:#ef4444">' + failures.length + ' failure(s)</summary>';
+    cardHtml += '<div style="margin-top:6px;font-size:11px;font-family:monospace;max-height:200px;overflow-y:auto;background:var(--surface);padding:8px;border-radius:4px">';
+    cardHtml += failures.slice(0, 10).map(f => '<div style="margin-bottom:6px"><b style="color:#ef4444">' + esc(f.name || '') + '</b><br>' + esc((f.message || '').slice(0, 300)) + '</div>').join('');
+    cardHtml += '</div></details>';
+  }
+
+  const files = report.generated_files || [];
+  if (files.length > 0) {
+    cardHtml += '<div style="margin-top:8px;font-size:12px;color:var(--muted)">\ud83d\udcc4 Generated: ' + files.slice(0, 5).map(f => '<code>' + esc(f) + '</code>').join(', ') + '</div>';
+  }
+
+  cardHtml += '</div>';
+  return cardHtml;
+}
+
+function finalizeStreamRow(runId, output, error, artifactFiles, testReport) {
   const row = document.getElementById('stream-row-' + runId);
   if (!row) return;
   const typing = row.querySelector('.typing-indicator');
@@ -654,6 +711,9 @@ function finalizeStreamRow(runId, output, error, artifactFiles) {
       resultEl.innerHTML = '<div class="error-banner" style="margin-top:8px">\u26A0\uFE0F ' + esc(error) + '</div>';
     } else if (output) {
       resultEl.innerHTML = '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">' + formatOutput(output) + '</div>';
+    }
+    if (testReport) {
+      resultEl.innerHTML += renderTestReportCard(testReport);
     }
     if (artifactFiles && artifactFiles.length > 0) {
       let artHtml = '<div style="margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px"><div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">\ud83d\udcc1 Artifact Files</div>';
@@ -694,7 +754,7 @@ function openEventStream(runId) {
       const d = JSON.parse(e.data);
       const output = d.final_output || d.output || d.draft_response || '';
       updateStreamStatus(runId, 'Completed.');
-      finalizeStreamRow(runId, output, '', d.artifact_files || []);
+      finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null);
     } catch(_) {}
   });
 

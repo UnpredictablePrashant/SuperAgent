@@ -494,17 +494,49 @@ Return ONLY valid TypeScript code. No explanation, no markdown fences.
         _safe_write(test_path, _strip_fences(raw))
         written = [str(test_path)]
 
-    summary = f"API test suite generated ({framework}): {len(written)} file(s) → {tests_dir}"
-    log_task_update("API Test Agent", summary)
+    suite_generated_msg = f"API test suite generated ({framework}): {len(written)} file(s) → {tests_dir}"
+    log_task_update("API Test Agent", suite_generated_msg)
+
+    run_ok: bool | None = None
+    run_report: dict = {}
+    run_errs: list[dict] = []
+
+    if bool(state.get("test_run_after_generate", True)):
+        log_task_update("API Test Agent", "  running generated tests against live API...")
+        env = dict(os.environ)
+        env["NODE_ENV"] = "test"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if "python" in language:
+            test_cmd = ["python", "-m", "pytest", "-q", "--tb=short", str(tests_dir)]
+        else:
+            test_cmd = ["npm", "test"]
+        run_ok, stdout, stderr = _run_cmd(test_cmd, str(tests_dir), timeout=int(state.get("test_timeout", 120) or 120), env=env)
+        if "python" in language:
+            run_report = _parse_pytest_output(stdout, stderr)
+        else:
+            run_report = _parse_jest_vitest_output(stdout, stderr)
+        run_errs = run_report.get("failures", [])[:5]
+        r_pass = run_report.get("passed", 0)
+        r_fail = run_report.get("failed", 0) + run_report.get("error", 0)
+        log_task_update("API Test Agent", f"  run result: {r_pass} passed, {r_fail} failed")
+
+    status = "PASS" if run_ok is True else ("FAIL" if run_ok is False else "generated")
+    summary = f"API test suite {status} ({framework}): {len(written)} file(s)"
 
     json_report = {
-        "status": "generated",
+        "status": status,
         "framework": framework,
         "source": source,
         "base_url": base_url,
         "files": written,
+        "run_result": run_report if run_report else None,
+        "failures": run_errs,
     }
-    md_summary = f"""## API Test Suite Generated
+    passed_count = run_report.get("passed", 0) if run_report else 0
+    failed_count = (run_report.get("failed", 0) + run_report.get("error", 0)) if run_report else 0
+    run_row = f"| Run passed | {passed_count} |" if run_ok is not None else ""
+    run_fail_row = f"| Run failed | {failed_count} |" if run_ok is not None else ""
+    md_summary = f"""## API Test Suite — {status}
 
 | Field | Value |
 |-------|-------|
@@ -512,6 +544,9 @@ Return ONLY valid TypeScript code. No explanation, no markdown fences.
 | OpenAPI source | `{source[:80]}` |
 | Base URL | `{base_url}` |
 | Files written | {len(written)} |
+{run_row}
+{run_fail_row}
+
 
 **Files:**
 """ + "\n".join(f"- `{f}`" for f in written)
