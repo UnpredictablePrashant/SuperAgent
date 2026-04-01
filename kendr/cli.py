@@ -2541,8 +2541,9 @@ def _cmd_test(args: argparse.Namespace) -> int:
 
     if not action:
         style2 = _cli_style(None)
-        p, _ = _build_parser(style2)
-        p.parse_args(["test", "--help"])
+        _, cp = _build_parser(style2)
+        if "test" in cp:
+            cp["test"].print_help()
         return 0
 
     try:

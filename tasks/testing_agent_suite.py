@@ -911,6 +911,7 @@ Return ONLY valid JSON. No markdown fences, no explanation.
             log_task_update("Test Fix Agent", f"  iter {iteration}: no patches returned")
             break
 
+        patched_count = 0
         for patch in patch_list:
             file_rel = str(patch.get("file", "")).strip()
             content = str(patch.get("content", "")).strip()
@@ -926,6 +927,13 @@ Return ONLY valid JSON. No markdown fences, no explanation.
             target.write_text(content + "\n", encoding="utf-8")
             patches_applied.append({"iteration": iteration, "file": file_rel})
             log_task_update("Test Fix Agent", f"  iter {iteration}: patched {file_rel}")
+            patched_count += 1
+
+        if patched_count > 0 and iteration == max_iters:
+            log_task_update("Test Fix Agent", f"  iter {iteration}: final patch applied — running verification run")
+            ok, stdout, stderr = _run_cmd(cmd, cwd, timeout=timeout, env=env)
+            report = _parse_pytest_output(stdout, stderr) if "pytest" in " ".join(cmd) else _parse_jest_vitest_output(stdout, stderr)
+            log_task_update("Test Fix Agent", f"  verification: {'PASS' if ok else 'FAIL'} — {report.get('passed', 0)} passed, {report.get('failed', 0)} failed")
 
     json_report, md_summary = _build_test_report(ok, report, cwd, [])
     json_report["patches_applied"] = patches_applied
