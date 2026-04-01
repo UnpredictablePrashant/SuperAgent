@@ -118,7 +118,8 @@ def apply_security_profile_defaults(state: dict) -> dict:
     defaults = _profile_defaults(profile)
     state["security_scan_profile"] = profile
     for key, value in defaults.items():
-        if key not in state or state.get(key) in {None, ""}:
+        existing = state.get(key)
+        if key not in state or existing is None or existing == "":
             state[key] = value
     return state
 
