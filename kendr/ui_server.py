@@ -599,13 +599,81 @@ async function loadRuns() {
 }
 
 async function loadRun(runId) {
+  if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
+  stopPlanPolling();
+  isRunning = false;
+  document.getElementById('sendBtn').disabled = false;
+  currentRunId = runId;
+  loadRuns();
+
+  const msgs = document.getElementById('messages');
+  msgs.innerHTML = '<div style="display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;padding:20px"><span class="spinner"></span> Loading run...</div>';
+
   try {
     const r = await fetch(API + '/api/runs/' + runId);
     const d = await r.json();
-    const output = d.final_output || d.output || '';
-    const query = d.query || d.text || '';
-    if (query) { clearMessages(); appendUserMsg(query); if (output) appendKendrMsg(output, runId); }
-  } catch(e) {}
+    const query = d.user_query || d.query || d.text || '';
+    const output = d.final_output || d.output || d.draft_response || '';
+    const status = (d.status || 'completed').toLowerCase();
+    const lastAgent = d.last_agent || '';
+    const createdAt = d.created_at ? new Date(d.created_at).toLocaleString() : '';
+    const completedAt = d.completed_at ? new Date(d.completed_at).toLocaleString() : '';
+
+    clearMessages();
+    if (query) {
+      appendUserMsg(query);
+      document.getElementById('chatTitle').textContent = query.substring(0, 50) + (query.length > 50 ? '...' : '');
+    }
+
+    if (output) {
+      appendKendrMsg(output, runId);
+    } else if (!query) {
+      msgs.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">No content found for this run.</div>';
+      document.getElementById('clearChatBtn').style.display = 'none';
+      return;
+    }
+
+    const statusColors = {completed:'var(--teal)',failed:'var(--crimson)',running:'var(--amber)',awaiting_user_input:'var(--blue)'};
+    const statusColor = statusColors[status] || 'var(--muted)';
+    const metaRow = document.createElement('div');
+    metaRow.style.cssText = 'padding: 0 0 8px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-left:52px;';
+    const statusPill = `<span style="padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:rgba(0,0,0,0.2);color:${statusColor};border:1px solid ${statusColor}">${status}</span>`;
+    const agentPill = lastAgent ? `<span style="font-size:11px;color:var(--muted)">via ${esc(lastAgent)}</span>` : '';
+    const timePill = createdAt ? `<span style="font-size:11px;color:var(--muted)">&#x1F551; ${esc(createdAt)}</span>` : '';
+    const idPill = `<span style="font-size:11px;font-family:monospace;color:var(--muted);opacity:0.6">${esc(runId)}</span>`;
+    metaRow.innerHTML = statusPill + agentPill + timePill + idPill;
+    msgs.appendChild(metaRow);
+
+    if (status === 'awaiting_user_input') {
+      const banner = document.createElement('div');
+      banner.style.cssText = 'margin:8px 0 0 52px;padding:10px 14px;background:rgba(83,82,237,0.1);border:1px solid rgba(83,82,237,0.3);border-radius:8px;font-size:13px;color:var(--text)';
+      banner.innerHTML = '<span style="color:#8b8af0;font-weight:600">&#x23F3; Awaiting your input</span> &mdash; type your response below to continue this run.';
+      msgs.appendChild(banner);
+    }
+
+    try {
+      const ar = await fetch(API + '/api/runs/' + runId + '/artifacts');
+      const artifacts = await ar.json();
+      if (Array.isArray(artifacts) && artifacts.length > 0) {
+        const artCard = document.createElement('div');
+        artCard.style.cssText = 'margin:8px 0 0 52px;padding:10px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;';
+        artCard.innerHTML = '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">&#x1F4C1; Artifacts</div>' +
+          artifacts.map(a => {
+            const name = esc(a.name || a.artifact_id || 'file');
+            const kind = esc(a.kind || '');
+            const isFile = a.kind !== 'error' && a.kind !== 'text';
+            return `<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12px">` +
+              (isFile ? `<a href="/api/artifacts/download?run_id=${encodeURIComponent(runId)}&name=${encodeURIComponent(a.name||'')}" download="${name}" style="color:var(--teal);text-decoration:underline">&#x1F4C4; ${name}</a>` : `<span style="color:var(--muted)">&#x1F4CB; ${name}</span>`) +
+              (kind ? `<span style="color:var(--muted);font-size:10px">[${kind}]</span>` : '') + `</div>`;
+          }).join('');
+        msgs.appendChild(artCard);
+      }
+    } catch(_) {}
+
+    scrollDown();
+  } catch(e) {
+    msgs.innerHTML = '<div style="color:var(--crimson);font-size:13px;padding:20px">Failed to load run: ' + esc(String(e)) + '</div>';
+  }
 }
 
 function esc(s) {
