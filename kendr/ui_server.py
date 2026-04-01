@@ -258,6 +258,16 @@ def _start_run_background(run_id: str, payload: dict) -> None:
                         if isinstance(candidate, dict):
                             test_report = candidate
                             break
+                        json_path = (art.get("metadata") or {}).get("json_report") or ""
+                        if not test_report and json_path and os.path.isfile(json_path):
+                            try:
+                                with open(json_path, encoding="utf-8") as _jf:
+                                    candidate = json.load(_jf)
+                                if isinstance(candidate, dict):
+                                    test_report = candidate
+                                    break
+                            except Exception:
+                                pass
             if test_report:
                 result["test_report"] = test_report
             with _pending_lock:

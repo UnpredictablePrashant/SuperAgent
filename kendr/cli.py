@@ -999,7 +999,18 @@ def _run_test_intent_standalone(
             import re as _re
             url_match = _re.search(r"https?://\S+", query)
             source = url_match.group(0) if url_match else ""
-            base_url_match = _re.search(r"https?://[^/]+", source)
+            if not source:
+                file_match = _re.search(r"[^\s'\"]+\.(?:json|ya?ml)", query)
+                if file_match:
+                    candidate = file_match.group(0)
+                    candidate_path = Path(working_dir) / candidate if not Path(candidate).is_absolute() else Path(candidate)
+                    if candidate_path.exists():
+                        source = str(candidate_path)
+                    elif Path(candidate).exists():
+                        source = str(Path(candidate).resolve())
+                    else:
+                        source = candidate
+            base_url_match = _re.search(r"https?://[^/\s]+", source)
             state["test_openapi_source"] = source
             state["test_base_url"] = base_url_match.group(0) if base_url_match else "http://localhost:8000"
             state["test_output_dir"] = working_dir
