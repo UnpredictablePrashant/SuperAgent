@@ -88,3 +88,6 @@ tasks/generated_agents/manifest.json
 Thumbs.db
 .idea/
 .vscode/
+
+# User-uploaded and pasted assets (not source code)
+attached_assets/
