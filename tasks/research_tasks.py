@@ -29,6 +29,14 @@ AGENT_METADATA = {
             "research_raw",
         ],
         "requirements": ["openai"],
+        "display_name": "Deep Research Agent",
+        "category": "research",
+        "intent_patterns": [
+            "research this topic", "do deep research", "investigate in depth",
+            "find citations", "source-backed analysis", "web research with sources",
+        ],
+        "active_when": ["env:OPENAI_API_KEY"],
+        "config_hint": "Add your OpenAI API key in Setup → Providers.",
     }
 }
 

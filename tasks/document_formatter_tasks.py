@@ -36,6 +36,14 @@ AGENT_METADATA = {
             "long_document_compiled_docx_path",
         ],
         "requirements": ["python-docx"],
+        "display_name": "Document Formatter",
+        "category": "documents",
+        "intent_patterns": [
+            "format this document", "export as pdf", "convert to word",
+            "save as docx", "download document", "export document",
+        ],
+        "active_when": [],
+        "config_hint": "",
     }
 }
 

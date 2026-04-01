@@ -502,7 +502,8 @@ a:hover { text-decoration: underline; }
     <a href="/" class="nav-btn active"><span class="icon">💬</span> Chat</a>
     <a href="/setup" class="nav-btn"><span class="icon">⚙️</span> Setup & Config</a>
     <a href="/runs" class="nav-btn"><span class="icon">📋</span> Run History</a>
-    <a href="/rag" class="nav-btn"><span class="icon">🧠</span> Super-RAG</a>
+    <a href="/skills" class="nav-btn"><span class="icon">🧠</span> Skill Cards</a>
+    <a href="/rag" class="nav-btn"><span class="icon">🔬</span> Super-RAG</a>
     <a href="/mcp" class="nav-btn"><span class="icon">🧩</span> MCP Servers</a>
     <a href="/projects" class="nav-btn"><span class="icon">📁</span> Projects</a>
   </div>
@@ -1048,7 +1049,8 @@ a { color: var(--teal); }
     <a href="/" class="nav-btn"><span class="icon">&#x1F4AC;</span> Chat</a>
     <a href="/setup" class="nav-btn active"><span class="icon">&#x2699;&#xFE0F;</span> Setup &amp; Config</a>
     <a href="/runs" class="nav-btn"><span class="icon">&#x1F4CB;</span> Run History</a>
-    <a href="/rag" class="nav-btn"><span class="icon">&#x1F9E0;</span> Super-RAG</a>
+    <a href="/skills" class="nav-btn"><span class="icon">&#x1F9E0;</span> Skill Cards</a>
+    <a href="/rag" class="nav-btn"><span class="icon">&#x1F52C;</span> Super-RAG</a>
     <a href="/mcp" class="nav-btn"><span class="icon">&#x1F9E9;</span> MCP Servers</a>
     <a href="/projects" class="nav-btn"><span class="icon">&#x1F4C1;</span> Projects</a>
   </div>
@@ -1390,7 +1392,8 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
     <a href="/" class="nav-btn"><span class="icon">&#x1F4AC;</span> Chat</a>
     <a href="/setup" class="nav-btn"><span class="icon">&#x2699;&#xFE0F;</span> Setup &amp; Config</a>
     <a href="/runs" class="nav-btn"><span class="icon">&#x1F4CB;</span> Run History</a>
-    <a href="/rag" class="nav-btn"><span class="icon">&#x1F9E0;</span> Super-RAG</a>
+    <a href="/skills" class="nav-btn"><span class="icon">&#x1F9E0;</span> Skill Cards</a>
+    <a href="/rag" class="nav-btn"><span class="icon">&#x1F52C;</span> Super-RAG</a>
     <a href="/mcp" class="nav-btn"><span class="icon">&#x1F9E9;</span> MCP Servers</a>
     <a href="/projects" class="nav-btn active"><span class="icon">&#x1F4C1;</span> Projects</a>
   </div>
@@ -1987,7 +1990,8 @@ input:checked + .slider:before{transform:translateX(18px);}
     <a href="/chat" class="nav-btn"><span class="icon">&#x1F4AC;</span> Chat</a>
     <a href="/setup" class="nav-btn"><span class="icon">&#x2699;&#xFE0F;</span> Setup &amp; Config</a>
     <a href="/runs" class="nav-btn"><span class="icon">&#x1F4D6;</span> Run History</a>
-    <a href="/rag" class="nav-btn active"><span class="icon">&#x1F9E0;</span> Super-RAG</a>
+    <a href="/skills" class="nav-btn"><span class="icon">&#x1F9E0;</span> Skill Cards</a>
+    <a href="/rag" class="nav-btn active"><span class="icon">&#x1F52C;</span> Super-RAG</a>
     <a href="/mcp" class="nav-btn"><span class="icon">&#x1F9E9;</span> MCP Servers</a>
     <a href="/projects" class="nav-btn"><span class="icon">&#x1F4C1;</span> Projects</a>
   </div>
@@ -2711,7 +2715,8 @@ input:checked + .slider:before { transform: translateX(14px); }
     <a href="/" class="nav-btn"><span class="icon">&#x1F4AC;</span> Chat</a>
     <a href="/setup" class="nav-btn"><span class="icon">&#x2699;&#xFE0F;</span> Setup &amp; Config</a>
     <a href="/runs" class="nav-btn"><span class="icon">&#x1F4CB;</span> Run History</a>
-    <a href="/rag" class="nav-btn"><span class="icon">&#x1F9E0;</span> Super-RAG</a>
+    <a href="/skills" class="nav-btn"><span class="icon">&#x1F9E0;</span> Skill Cards</a>
+    <a href="/rag" class="nav-btn"><span class="icon">&#x1F52C;</span> Super-RAG</a>
     <a href="/mcp" class="nav-btn active"><span class="icon">&#x1F9E9;</span> MCP Servers</a>
     <a href="/projects" class="nav-btn"><span class="icon">&#x1F4C1;</span> Projects</a>
   </div>
@@ -2948,6 +2953,159 @@ loadScaffold();
 </html>"""
 
 
+_SKILLS_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kendr &mdash; Skill Cards</title>
+<style>
+:root{--teal:#00C9A7;--amber:#FFB347;--crimson:#FF4757;--bg:#0d0f14;--surface:#161b22;--surface2:#1e2530;--border:#2a3140;--text:#e6edf3;--muted:#7d8590;--sidebar-w:280px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
+.sidebar{position:fixed;top:0;left:0;width:var(--sidebar-w);height:100vh;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:20px 0;z-index:100}
+.logo{padding:0 20px 20px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.logo h1{font-size:22px;font-weight:800;color:var(--teal)}
+.logo small{font-size:11px;color:var(--muted)}
+.nav-btn{display:flex;align-items:center;gap:10px;padding:10px 20px;color:var(--text);text-decoration:none;font-size:14px;border-radius:6px;margin:2px 8px;transition:background .15s}
+.nav-btn:hover{background:var(--surface2)}
+.nav-btn.active{background:rgba(0,201,167,.15);color:var(--teal);font-weight:600}
+.nav-btn .icon{font-size:16px;width:20px;text-align:center}
+.main{margin-left:var(--sidebar-w);padding:32px}
+.page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
+.page-title{font-size:24px;font-weight:700}
+.summary-bar{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:28px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 22px;display:flex;flex-direction:column;gap:4px}
+.stat .num{font-size:28px;font-weight:700;color:var(--teal)}
+.stat .lbl{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.stat.inactive .num{color:var(--amber)}
+.filter-bar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+.filter-btn{background:var(--surface);border:1px solid var(--border);color:var(--muted);padding:6px 14px;border-radius:20px;cursor:pointer;font-size:13px;transition:all .15s}
+.filter-btn:hover,.filter-btn.active{background:var(--teal);border-color:var(--teal);color:#000;font-weight:600}
+.cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.skill-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:10px;transition:box-shadow .2s}
+.skill-card:hover{box-shadow:0 4px 20px rgba(0,201,167,.12)}
+.skill-card.inactive{opacity:.55}
+.skill-card.inactive:hover{opacity:.75}
+.card-header{display:flex;align-items:flex-start;gap:12px}
+.card-emoji{font-size:28px;line-height:1;flex-shrink:0}
+.card-info{flex:1;min-width:0}
+.card-name{font-size:15px;font-weight:700;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-category{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.card-status{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:.03em}
+.status-active{background:rgba(0,201,167,.15);color:var(--teal)}
+.status-inactive{background:rgba(255,179,71,.1);color:var(--amber)}
+.card-desc{font-size:13px;color:var(--muted);line-height:1.5;flex:1}
+.card-hint{background:rgba(255,179,71,.08);border:1px solid rgba(255,179,71,.2);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--amber)}
+.skills-chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{background:var(--surface2);border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:10px;font-size:11px}
+.empty-msg{text-align:center;color:var(--muted);padding:60px 20px;grid-column:1/-1}
+</style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="logo"><h1>kendr</h1><small>multi-agent runtime</small></div>
+  <a href="/" class="nav-btn"><span class="icon">&#x1F4AC;</span> Chat</a>
+  <a href="/setup" class="nav-btn"><span class="icon">&#x2699;&#xFE0F;</span> Setup &amp; Config</a>
+  <a href="/runs" class="nav-btn"><span class="icon">&#x1F4CB;</span> Run History</a>
+  <a href="/skills" class="nav-btn active"><span class="icon">&#x1F9E0;</span> Skill Cards</a>
+  <a href="/mcp" class="nav-btn"><span class="icon">&#x1F9E9;</span> MCP Servers</a>
+  <a href="/projects" class="nav-btn"><span class="icon">&#x1F4C1;</span> Projects</a>
+</nav>
+<main class="main">
+  <div class="page-header">
+    <div class="page-title">&#x1F9E0; Skill Cards</div>
+    <div id="refreshBtn" style="cursor:pointer;background:var(--surface);border:1px solid var(--border);padding:8px 16px;border-radius:8px;font-size:13px;color:var(--muted)" onclick="loadSkills()">&#x21BB; Refresh</div>
+  </div>
+  <div class="summary-bar" id="summaryBar"></div>
+  <div class="filter-bar" id="filterBar">
+    <button class="filter-btn active" data-cat="all" onclick="setFilter('all',this)">All</button>
+  </div>
+  <div class="cards-grid" id="cardsGrid"><div class="empty-msg">Loading skill cards…</div></div>
+</main>
+<script>
+let _allCards = [];
+let _activeFilter = 'all';
+
+async function loadSkills() {
+  try {
+    const r = await fetch('/api/skills');
+    const d = await r.json();
+    _allCards = d.cards || [];
+    renderSummary(d.summary || {});
+    renderFilters(_allCards);
+    renderCards(_allCards, _activeFilter);
+  } catch(e) {
+    document.getElementById('cardsGrid').innerHTML = '<div class="empty-msg">Gateway is offline. Start it with <code>kendr gateway start</code>.</div>';
+  }
+}
+
+function renderSummary(s) {
+  const bar = document.getElementById('summaryBar');
+  bar.innerHTML = `
+    <div class="stat"><div class="num">${s.total||0}</div><div class="lbl">Total Agents</div></div>
+    <div class="stat"><div class="num">${s.active||0}</div><div class="lbl">Active Now</div></div>
+    <div class="stat inactive"><div class="num">${s.inactive||0}</div><div class="lbl">Needs Config</div></div>
+  `;
+}
+
+function renderFilters(cards) {
+  const cats = {};
+  cards.forEach(c => {
+    const key = c.category || 'general';
+    cats[key] = cats[key] || { label: c.category_label || key, emoji: c.category_emoji || '✨', count: 0 };
+    cats[key].count++;
+  });
+  const bar = document.getElementById('filterBar');
+  const total = cards.length;
+  bar.innerHTML = `<button class="filter-btn ${_activeFilter==='all'?'active':''}" data-cat="all" onclick="setFilter('all',this)">All (${total})</button>`;
+  Object.entries(cats).sort((a,b)=>b[1].count-a[1].count).forEach(([cat,meta]) => {
+    bar.innerHTML += `<button class="filter-btn ${_activeFilter===cat?'active':''}" data-cat="${cat}" onclick="setFilter('${cat}',this)">${meta.emoji} ${meta.label} (${meta.count})</button>`;
+  });
+}
+
+function setFilter(cat, btn) {
+  _activeFilter = cat;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderCards(_allCards, cat);
+}
+
+function renderCards(cards, filter) {
+  const grid = document.getElementById('cardsGrid');
+  const filtered = filter === 'all' ? cards : cards.filter(c => (c.category||'general') === filter);
+  if (!filtered.length) { grid.innerHTML = '<div class="empty-msg">No agents in this category.</div>'; return; }
+
+  // Sort: active first
+  filtered.sort((a,b) => (b.is_active ? 1 : 0) - (a.is_active ? 1 : 0));
+
+  grid.innerHTML = filtered.map(c => {
+    const active = c.is_active;
+    const chips = (c.skills||[]).slice(0,6).map(s => `<span class="chip">${s}</span>`).join('');
+    const hint = (!active && c.config_hint) ? `<div class="card-hint">&#x1F4A1; ${c.config_hint}</div>` : '';
+    return `
+      <div class="skill-card ${active?'':'inactive'}">
+        <div class="card-header">
+          <div class="card-emoji">${c.category_emoji||'✨'}</div>
+          <div class="card-info">
+            <div class="card-name" title="${c.agent_name}">${c.display_name}</div>
+            <div class="card-category">${c.category_label||c.category||'general'}</div>
+          </div>
+          <div class="card-status ${active?'status-active':'status-inactive'}">${active?'&#x2714; Active':'&#x26A0; Config needed'}</div>
+        </div>
+        <div class="card-desc">${c.description||''}</div>
+        ${hint}
+        ${chips ? `<div class="skills-chips">${chips}</div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+loadSkills();
+</script>
+</body>
+</html>"""
+
+
 _RUNS_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -2988,7 +3146,8 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
     <a href="/" class="nav-btn"><span class="icon">&#x1F4AC;</span> Chat</a>
     <a href="/setup" class="nav-btn"><span class="icon">&#x2699;&#xFE0F;</span> Setup &amp; Config</a>
     <a href="/runs" class="nav-btn active"><span class="icon">&#x1F4CB;</span> Run History</a>
-    <a href="/rag" class="nav-btn"><span class="icon">&#x1F9E0;</span> Super-RAG</a>
+    <a href="/skills" class="nav-btn"><span class="icon">&#x1F9E0;</span> Skill Cards</a>
+    <a href="/rag" class="nav-btn"><span class="icon">&#x1F52C;</span> Super-RAG</a>
     <a href="/mcp" class="nav-btn"><span class="icon">&#x1F9E9;</span> MCP Servers</a>
     <a href="/projects" class="nav-btn"><span class="icon">&#x1F4C1;</span> Projects</a>
   </div>
@@ -3088,6 +3247,9 @@ class KendrUIHandler(BaseHTTPRequestHandler):
         if path == "/mcp":
             self._html(200, _MCP_HTML)
             return
+        if path == "/skills":
+            self._html(200, _SKILLS_HTML)
+            return
         if path == "/projects":
             self._html(200, _PROJECTS_HTML)
             return
@@ -3117,6 +3279,13 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/health":
             self._json(200, {"service": "kendr-ui", "status": "ok"})
+            return
+        if path == "/api/skills":
+            try:
+                data = _gateway_get("/registry/skills", timeout=5.0)
+                self._json(200, data)
+            except Exception:
+                self._json(503, {"error": "Gateway offline", "summary": {}, "cards": []})
             return
         if path == "/api/gateway/status":
             working_dir = os.getenv("KENDR_WORKING_DIR", "").strip()

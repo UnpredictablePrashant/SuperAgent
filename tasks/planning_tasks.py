@@ -309,6 +309,7 @@ def _planning_context(state: dict, objective: str) -> str:
         "objective": objective,
         "current_objective": state.get("current_objective", ""),
         "available_agents": state.get("available_agents", []),
+        "skill_registry_hints": state.get("plan_agent_hints", []),
         "local_drive_paths": state.get("local_drive_paths", []),
         "local_drive_summary": str(state.get("local_drive_summary", "")).strip()[:6000],
         "long_document_mode": bool(state.get("long_document_mode", False)),
@@ -365,7 +366,7 @@ CLARIFICATION POLICY — be very strict about when to ask:
 - If the user's intent is clear enough that a domain expert could begin working on it immediately without asking a clarifying question, do NOT ask — just plan it with your best assumptions.
 - Asking unnecessary clarification questions is a serious failure mode that wastes the user's time and breaks their workflow. When in doubt, assume and proceed.
 
-AGENT ROUTING HINTS — prefer these agents for the matching intent keywords:
+AGENT ROUTING HINTS — the planning context includes a "skill_registry_hints" list pre-computed by the live skill registry (highest-ranked agents for this specific query). Treat these as strong suggestions — prefer them when semantics match. If the list is empty, use these fallback intent keywords:
 - github_agent: "github", "repository", "repo", "pull request", "PR", "commit", "push", "branch", "clone", "git", "issue", "open a PR", "merge", "code review", "fork"
 - coding_agent / master_coding_agent: "write code", "implement", "generate code", "create a function", "fix the bug", "refactor"
 - aws_automation_agent / aws_inventory_agent: "AWS", "EC2", "S3", "Lambda", "CloudFormation", "IAM"

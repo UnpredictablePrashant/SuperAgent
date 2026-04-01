@@ -67,6 +67,15 @@ AGENT_METADATA = {
             "draft_response",
         ],
         "requirements": ["openai", "qdrant"],
+        "display_name": "Super-RAG",
+        "category": "data",
+        "intent_patterns": [
+            "search my documents", "ask my knowledge base", "rag query",
+            "query my files", "search uploaded docs", "vector search",
+            "build knowledge base", "index my documents",
+        ],
+        "active_when": ["env:OPENAI_API_KEY"],
+        "config_hint": "Add your OpenAI API key and optionally connect OneDrive in Setup.",
     }
 }
 

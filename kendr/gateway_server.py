@@ -31,6 +31,7 @@ from kendr.recovery import discover_resume_candidates, load_resume_candidate
 
 REGISTRY = build_registry()
 RUNTIME = AgentRuntime(REGISTRY)
+SKILL_REGISTRY = RUNTIME.skill_registry
 
 
 def _html_page(title: str, body: str) -> bytes:
@@ -77,6 +78,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/health":
             self._send_json(200, {"status": "ok"})
+            return
+        if parsed.path == "/registry/skills":
+            cards = SKILL_REGISTRY.get_all_cards()
+            summary = SKILL_REGISTRY.summary()
+            self._send_json(200, {
+                "summary": summary,
+                "cards": [c.to_dict() for c in cards],
+            })
             return
         if parsed.path == "/registry/agents":
             self._send_json(

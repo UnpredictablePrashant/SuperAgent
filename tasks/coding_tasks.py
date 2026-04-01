@@ -39,6 +39,14 @@ AGENT_METADATA = {
             "coding_backend_used",
         ],
         "requirements": ["openai_or_codex_cli"],
+        "display_name": "Coding Agent",
+        "category": "development",
+        "intent_patterns": [
+            "write code", "implement function", "generate code", "create class",
+            "write a script", "code this", "build a module", "write a component",
+        ],
+        "active_when": [],
+        "config_hint": "",
     },
     "master_coding_agent": {
         "description": "Long-running coding project orchestrator that produces detailed project plans and delegates implementation/setup work to specialist agents.",

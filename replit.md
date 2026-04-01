@@ -336,3 +336,40 @@ kendr generate --stack react-vite "A todo app with auth" --github-repo my-org/to
 kendr generate --stack flutter "A mobile weather app" --standalone --skip-devops
 kendr generate --stack fastapi "A REST API for inventory management" --output /tmp/inventory-api
 ```
+
+## Skill Registry System (`kendr/skill_registry.py`)
+
+### Design
+At gateway startup, `AgentRuntime.__init__` builds a `SkillRegistry` by scanning every registered agent (including synthetic MCP tool agents). The registry:
+1. Reads `AGENT_METADATA` (`display_name`, `category`, `intent_patterns`, `active_when`, `config_hint`) from each task module
+2. Checks `active_when` conditions (env var presence, provider prefix checks) to determine which agents are live
+3. Builds a weighted inverted keyword index: skills → 2.5, intent_patterns → 1.8, description → 0.5
+4. Exposes `top_match(text)` (direct route if score ≥ 5.0 and dominance ≥ 2.2×) and `hint_agents(text, n)` for planner hints
+
+### Runtime routing (in `kendr/runtime.py`)
+After the conversational shortcut block, before all other fast-paths:
+- `skill_registry.top_match(query)` → if a single dominant active agent found, **bypass the planner and route directly**
+- Otherwise → `skill_registry.hint_agents(query, 4)` stored as `plan_agent_hints` in state for the planner
+- Guards: only fires on first orchestrator call, no active plan_steps, not in long_document or dev_pipeline mode
+
+### Planner integration
+`plan_agent_hints` injected into `_planning_context()` as `skill_registry_hints`. Planner prompt updated to treat these as strong routing suggestions.
+
+### Active/inactive detection
+`active_when` is a list of conditions per agent:
+- `"env:GITHUB_TOKEN"` — env var must be non-empty
+- `"provider:OPENAI"` — any env var starting with OPENAI must be set
+- `"always"` (or empty list) — always active
+
+### UI: Skill Cards page (`/skills`)
+- Shows all 110+ agents as cards grouped by category (General, GitHub/Git, Testing, Documents, Communications, Development, Infrastructure, Data/RAG, Research, MCP Tools)
+- Active cards shown in full color; inactive cards grayed out with config hint
+- Category filter pills with counts
+- Summary bar: total agents, active count, needs-config count
+- Refreshes from `/api/skills` → gateway `/registry/skills`
+
+### Gateway endpoint
+`/registry/skills` — returns `{ summary: {...}, cards: [{agent_name, display_name, description, category, category_label, category_emoji, skills, is_active, config_hint}] }`
+
+### AGENT_METADATA fields added
+`display_name`, `category`, `intent_patterns`, `active_when`, `config_hint` added to: `github_tasks.py`, `research_tasks.py`, `testing_agent_suite.py`, `devops_tasks.py`, `coding_tasks.py`, `long_document_tasks.py`, `document_formatter_tasks.py`, `communication_tasks.py`, `superrag_tasks.py`

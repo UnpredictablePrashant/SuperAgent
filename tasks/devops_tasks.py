@@ -29,6 +29,14 @@ AGENT_METADATA = {
         ],
         "output_keys": ["devops_status", "devops_files", "devops_summary"],
         "requirements": [],
+        "display_name": "DevOps Agent",
+        "category": "infra",
+        "intent_patterns": [
+            "generate dockerfile", "create docker-compose", "setup CI/CD",
+            "create github actions", "write nginx config", "containerize app",
+        ],
+        "active_when": [],
+        "config_hint": "",
     },
 }
 

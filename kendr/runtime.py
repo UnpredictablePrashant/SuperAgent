@@ -23,6 +23,7 @@ from kendr.persistence import (
     upsert_task_session,
 )
 from kendr.setup import build_setup_snapshot
+from kendr.skill_registry import build_skill_registry, SkillRegistry
 
 from tasks.a2a_protocol import (
     append_artifact,
@@ -68,6 +69,13 @@ from .registry import Registry
 class AgentRuntime:
     def __init__(self, registry: Registry):
         self.registry = registry
+        self.skill_registry: SkillRegistry = build_skill_registry(registry)
+        _sr_summary = self.skill_registry.summary()
+        print(
+            f"[kendr] Skill registry ready: "
+            f"{_sr_summary['active']} active / {_sr_summary['total']} total agents across "
+            f"{len(_sr_summary.get('by_category', {}))} categories."
+        )
 
     def _agent_cards(self) -> list[dict]:
         return self.registry.agent_cards()
@@ -1659,6 +1667,40 @@ class AgentRuntime:
                 )
                 log_task_update("Orchestrator", "Conversational shortcut — skipping planner.")
                 return state
+
+        # --- Skill registry: single-agent direct routing (bypass planner) ---
+        # Fire only on the very first orchestrator call so we don't re-route mid-plan.
+        _skill_route_eligible = (
+            in_task_phase
+            and state["orchestrator_calls"] <= 1
+            and not state.get("plan_steps")
+            and not state.get("dev_pipeline_mode")
+            and not state.get("long_document_mode")
+            and current_objective
+        )
+        if _skill_route_eligible:
+            _sr_target = self.skill_registry.top_match(current_objective)
+            if _sr_target and self._is_agent_available(state, _sr_target):
+                state["next_agent"] = _sr_target
+                state["orchestrator_reason"] = (
+                    f"Skill registry matched '{_sr_target}' as the dominant handler — skipping planner."
+                )
+                state = append_task(
+                    state,
+                    make_task(
+                        sender="orchestrator_agent",
+                        recipient=_sr_target,
+                        intent="skill-routed",
+                        content=current_objective,
+                        state_updates={},
+                    ),
+                )
+                log_task_update("Orchestrator", f"Skill route → {_sr_target} (bypassing planner).")
+                return state
+            # Ambiguous or no strong match: provide agent hints to the planner
+            _sr_hints = self.skill_registry.hint_agents(current_objective, n=4)
+            if _sr_hints:
+                state["plan_agent_hints"] = _sr_hints
 
         # --- Dev pipeline: finalization — terminate when pipeline is done ---
         dev_pipeline_status = str(state.get("dev_pipeline_status", "")).strip().lower()

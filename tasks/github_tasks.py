@@ -50,6 +50,15 @@ AGENT_METADATA = {
             "github_operations_log",
         ],
         "requirements": ["github"],
+        "display_name": "GitHub Agent",
+        "category": "github",
+        "intent_patterns": [
+            "clone repo", "clone repository", "open pull request", "create PR",
+            "merge PR", "merge pull request", "push to github", "commit code",
+            "create branch", "list issues", "github issues", "fork repo",
+        ],
+        "active_when": ["env:GITHUB_TOKEN"],
+        "config_hint": "Add your GitHub personal access token in Setup → Providers.",
     },
 }
 

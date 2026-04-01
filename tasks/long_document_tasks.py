@@ -72,6 +72,15 @@ AGENT_METADATA = {
             "draft_response",
         ],
         "requirements": ["openai"],
+        "display_name": "Long Document Agent",
+        "category": "documents",
+        "intent_patterns": [
+            "write a complete document", "research and write", "create a report",
+            "generate a handbook", "produce a whitepaper", "write a guide",
+            "document about", "full report on", "comprehensive guide to",
+        ],
+        "active_when": ["env:OPENAI_API_KEY"],
+        "config_hint": "Add your OpenAI API key in Setup → Providers.",
     }
 }
 

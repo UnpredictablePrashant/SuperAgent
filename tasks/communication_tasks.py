@@ -32,6 +32,11 @@ AGENT_METADATA = {
         ],
         "output_keys": ["whatsapp_send_result", "draft_response"],
         "requirements": ["openai", "whatsapp"],
+        "display_name": "WhatsApp Send",
+        "category": "comms",
+        "intent_patterns": ["send whatsapp", "whatsapp message", "message on whatsapp"],
+        "active_when": ["env:WHATSAPP_ACCESS_TOKEN"],
+        "config_hint": "Set WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID in Setup.",
     },
     "whatsapp_list_messages_agent": {
         "description": (
@@ -45,6 +50,11 @@ AGENT_METADATA = {
         ],
         "output_keys": ["whatsapp_results", "draft_response"],
         "requirements": ["openai", "whatsapp"],
+        "display_name": "WhatsApp Inbox",
+        "category": "comms",
+        "intent_patterns": ["list whatsapp messages", "check whatsapp inbox"],
+        "active_when": ["env:WHATSAPP_ACCESS_TOKEN"],
+        "config_hint": "Set WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID in Setup.",
     },
     "communication_summary_agent": {
         "description": (
@@ -60,6 +70,15 @@ AGENT_METADATA = {
         ],
         "output_keys": ["communication_summary_report", "draft_response"],
         "requirements": ["openai"],
+        "display_name": "Communication Digest",
+        "category": "comms",
+        "intent_patterns": [
+            "check my messages", "morning briefing", "what did i miss",
+            "communication digest", "summarize my emails", "check slack",
+            "check gmail", "inbox digest",
+        ],
+        "active_when": [],
+        "config_hint": "Connect email and messaging providers in Setup → Providers.",
     },
 }
 
