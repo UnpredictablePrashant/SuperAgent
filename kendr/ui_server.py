@@ -440,7 +440,9 @@ a:hover { text-decoration: underline; }
 .chat-header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; background: var(--surface); }
 .chat-title { font-size: 15px; font-weight: 600; color: var(--text); }
 .chat-subtitle { font-size: 12px; color: var(--muted); }
-.header-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.header-status { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+.clear-chat-btn { display: flex; align-items: center; gap: 5px; padding: 5px 12px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; transition: all 0.15s; }
+.clear-chat-btn:hover { border-color: var(--crimson); color: var(--crimson); background: rgba(255,71,87,0.08); }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--crimson); }
 .status-dot.online { background: var(--teal); animation: pulse 2s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
@@ -518,6 +520,7 @@ a:hover { text-decoration: underline; }
       <div class="chat-subtitle">Powered by kendr multi-agent runtime</div>
     </div>
     <div class="header-status">
+      <button class="clear-chat-btn" id="clearChatBtn" onclick="clearChat()" title="Clear chat" style="display:none">&#x1F5D1; Clear</button>
       <div class="status-dot" id="gatewayDot"></div>
       <span id="gatewayStatus">Checking gateway...</span>
     </div>
@@ -612,14 +615,34 @@ function esc(s) {
 function newChat() {
   currentRunId = null;
   if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
+  stopPlanPolling();
+  isRunning = false;
+  document.getElementById('sendBtn').disabled = false;
   clearMessages();
   document.getElementById('chatTitle').textContent = 'New Chat';
+  document.getElementById('clearChatBtn').style.display = 'none';
+  document.getElementById('userInput').focus();
+}
+
+function clearChat() {
+  const msgs = document.getElementById('messages');
+  const hasMessages = msgs.querySelectorAll('.message-row').length > 0;
+  if (!hasMessages) return;
+  if (!confirm('Clear this chat? All messages in this view will be removed.')) return;
+  if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
+  stopPlanPolling();
+  isRunning = false;
+  document.getElementById('sendBtn').disabled = false;
+  currentRunId = null;
+  clearMessages();
+  document.getElementById('chatTitle').textContent = 'New Chat';
+  document.getElementById('clearChatBtn').style.display = 'none';
   document.getElementById('userInput').focus();
 }
 
 function clearMessages() {
   const msgs = document.getElementById('messages');
-  msgs.innerHTML = '';
+  msgs.innerHTML = '<div class="welcome" id="welcome"><div class="welcome-logo">&#x26A1;</div><h2>What would you like to research or build?</h2><p>Kendr orchestrates specialized AI agents to research, generate code, deploy applications, analyze data, and automate complex workflows &#x2014; all from a single query.</p><div class="suggestions"><div class="suggest-chip" onclick="fillInput(\'Create a competitive intelligence brief on Stripe\')">&#x1F4CA; Stripe competitive brief</div><div class="suggest-chip" onclick="fillInput(\'Build a FastAPI REST API with JWT authentication and PostgreSQL\')">&#x1F3D7;&#xFE0F; FastAPI + JWT + PostgreSQL</div><div class="suggest-chip" onclick="fillInput(\'Write API tests for https://jsonplaceholder.typicode.com\')">&#x1F9EA; API test generation</div><div class="suggest-chip" onclick="fillInput(\'Summarize my unread emails and Slack messages from today\')">&#x1F4EC; Communications digest</div><div class="suggest-chip" onclick="fillInput(\'Dockerize a Node.js app and write a docker-compose.yml\')">&#x1F433; Dockerize + compose</div><div class="suggest-chip" onclick="fillInput(\'Deploy a React app to AWS S3 and CloudFront\')">&#x2601;&#xFE0F; Deploy to AWS</div></div></div>';
 }
 
 function fillInput(text) {
@@ -654,6 +677,8 @@ function appendUserMsg(text) {
   row.innerHTML = '<div class="avatar user">&#x1F9D1;</div><div class="bubble"><div style="white-space:pre-wrap">' + esc(text) + '</div></div>';
   msgs.appendChild(row);
   scrollDown();
+  const clearBtn = document.getElementById('clearChatBtn');
+  if (clearBtn) clearBtn.style.display = 'flex';
 }
 
 function appendKendrMsg(output, runId) {
