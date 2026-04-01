@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "run_id": "proj-k8m19295",
+  "status": "awaiting_user_input",
+  "resumable": true,
+  "branchable": true,
+  "resume_strategy": "user_input",
+  "objective": "give me a summary about this project",
+  "active_agent": "planner_agent",
+  "last_agent": "planner_agent",
+  "last_error": "",
+  "pending_user_input_kind": "plan_approval",
+  "pending_user_question": "The execution plan v2 is ready for approval.\nStored in output/planner_output.txt, output/planner_output.json, and the session planning memory.\n\n**Summary:** This plan involves executing a vulnerability scan on the project to identify security issues in the codebase.\n\n**Steps (1):**\n⏳ **step-1: Run vulnerability scan**\n  → agent: `security_scanner_agent`\n  → task: Scan the project to identify all security vulnerabilities present in the codebase.\n  → done when: List of detected vulnerabilities\n\nReply `approve` to continue, or describe the changes you want and I will regenerate the plan before execution.",
+  "plan_step_index": 0,
+  "plan_step_count": 1,
+  "current_plan_step_title": "",
+  "last_completed_plan_step_title": "",
+  "updated_at": "2026-04-01T06:51:04.058075+00:00",
+  "working_directory": "/home/runner/workspace/~/A2A_Demos",
+  "run_output_dir": "/home/runner/workspace/~/A2A_Demos/runs/proj-k8m19295_kuh3yapk"
+}

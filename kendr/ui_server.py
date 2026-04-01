@@ -168,6 +168,18 @@ def _gateway_ingest(payload: dict) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _gateway_resume(payload: dict) -> dict:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        f"{_gateway_url()}/resume",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=360) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def _gateway_get(path: str, timeout: float = 5.0) -> dict | list:
     req = urllib.request.Request(f"{_gateway_url()}{path}", method="GET")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -318,10 +330,17 @@ def _start_run_background(run_id: str, payload: dict) -> None:
                     result["long_document_exports"] = long_doc_exports
             except Exception:
                 pass
+            _run_awaiting = bool(
+                result.get("awaiting_user_input")
+                or result.get("plan_waiting_for_approval")
+                or result.get("plan_needs_clarification")
+                or str(result.get("pending_user_input_kind", "")).strip()
+            )
+            _run_status = "awaiting_user_input" if _run_awaiting else "completed"
             with _pending_lock:
-                _pending_runs[run_id] = {"status": "completed", "result": result}
+                _pending_runs[run_id] = {"status": _run_status, "result": result}
             _push_event(run_id, "result", result)
-            _push_event(run_id, "done", {"run_id": run_id, "status": "completed"})
+            _push_event(run_id, "done", {"run_id": run_id, "status": _run_status, "awaiting_user_input": _run_awaiting})
         except urllib.error.URLError as exc:
             err = str(exc)
             with _pending_lock:
@@ -552,10 +571,38 @@ a:hover { text-decoration: underline; }
 const API = '';
 let currentRunId = null;
 let isRunning = false;
+let isAwaitingInput = false;
 let gatewayOnline = false;
 let workingDir = '';
 let activeEvtSource = null;
 let _loadRunToken = 0;
+
+function _newChatSessionId() {
+  return 'chat-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+}
+let chatSessionId = sessionStorage.getItem('kendr_chat_session_id') || _newChatSessionId();
+sessionStorage.setItem('kendr_chat_session_id', chatSessionId);
+
+function _showAwaitingBanner() {
+  if (document.getElementById('awaiting-input-banner')) return;
+  const msgs = document.getElementById('messages');
+  if (!msgs) return;
+  const banner = document.createElement('div');
+  banner.id = 'awaiting-input-banner';
+  banner.style.cssText = 'margin:8px 0 4px 52px;padding:10px 14px;background:rgba(83,82,237,0.1);border:1px solid rgba(83,82,237,0.3);border-radius:8px;font-size:13px;color:var(--text)';
+  banner.innerHTML = '<span style="color:#8b8af0;font-weight:600">&#x23F3; Awaiting your input</span> &mdash; type your response below to continue this run.';
+  msgs.appendChild(banner);
+  scrollDown();
+  const inp = document.getElementById('userInput');
+  if (inp) inp.placeholder = 'Type your response to continue\u2026';
+}
+
+function _removeAwaitingBanner() {
+  const b = document.getElementById('awaiting-input-banner');
+  if (b) b.remove();
+  const inp = document.getElementById('userInput');
+  if (inp) inp.placeholder = 'Ask kendr anything \u2014 research, code, deploy, analyze\u2026';
+}
 
 async function checkGateway() {
   try {
@@ -599,10 +646,24 @@ async function loadRuns() {
   } catch(e) {}
 }
 
+let _pendingResumeDir = null;
+
+function continueRun(runId, workingDir) {
+  _pendingResumeDir = workingDir || null;
+  isAwaitingInput = true;
+  const b = document.getElementById('awaiting-input-banner');
+  if (b) b.remove();
+  _showAwaitingBanner();
+  document.getElementById('userInput').focus();
+}
+
 async function loadRun(runId) {
   if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
   stopPlanPolling();
   isRunning = false;
+  isAwaitingInput = false;
+  _pendingResumeDir = null;
+  _removeAwaitingBanner();
   document.getElementById('sendBtn').disabled = false;
   currentRunId = runId;
   const myToken = ++_loadRunToken;
@@ -648,9 +709,11 @@ async function loadRun(runId) {
     msgs.appendChild(metaRow);
 
     if (status === 'awaiting_user_input') {
+      const runWorkDir = d.working_directory || d.run_output_dir || '';
       const banner = document.createElement('div');
-      banner.style.cssText = 'margin:8px 0 0 52px;padding:10px 14px;background:rgba(83,82,237,0.1);border:1px solid rgba(83,82,237,0.3);border-radius:8px;font-size:13px;color:var(--text)';
-      banner.innerHTML = '<span style="color:#8b8af0;font-weight:600">&#x23F3; Awaiting your input</span> &mdash; type your response below to continue this run.';
+      banner.style.cssText = 'margin:8px 0 0 52px;padding:10px 14px;background:rgba(83,82,237,0.1);border:1px solid rgba(83,82,237,0.3);border-radius:8px;font-size:13px;color:var(--text);display:flex;align-items:center;gap:12px;flex-wrap:wrap';
+      banner.innerHTML = '<span><span style="color:#8b8af0;font-weight:600">&#x23F3; Awaiting your input</span> &mdash; this run is paused and waiting for a response.</span>' +
+        '<button onclick="continueRun(' + JSON.stringify(runId) + ',' + JSON.stringify(runWorkDir) + ')" style="padding:5px 12px;border-radius:6px;border:1px solid rgba(83,82,237,0.5);background:rgba(83,82,237,0.15);color:#8b8af0;font-size:12px;font-weight:600;cursor:pointer">&#x25B6; Continue This Run</button>';
       msgs.appendChild(banner);
     }
 
@@ -686,10 +749,14 @@ function esc(s) {
 function newChat() {
   _loadRunToken++;
   currentRunId = null;
+  isAwaitingInput = false;
+  chatSessionId = _newChatSessionId();
+  sessionStorage.setItem('kendr_chat_session_id', chatSessionId);
   if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
   stopPlanPolling();
   isRunning = false;
   document.getElementById('sendBtn').disabled = false;
+  _removeAwaitingBanner();
   clearMessages();
   document.getElementById('chatTitle').textContent = 'New Chat';
   document.getElementById('clearChatBtn').style.display = 'none';
@@ -703,11 +770,15 @@ function clearChat() {
   if (alreadyClear) return;
   if (!confirm('Clear this chat? All messages in this view will be removed.')) return;
   _loadRunToken++;
+  isAwaitingInput = false;
+  chatSessionId = _newChatSessionId();
+  sessionStorage.setItem('kendr_chat_session_id', chatSessionId);
   if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
   stopPlanPolling();
   isRunning = false;
   document.getElementById('sendBtn').disabled = false;
   currentRunId = null;
+  _removeAwaitingBanner();
   clearMessages();
   document.getElementById('chatTitle').textContent = 'New Chat';
   document.getElementById('clearChatBtn').style.display = 'none';
@@ -1031,7 +1102,8 @@ function openEventStream(runId) {
     try {
       const d = JSON.parse(e.data);
       const output = d.final_output || d.output || d.draft_response || '';
-      updateStreamStatus(runId, 'Completed.');
+      const awaiting = d.awaiting_user_input || d.plan_waiting_for_approval || d.plan_needs_clarification || false;
+      updateStreamStatus(runId, awaiting ? 'Awaiting your input\u2026' : 'Completed.');
       finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null, d.mcp_invocations || null, d.long_document_exports || null);
     } catch(_) {}
   });
@@ -1052,6 +1124,15 @@ function openEventStream(runId) {
   });
 
   evtSrc.addEventListener('done', e => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.awaiting_user_input) {
+        isAwaitingInput = true;
+        _showAwaitingBanner();
+      } else {
+        isAwaitingInput = false;
+      }
+    } catch(_) {}
     stopPlanPolling();
     evtSrc.close();
     activeEvtSource = null;
@@ -1081,15 +1162,35 @@ async function sendMessage() {
   isRunning = true;
   document.getElementById('sendBtn').disabled = true;
 
+  const isContinuation = isAwaitingInput;
+  isAwaitingInput = false;
+  _removeAwaitingBanner();
+
   appendUserMsg(text);
   const runId = 'ui-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   currentRunId = runId;
-  document.getElementById('chatTitle').textContent = text.substring(0, 40) + (text.length > 40 ? '...' : '');
+  if (!isContinuation) {
+    document.getElementById('chatTitle').textContent = text.substring(0, 40) + (text.length > 40 ? '...' : '');
+  }
   createStreamingRow(runId);
 
   try {
-    const payload = { text, channel: 'webchat', sender_id: 'ui_user', chat_id: 'web_chat_1', run_id: runId, working_directory: workingDir };
-    const resp = await fetch(API + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const resumeDir = _pendingResumeDir;
+    _pendingResumeDir = null;
+    let endpoint = API + '/api/chat';
+    const payload = {
+      text,
+      channel: 'webchat',
+      sender_id: 'ui_user',
+      chat_id: chatSessionId,
+      run_id: runId,
+      working_directory: workingDir
+    };
+    if (resumeDir) {
+      endpoint = API + '/api/chat/resume';
+      payload.resume_dir = resumeDir;
+    }
+    const resp = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const d = await resp.json();
 
     if (d.error) {
@@ -3662,6 +3763,9 @@ class KendrUIHandler(BaseHTTPRequestHandler):
         if path == "/api/chat":
             self._handle_chat(body)
             return
+        if path == "/api/chat/resume":
+            self._handle_chat_resume(body)
+            return
         if path == "/api/setup/save":
             self._handle_setup_save(body)
             return
@@ -3779,7 +3883,7 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             "text": text,
             "channel": str(body.get("channel", "webchat")),
             "sender_id": str(body.get("sender_id", "ui_user")),
-            "chat_id": str(body.get("chat_id", "web_chat_1")),
+            "chat_id": str(body.get("chat_id", "")),
         }
         if working_directory:
             payload["working_directory"] = working_directory
@@ -3802,6 +3906,72 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             _start_standalone_run_background(run_id, payload)
         else:
             _start_run_background(run_id, payload)
+        self._json(200, {"run_id": run_id, "streaming": True, "status": "started"})
+
+    def _handle_chat_resume(self, body: dict) -> None:
+        text = str(body.get("text") or body.get("message") or "").strip()
+        if not text:
+            self._json(400, {"error": "missing_text"})
+            return
+        resume_dir = str(body.get("resume_dir") or body.get("working_directory") or os.getenv("KENDR_WORKING_DIR", "")).strip()
+        if not resume_dir:
+            self._json(400, {"error": "missing_resume_dir", "detail": "Provide resume_dir or working_directory."})
+            return
+        if not _gateway_ready(timeout=0.5):
+            self._json(503, {"error": "Gateway not running", "detail": "Start it with: kendr gateway start"})
+            return
+        run_id = str(body.get("run_id") or "").strip() or f"ui-{uuid.uuid4().hex[:8]}"
+        q: "queue.Queue[dict]" = queue.Queue()
+        with _pending_lock:
+            _run_event_queues[run_id] = q
+            _pending_runs[run_id] = {"status": "running"}
+
+        def _run() -> None:
+            _push_event(run_id, "status", {"status": "running", "message": "Resuming run..."})
+            try:
+                resume_payload = {
+                    "text": text,
+                    "reply": text,
+                    "working_directory": resume_dir,
+                    "output_folder": resume_dir,
+                    "channel": str(body.get("channel", "webchat")),
+                    "sender_id": str(body.get("sender_id", "ui_user")),
+                    "chat_id": str(body.get("chat_id", "")),
+                    "run_id": run_id,
+                }
+                result = _gateway_resume(resume_payload)
+                _run_awaiting = bool(
+                    result.get("awaiting_user_input")
+                    or result.get("plan_waiting_for_approval")
+                    or result.get("plan_needs_clarification")
+                    or str(result.get("pending_user_input_kind", "")).strip()
+                )
+                _run_status = "awaiting_user_input" if _run_awaiting else "completed"
+                with _pending_lock:
+                    _pending_runs[run_id] = {"status": _run_status, "result": result}
+                _push_event(run_id, "result", result)
+                _push_event(run_id, "done", {"run_id": run_id, "status": _run_status, "awaiting_user_input": _run_awaiting})
+            except urllib.error.HTTPError as exc:
+                err_body = exc.read().decode("utf-8") if hasattr(exc, "read") else str(exc)
+                try:
+                    err_data = json.loads(err_body)
+                    err_msg = err_data.get("error", "") or err_data.get("detail", "") or str(exc)
+                except Exception:
+                    err_msg = err_body or str(exc)
+                with _pending_lock:
+                    _pending_runs[run_id] = {"status": "failed", "error": err_msg}
+                _push_event(run_id, "error", {"message": err_msg})
+                _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
+            except Exception as exc:
+                err = str(exc)
+                with _pending_lock:
+                    _pending_runs[run_id] = {"status": "failed", "error": err}
+                _push_event(run_id, "error", {"message": err})
+                _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
+
+        import threading as _threading
+        t = _threading.Thread(target=_run, daemon=True)
+        t.start()
         self._json(200, {"run_id": run_id, "streaming": True, "status": "started"})
 
     def _handle_sse(self, run_id: str) -> None:

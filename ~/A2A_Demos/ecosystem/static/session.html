@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Session Detail</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid"></div>
+    <header class="hero">
+      <h1>Session Interaction Detail</h1>
+      <p id="session-meta">Loading session...</p>
+    </header>
+
+    <main class="layout">
+      <section class="panel panel-graph">
+        <h2>Interaction Graph</h2>
+        <div id="graph-stage" class="graph-stage"></div>
+      </section>
+
+      <section class="panel panel-events">
+        <h2>Session Events</h2>
+        <div id="event-stream" class="event-stream"></div>
+      </section>
+
+      <section class="panel panel-status">
+        <h2>Edges + Inspector</h2>
+        <div class="sequence-info">
+          <div>
+            <h3>Session Edges</h3>
+            <ul id="edge-list" class="path-list"></ul>
+          </div>
+          <div>
+            <h3>Inspector</h3>
+            <pre id="inspector" class="inspector">Click a node, edge, or event to inspect details.</pre>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/session.js"></script>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+**Summary:** This plan involves scanning the project for vulnerabilities using a security scanner. The goal is to identify any security issues present.
+
+**Steps (1):**
+⏳ **step-1: Run vulnerability scan**
+  → agent: `security_scanner_agent`
+  → task: Scan the project to identify all security vulnerabilities present in the codebase.
+  → done when: List of detected vulnerabilities

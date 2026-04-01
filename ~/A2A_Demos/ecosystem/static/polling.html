@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Polling Configuration</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid"></div>
+    <header class="hero">
+      <h1>Polling Configuration</h1>
+      <p>Create and update caller-target polling settings for any agent pair.</p>
+      <p><a href="/">Back to Console</a></p>
+    </header>
+
+    <main class="layout">
+      <section class="panel panel-polling">
+        <h2>Create Configuration</h2>
+        <form id="polling-create-form" class="actions">
+          <select id="caller-agent" required></select>
+          <select id="target-agent" required></select>
+          <input id="poll-interval" type="number" min="0.1" step="0.1" value="20" required />
+          <input id="poll-attempts" type="number" min="1" step="1" value="5" required />
+          <button type="submit">Save Pair</button>
+        </form>
+        <p class="agents-note">Defaults: interval 20s, max attempts 5.</p>
+      </section>
+
+      <section class="panel panel-polling">
+        <h2>All Pairs</h2>
+        <table>
+          <thead>
+            <tr><th>caller</th><th>target</th><th>interval (s)</th><th>max attempts</th><th>source</th><th>action</th></tr>
+          </thead>
+          <tbody id="polling-table"></tbody>
+        </table>
+      </section>
+
+      <section class="panel panel-events">
+        <h2>Inspector</h2>
+        <pre id="inspector" class="inspector">Select a row to inspect details.</pre>
+      </section>
+    </main>
+
+    <script src="/static/polling.js"></script>
+  </body>
+</html>

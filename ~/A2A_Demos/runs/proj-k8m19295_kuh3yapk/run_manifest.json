@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "summary": {
+    "schema_version": 1,
+    "run_id": "proj-k8m19295",
+    "session_id": "project_chat:default:web_chat_1:main",
+    "session_started_at": "2026-04-01T06:50:42.549864+00:00",
+    "status": "awaiting_user_input",
+    "updated_at": "2026-04-01T06:51:04.058075+00:00",
+    "completed_at": "2026-04-01T06:51:04.014564+00:00",
+    "working_directory": "/home/runner/workspace/~/A2A_Demos",
+    "run_output_dir": "/home/runner/workspace/~/A2A_Demos/runs/proj-k8m19295_kuh3yapk",
+    "channel_session_key": "project_chat:default:web_chat_1:main",
+    "parent_run_id": "",
+    "objective": "give me a summary about this project",
+    "user_query": "give me a summary about this project",
+    "active_agent": "planner_agent",
+    "last_agent": "planner_agent",
+    "last_error": "",
+    "awaiting_user_input": true,
+    "pending_user_input_kind": "plan_approval",
+    "pending_user_question": "The execution plan v2 is ready for approval.\nStored in output/planner_output.txt, output/planner_output.json, and the session planning memory.\n\n**Summary:** This plan involves executing a vulnerability scan on the project to identify security issues in the codebase.\n\n**Steps (1):**\n⏳ **step-1: Run vulnerability scan**\n  → agent: `security_scanner_agent`\n  → task: Scan the project to identify all security vulnerabilities present in the codebase.\n  → done when: List of detected vulnerabilities\n\nReply `approve` to continue, or describe the changes you want and I will regenerate the plan before execution.",
+    "approval_pending_scope": "root_plan",
+    "plan_step_index": 0,
+    "plan_step_count": 1,
+    "current_plan_step_id": "",
+    "current_plan_step_title": "",
+    "last_completed_plan_step_id": "",
+    "last_completed_plan_step_title": "",
+    "failure_checkpoint": {},
+    "resume_status": "awaiting_user_input",
+    "resumable": true,
+    "branchable": true,
+    "resume_strategy": "user_input"
+  },
+  "files": {
+    "run_output_dir": "/home/runner/workspace/~/A2A_Demos/runs/proj-k8m19295_kuh3yapk",
+    "manifest": "/home/runner/workspace/~/A2A_Demos/runs/proj-k8m19295_kuh3yapk/run_manifest.json",
+    "checkpoint": "/home/runner/workspace/~/A2A_Demos/runs/proj-k8m19295_kuh3yapk/checkpoint.json",
+    "heartbeat": "/home/runner/workspace/~/A2A_Demos/runs/proj-k8m19295_kuh3yapk/heartbeat.json",
+    "summary": "/home/runner/workspace/~/A2A_Demos/runs/proj-k8m19295_kuh3yapk/resume_summary.json"
+  }
+}

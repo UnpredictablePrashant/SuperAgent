@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A2A Live Demo</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid"></div>
+    <header class="hero">
+      <h1>A2A Live Execution Console</h1>
+      <p>Submit a user task and watch agent coordination, message transfer, and SQLite state updates in real time.</p>
+    </header>
+
+    <main class="layout">
+      <section class="panel panel-input">
+        <h2>Submit Task</h2>
+        <form id="task-form">
+          <textarea id="task-input" placeholder="Example: Write a short story about a startup learning from failure." required></textarea>
+          <div class="actions">
+            <button id="submit-btn" type="submit">Run Task</button>
+            <span id="run-state" class="badge idle">Idle</span>
+          </div>
+        </form>
+        <div id="result-box" class="result"></div>
+      </section>
+
+      <section class="panel panel-status">
+        <h2>Task Status Monitor</h2>
+        <div class="status-grid">
+          <div class="status-card"><span>Run Id</span><strong id="status-run-id">-</strong></div>
+          <div class="status-card"><span>Run Status</span><strong id="status-run-status">n/a</strong></div>
+          <div class="status-card"><span>Entry Agent</span><strong id="status-entry-agent">n/a</strong></div>
+          <div class="status-card"><span>Detected Agents</span><strong id="status-detected-agents">0</strong></div>
+          <div class="status-card"><span>Last Updated</span><strong id="status-last-updated">-</strong></div>
+        </div>
+        <table>
+          <thead>
+            <tr><th>agent</th><th>status</th><th>task_id</th><th>created</th><th>completed</th></tr>
+          </thead>
+          <tbody id="status-agents-table"></tbody>
+        </table>
+        <div class="status-outputs">
+          <div>
+            <h3>Run Final Output</h3>
+            <pre id="run-output" class="output-box"></pre>
+          </div>
+          <div>
+            <h3>Latest DB Agent Result</h3>
+            <pre id="db-output" class="output-box"></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel panel-agents">
+        <h2>Agent Activity</h2>
+        <div class="agents" id="agent-activity-grid"></div>
+        <p class="agents-note">Cards are created from currently detected agents.</p>
+        <div class="legend">
+          <span class="dot transfer"></span>Transfer
+          <span class="dot task"></span>Task
+          <span class="dot llm"></span>LLM
+          <span class="dot error"></span>Error
+        </div>
+      </section>
+
+      <section class="panel panel-events">
+        <h2>Live Message Timeline</h2>
+        <div id="event-stream" class="event-stream"></div>
+      </section>
+
+      <section class="panel panel-graph">
+        <h2>Interaction Graph (Current Session)</h2>
+        <div id="graph-stage" class="graph-stage"></div>
+        <div class="sequence-info">
+          <div>
+            <h3>Session Edges</h3>
+            <ul id="edge-list" class="path-list"></ul>
+          </div>
+          <div>
+            <h3>Inspector</h3>
+            <pre id="inspector" class="inspector">Click a node, edge, event, DB row, or session to inspect details.</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel panel-sessions">
+        <h2>Sessions</h2>
+        <table>
+          <thead>
+            <tr><th>run_id</th><th>status</th><th>created</th><th>events</th><th>details</th></tr>
+          </thead>
+          <tbody id="sessions-table"></tbody>
+        </table>
+      </section>
+
+      <section class="panel panel-config">
+        <h2>Runtime Configuration (.env / env / default)</h2>
+        <p class="agents-note"><a href="/polling">Open Polling Configuration Page</a></p>
+        <table>
+          <thead>
+            <tr><th>key</th><th>value</th><th>source</th></tr>
+          </thead>
+          <tbody id="config-table"></tbody>
+        </table>
+      </section>
+
+      <section class="panel panel-agent-registry">
+        <h2>Agent Registry Detection</h2>
+        <div class="status-grid">
+          <div class="status-card"><span>Total Added</span><strong id="agents-total">0</strong></div>
+          <div class="status-card"><span>Detected</span><strong id="agents-detected">0</strong></div>
+          <div class="status-card"><span>Undetected</span><strong id="agents-undetected">0</strong></div>
+          <div class="status-card"><span>Scan Timestamp</span><strong id="agents-ts">-</strong></div>
+        </div>
+        <table>
+          <thead>
+            <tr><th>id</th><th>folder</th><th>process</th><th>detected</th><th>url</th></tr>
+          </thead>
+          <tbody id="agents-table"></tbody>
+        </table>
+      </section>
+
+      <section class="panel panel-db">
+        <h2>Database Snapshot</h2>
+        <div class="db-grid" id="db-snapshot"></div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
