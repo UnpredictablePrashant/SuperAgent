@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "summary": {
+    "schema_version": 1,
+    "run_id": "proj-11eymkkx",
+    "session_id": "webchat:default:project_ui:main",
+    "session_started_at": "2026-04-01T10:42:10.190020+00:00",
+    "status": "awaiting_user_input",
+    "updated_at": "2026-04-01T10:42:48.086218+00:00",
+    "completed_at": "2026-04-01T10:42:48.047234+00:00",
+    "working_directory": "/home/runner/workspace/~/A2A_Demos",
+    "run_output_dir": "/home/runner/workspace/~/A2A_Demos/runs/proj-11eymkkx_58tw9ic6",
+    "channel_session_key": "webchat:default:project_ui:main",
+    "parent_run_id": "",
+    "objective": "[Project: A2A_Demos at /home/runner/workspace/~/A2A_Demos]\nwhat this entire project is about?",
+    "user_query": "[Project: A2A_Demos at /home/runner/workspace/~/A2A_Demos]\nwhat this entire project is about?",
+    "active_agent": "planner_agent",
+    "last_agent": "planner_agent",
+    "last_error": "",
+    "awaiting_user_input": true,
+    "pending_user_input_kind": "plan_approval",
+    "pending_user_question": "The execution plan v1 is ready for approval.\nStored in output/planner_output.txt, output/planner_output.json, and the session planning memory.\n\n**Summary:** This plan outlines the steps required to implement a project scaffold without utilizing a blueprint. Assumes standard project setup requirements.\n\n**Steps (9):**\n⏳ **step-1: Create project directory structure**\n  → agent: `project_scaffold_agent`\n  → task: Create necessary directory structure, configuration files, and entry points for the project.\n  → done when: Project directory structure created\n⏳ **step-2: Generate ORM models and migrations**\n  → agent: `database_architect_agent`\n  → task: Generate the necessary ORM models and migrations for the database setup.\n  → done when: ORM models and migrations generated\n⏳ **step-3: Implement backend API routes**\n  → agent: `backend_builder_agent`\n  → task: Implement the API routes and services based on the project requirements.\n  → done when: API routes implemented\n⏳ **step-4: Install all required packages**\n  → agent: `dependency_manager_agent`\n  → task: Install all necessary packages and validate the lockfiles for the project.\n  → done when: All packages installed and validated\n⏳ **step-5: Run tests and validations**\n  → agent: `test_agent`\n  → task: Generate and run tests for the implemented features to ensure functionality.\n  → done when: All tests passed successfully\n⏳ **step-6: Run security scans**\n  → agent: `security_scanner_agent`\n  → task: Conduct a security scan to identify any vulnerabilities in the project setup.\n  → done when: Security scan report generated\n⏳ **step-7: Generate CI/CD configurations**\n  → agent: `devops_agent`\n  → task: Create production-ready Dockerfile, docker-compose configuration, and CI/CD scripts.\n  → done when: CI/CD configurations generated\n⏳ **step-8: Verify project setup**\n  → agent: `project_verifier_agent`\n  → task: Run linters, type checks, and health checks on the development server.\n  → done when: Project verification completed\n⏳ **step-9: Run post-setup commands**\n  → agent: `post_setup_agent`\n  → task: Execute safe post-setup commands, like deploying the application.\n  → done when: Post-setup commands executed\n\nReply `approve` to continue, or describe the changes you want and I will regenerate the plan before execution.",
+    "approval_pending_scope": "root_plan",
+    "plan_step_index": 0,
+    "plan_step_count": 9,
+    "current_plan_step_id": "",
+    "current_plan_step_title": "",
+    "last_completed_plan_step_id": "",
+    "last_completed_plan_step_title": "",
+    "failure_checkpoint": {},
+    "resume_status": "awaiting_user_input",
+    "resumable": true,
+    "branchable": true,
+    "resume_strategy": "user_input"
+  },
+  "files": {
+    "run_output_dir": "/home/runner/workspace/~/A2A_Demos/runs/proj-11eymkkx_58tw9ic6",
+    "manifest": "/home/runner/workspace/~/A2A_Demos/runs/proj-11eymkkx_58tw9ic6/run_manifest.json",
+    "checkpoint": "/home/runner/workspace/~/A2A_Demos/runs/proj-11eymkkx_58tw9ic6/checkpoint.json",
+    "heartbeat": "/home/runner/workspace/~/A2A_Demos/runs/proj-11eymkkx_58tw9ic6/heartbeat.json",
+    "summary": "/home/runner/workspace/~/A2A_Demos/runs/proj-11eymkkx_58tw9ic6/resume_summary.json"
+  }
+}

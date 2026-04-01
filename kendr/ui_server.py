@@ -744,7 +744,7 @@ function toggleShellMode() {
 }
 
 function _renderTerminalBlock(text) {
-  const lines = text.split('\n');
+  const lines = text.split(/\r?\n/);
   let steps = [];
   let curStep = null;
   for (const raw of lines) {
@@ -793,11 +793,16 @@ function _renderTerminalBlock(text) {
 
 function _looksLikeShellOutput(text) {
   if (!text) return false;
-  return /\[STEP\s+\d+\]/i.test(text)
-    || (/^\$\s/m.test(text) && text.split('\n').length > 2)
-    || /\bstdout:\s/i.test(text)
-    || /\bstderr:\s/i.test(text)
-    || /^Running:\s+\S+/m.test(text);
+  var stepPat = new RegExp('\\[STEP\\s+\\d+\\]', 'i');
+  var cmdPat = new RegExp('^\\$\\s', 'm');
+  var stdoutPat = new RegExp('\\bstdout:', 'i');
+  var stderrPat = new RegExp('\\bstderr:', 'i');
+  var runPat = new RegExp('^Running:\\s+\\S+', 'm');
+  return stepPat.test(text)
+    || (cmdPat.test(text) && text.split(/\r?\n/).length > 2)
+    || stdoutPat.test(text)
+    || stderrPat.test(text)
+    || runPat.test(text);
 }
 
 // ── Project context (kendr.md) ────────────────────────────────────────────
@@ -2130,9 +2135,19 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
 .msg-row.user .msg-bubble { background: rgba(0,201,167,0.15); border: 1px solid rgba(0,201,167,0.3); color: var(--text); border-radius: 12px 12px 3px 12px; }
 .msg-row.agent .msg-bubble { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 12px 12px 12px 3px; }
 .msg-row.system .msg-bubble { background: var(--surface3); border: 1px solid var(--border); color: var(--muted); font-size: 12px; font-style: italic; border-radius: 8px; }
-.chat-input-bar { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; gap: 10px; background: var(--surface); }
+.chat-input-bar { padding: 10px 20px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; background: var(--surface); }
+.chat-input-row { display: flex; gap: 10px; align-items: flex-end; }
 .chat-input { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 13px; color: var(--text); font-size: 13px; outline: none; resize: none; min-height: 40px; max-height: 120px; font-family: inherit; transition: border-color 0.15s; }
 .chat-input:focus { border-color: var(--teal); }
+.chat-bar-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chat-model-select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer; outline: none; max-width: 180px; }
+.chat-model-select:focus { border-color: var(--teal); }
+.ctx-badge { font-size: 10px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
+.ctx-bar-wrap { width: 60px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.ctx-bar-fill { height: 100%; background: var(--teal); border-radius: 2px; transition: width 0.4s; }
+.ctx-bar-fill.warn { background: var(--amber); }
+.ctx-bar-fill.full { background: var(--crimson); }
+.msg-ctx { font-size: 10px; color: var(--muted); margin-top: 4px; display: flex; align-items: center; gap: 6px; }
 .send-btn { background: var(--teal); color: #0d0f14; border: none; border-radius: 8px; padding: 9px 16px; font-size: 13px; font-weight: 700; cursor: pointer; }
 .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 /* Terminal panel */
@@ -2250,8 +2265,19 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
         <div class="msg-row system"><div class="msg-bubble">Open a project, then ask me anything about it — review code, explain files, find bugs, add features.</div></div>
       </div>
       <div class="chat-input-bar" style="flex-shrink:0">
-        <textarea class="chat-input" id="chatInput" rows="1" placeholder="Ask about your project..." onkeydown="chatKeydown(event)"></textarea>
-        <button class="send-btn" id="sendBtn" onclick="sendChat()">&#x27A4;</button>
+        <div class="chat-input-row">
+          <textarea class="chat-input" id="chatInput" rows="1" placeholder="Ask about your project..." onkeydown="chatKeydown(event)"></textarea>
+          <button class="send-btn" id="sendBtn" onclick="sendChat()">&#x27A4;</button>
+        </div>
+        <div class="chat-bar-meta">
+          <select class="chat-model-select" id="projModelSelect" title="Select model" onchange="projModelChanged()">
+            <option value="">Default model</option>
+          </select>
+          <div class="ctx-badge" id="ctxBadge" style="display:none">
+            <div class="ctx-bar-wrap"><div class="ctx-bar-fill" id="ctxBarFill" style="width:0%"></div></div>
+            <span id="ctxLabel">0k ctx</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -2663,6 +2689,74 @@ function chatKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
 }
 
+let _projModelInfo = null;
+let _projSelectedModel = '';
+let _projSelectedProvider = '';
+
+function projModelChanged() {
+  const sel = document.getElementById('projModelSelect');
+  const val = sel.value;
+  if (!val) { _projSelectedModel = ''; _projSelectedProvider = ''; return; }
+  const parts = val.split('::');
+  _projSelectedProvider = parts[0] || '';
+  _projSelectedModel = parts[1] || '';
+}
+
+function _fmtTokens(n) {
+  if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n/1000).toFixed(0) + 'k';
+  return String(n);
+}
+
+function _updateCtxBadge(ctxTokens, ctxLimit, model) {
+  const badge = document.getElementById('ctxBadge');
+  const fill = document.getElementById('ctxBarFill');
+  const label = document.getElementById('ctxLabel');
+  if (!badge) return;
+  badge.style.display = 'flex';
+  const pct = Math.min(ctxTokens / Math.max(ctxLimit, 1) * 100, 100);
+  fill.style.width = pct + '%';
+  fill.classList.remove('warn', 'full');
+  if (pct > 85) fill.classList.add('full');
+  else if (pct > 60) fill.classList.add('warn');
+  label.textContent = _fmtTokens(ctxTokens) + ' / ' + _fmtTokens(ctxLimit) + ' ctx';
+  label.title = 'Model: ' + model + ' — Context used: ' + ctxTokens + ' / ' + ctxLimit + ' tokens (' + pct.toFixed(1) + '%)';
+}
+
+async function loadProjModels() {
+  try {
+    const r = await fetch(API + '/api/models');
+    if (!r.ok) return;
+    const d = await r.json();
+    _projModelInfo = d;
+    const sel = document.getElementById('projModelSelect');
+    if (!sel) return;
+    sel.innerHTML = '';
+    const defOpt = document.createElement('option');
+    defOpt.value = '';
+    defOpt.textContent = (d.active_provider || 'default') + ' / ' + (d.active_model || 'default');
+    defOpt.title = 'Context window: ' + _fmtTokens(d.active_context_window || 128000) + ' tokens';
+    sel.appendChild(defOpt);
+    for (const p of (d.providers || [])) {
+      if (!p.ready) continue;
+      const opt = document.createElement('option');
+      opt.value = p.provider + '::' + p.model;
+      opt.textContent = p.provider + ' / ' + p.model;
+      opt.title = 'Context: ' + _fmtTokens(p.context_window || 128000);
+      sel.appendChild(opt);
+    }
+    for (const om of (d.ollama_models || [])) {
+      const opt = document.createElement('option');
+      opt.value = 'ollama::' + om;
+      opt.textContent = 'ollama / ' + om;
+      sel.appendChild(opt);
+    }
+    if (d.active_context_window) {
+      _updateCtxBadge(0, d.active_context_window, d.active_model || '');
+    }
+  } catch(_) {}
+}
+
 async function sendChat() {
   const inp = document.getElementById('chatInput');
   const btn = document.getElementById('sendBtn');
@@ -2676,38 +2770,43 @@ async function sendChat() {
   const agentDiv = appendMsg('agent', '');
   const bubble = agentDiv.querySelector('.msg-bubble');
   bubble.innerHTML = '<span class="spinner"></span>';
-  _runId = 'proj-' + Math.random().toString(36).slice(2, 10);
-  const contextNote = _activeProjectName ? '[Project: ' + _activeProjectName + ' at ' + _activeProjectPath + ']\n' : '';
-  const fullText = contextNote + text;
   try {
-    const resp = await fetch(API + '/api/chat', {
+    const payload = {
+      text,
+      project_root: _activeProjectPath,
+      project_name: _activeProjectName || ''
+    };
+    if (_projSelectedModel) payload.model = _projSelectedModel;
+    if (_projSelectedProvider) payload.provider = _projSelectedProvider;
+    const resp = await fetch(API + '/api/project/ask', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ text: fullText, run_id: _runId, working_directory: _activeProjectPath, channel: 'webchat', sender_id: 'project_ui' })
+      body: JSON.stringify(payload)
     });
     const d = await resp.json();
-    if (!d.run_id) { bubble.textContent = 'Error: ' + (d.error || 'No run id'); btn.disabled = false; return; }
-    _runId = d.run_id;
-    let collected = '';
-    const sse = new EventSource(API + '/api/stream?run_id=' + encodeURIComponent(_runId));
-    sse.addEventListener('result', e => {
-      const data = JSON.parse(e.data || '{}');
-      const reply = data.final_output || data.output || data.draft_response || data.final_response || data.response || data.result || '';
-      if (reply) { collected = reply; bubble.innerHTML = esc(reply).replace(/\n/g,'<br>'); document.getElementById('chatMessages').scrollTop = 999999; }
-    });
-    sse.addEventListener('step', e => {
-      const data = JSON.parse(e.data || '{}');
-      if (!collected) bubble.innerHTML = '<span style="color:var(--muted);font-size:11px">&#x1F504; ' + esc(data.agent || 'working') + '...</span>';
-    });
-    sse.addEventListener('done', e => {
-      sse.close(); btn.disabled = false;
-      if (!collected) {
-        try { const dd = JSON.parse((e && e.data) || '{}'); collected = dd.final_output || dd.output || ''; } catch(_) {}
-      }
-      if (!collected) bubble.innerHTML = '<em style="color:var(--muted)">Run completed with no text output.</em>';
-    });
-    sse.addEventListener('error', () => { sse.close(); if (!collected) bubble.textContent = 'Connection error'; btn.disabled = false; });
-  } catch(e) { bubble.textContent = 'Error: ' + e; btn.disabled = false; }
+    if (d.error && !d.answer) {
+      bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 ' + esc(d.error) + '</span>';
+      btn.disabled = false;
+      return;
+    }
+    const answer = d.answer || '(No response)';
+    bubble.innerHTML = esc(answer).replace(/\n/g, '<br>');
+    if (d.context_tokens && d.model_context_limit) {
+      const ctxMeta = document.createElement('div');
+      ctxMeta.className = 'msg-ctx';
+      const pct = Math.round(d.context_pct || 0);
+      ctxMeta.innerHTML = '<span>&#x1F4AC; ' + esc(d.model || '') + '</span>'
+        + '<span style="opacity:0.6">&#x2022;</span>'
+        + '<span>' + _fmtTokens(d.context_tokens) + ' / ' + _fmtTokens(d.model_context_limit) + ' ctx (' + pct + '%)</span>';
+      bubble.appendChild(ctxMeta);
+      _updateCtxBadge(d.context_tokens, d.model_context_limit, d.model || '');
+    }
+    document.getElementById('chatMessages').scrollTop = 999999;
+    btn.disabled = false;
+  } catch(e) {
+    bubble.innerHTML = '<span style="color:var(--crimson)">Error: ' + esc(String(e)) + '</span>';
+    btn.disabled = false;
+  }
 }
 
 // ── Terminal ──────────────────────────────────────────────────────────────────
@@ -2886,6 +2985,7 @@ function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'
 // ── Startup ───────────────────────────────────────────────────────────────────
 (async () => {
   await loadProjects();
+  loadProjModels();
   // Try to open the active project
   try {
     const r = await fetch(API + '/api/projects/active');
@@ -5272,16 +5372,21 @@ strong { color: var(--text); }
                     all_provider_statuses,
                     get_active_provider,
                     get_model_for_provider,
+                    get_context_window,
                     is_ollama_running,
                     list_ollama_models,
                 )
                 active = get_active_provider()
+                active_model = get_model_for_provider(active)
                 statuses = all_provider_statuses()
                 ollama_running = is_ollama_running()
                 ollama_models = list_ollama_models() if ollama_running else []
+                for s in statuses:
+                    s["context_window"] = get_context_window(s.get("model", ""))
                 self._json(200, {
                     "active_provider": active,
-                    "active_model": get_model_for_provider(active),
+                    "active_model": active_model,
+                    "active_context_window": get_context_window(active_model),
                     "providers": statuses,
                     "ollama_running": ollama_running,
                     "ollama_models": [m.get("name", "") for m in ollama_models],
@@ -5560,6 +5665,9 @@ strong { color: var(--text); }
             return
         if path == "/api/projects/active/context/update":
             self._handle_project_context_update(body)
+            return
+        if path == "/api/project/ask":
+            self._handle_project_ask(body)
             return
         if path == "/api/models/set":
             self._handle_models_set(body)
@@ -6037,6 +6145,74 @@ strong { color: var(--text); }
             })
         except Exception as exc:
             self._json(500, {"error": str(exc)})
+
+    def _handle_project_ask(self, body: dict) -> None:
+        text = str(body.get("text") or "").strip()
+        if not text:
+            self._json(400, {"error": "missing_text"})
+            return
+        model_override = str(body.get("model") or "").strip() or None
+        provider_override = str(body.get("provider") or "").strip() or None
+        try:
+            from kendr.llm_router import (
+                build_llm, get_active_provider, get_model_for_provider, get_context_window
+            )
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            proj = _pm_get_active() if _HAS_PROJECT_MANAGER else None
+            proj_root = str(body.get("project_root") or (proj.get("path") if proj else "") or "").strip()
+            proj_name = str(body.get("project_name") or (proj.get("name") if proj else "") or "").strip()
+
+            kendr_md = ""
+            file_tree = ""
+            if proj_root and os.path.isdir(proj_root):
+                kpath = os.path.join(proj_root, "kendr.md")
+                if os.path.isfile(kpath):
+                    try:
+                        with open(kpath, "r", encoding="utf-8", errors="replace") as f:
+                            kendr_md = f.read()[:12000]
+                    except Exception:
+                        pass
+                try:
+                    entries = sorted(os.listdir(proj_root))[:60]
+                    file_tree = "\n".join(entries)
+                except Exception:
+                    pass
+
+            system_ctx = f"You are a knowledgeable assistant for the software project '{proj_name or 'this project'}'."
+            if kendr_md:
+                system_ctx += f"\n\nProject context (kendr.md):\n{kendr_md}"
+            if file_tree:
+                system_ctx += f"\n\nProject root files:\n{file_tree}"
+            system_ctx += (
+                "\n\nAnswer the user's question concisely and accurately. "
+                "If asked about what the project is or does, summarise from the kendr.md context above. "
+                "Do NOT generate execution plans or project scaffolds — just answer the question."
+            )
+
+            provider = provider_override or get_active_provider()
+            model = model_override or get_model_for_provider(provider)
+            llm = build_llm(provider, model)
+
+            ctx_chars = len(system_ctx) + len(text)
+            ctx_tokens = ctx_chars // 4
+            ctx_limit = get_context_window(model)
+
+            messages = [SystemMessage(content=system_ctx), HumanMessage(content=text)]
+            response = llm.invoke(messages)
+            answer = response.content if hasattr(response, "content") else str(response)
+
+            self._json(200, {
+                "answer": answer,
+                "model": model,
+                "provider": provider,
+                "context_tokens": ctx_tokens,
+                "model_context_limit": ctx_limit,
+                "context_pct": round(ctx_tokens / max(ctx_limit, 1) * 100, 1),
+                "kendr_md_loaded": bool(kendr_md),
+            })
+        except Exception as exc:
+            self._json(500, {"error": str(exc), "answer": None})
 
     def _handle_project_context_generate(self, body: dict) -> None:
         try:

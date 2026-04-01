@@ -1,0 +1,5 @@
+**Message Summary:**
+The inbound message originates from the webchat channel, sent by the user with sender ID "project_ui." The message contains a reference to a specific project titled "A2A_Demos" and includes a question asking for clarification about the project's purpose. The message is identified as an individual query rather than a group message, and there are no mentions of other users. The normalization result indicates that the message should activate the main workflow.
+
+**Activation Decision:**
+The message should activate the main workflow because it is designed to inquire about the project, indicating that the user seeks more information or assistance. The presence of "should_activate": true confirms that the system recognizes this inquiry as relevant and warranting a response through the main workflow, likely to provide details about the project in question.

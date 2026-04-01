@@ -108,6 +108,38 @@ _PROVIDER_API_KEY_ENV: dict[str, str] = {
     PROVIDER_CUSTOM: "CUSTOM_LLM_API_KEY",
 }
 
+# Known context-window sizes (tokens) per model name substring
+_CONTEXT_WINDOWS: dict[str, int] = {
+    "o1": 200000, "o3": 200000,
+    "gpt-4o": 128000,
+    "gpt-4-turbo": 128000,
+    "gpt-4": 8192,
+    "gpt-3.5": 16385,
+    "claude": 200000,
+    "gemini-2.0-flash": 1048576,
+    "gemini-1.5-pro": 2097152,
+    "gemini-1.5-flash": 1048576,
+    "gemini": 1048576,
+    "grok-3": 131072,
+    "grok": 131072,
+    "llama3": 131072,
+    "llama": 131072,
+    "mistral": 32768,
+    "phi": 131072,
+    "qwen": 131072,
+    "glm": 131072,
+    "minimax": 1000000,
+}
+
+
+def get_context_window(model: str) -> int:
+    """Return the approximate context-window size (tokens) for a model name."""
+    m = (model or "").lower()
+    for key, size in _CONTEXT_WINDOWS.items():
+        if key in m:
+            return size
+    return 128000
+
 
 # ── provider detection ────────────────────────────────────────────────────────
 

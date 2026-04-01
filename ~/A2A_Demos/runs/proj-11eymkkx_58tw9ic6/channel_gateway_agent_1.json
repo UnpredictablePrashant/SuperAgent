@@ -1,0 +1,10 @@
+{
+  "channel": "webchat",
+  "sender_id": "project_ui",
+  "chat_id": "project_ui",
+  "workspace_id": "",
+  "text": "[Project: A2A_Demos at /home/runner/workspace/~/A2A_Demos]\nwhat this entire project is about?",
+  "is_group": false,
+  "mentioned": false,
+  "should_activate": true
+}
