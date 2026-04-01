@@ -126,6 +126,68 @@ def remove_project(project_id: str) -> bool:
     return True
 
 
+def init_project_from_scratch(name: str, parent_dir: str = "", stack: str = "") -> dict:
+    """Create a new project folder, init git, set up .gitignore and output dir."""
+    name = name.strip()
+    if not name:
+        raise ValueError("Project name is required")
+    parent = os.path.abspath(parent_dir) if parent_dir.strip() else os.getcwd()
+    project_path = os.path.join(parent, name)
+    if os.path.exists(project_path):
+        raise ValueError(f"Directory already exists: {project_path}")
+    os.makedirs(project_path, exist_ok=False)
+    os.makedirs(os.path.join(project_path, "output"), exist_ok=True)
+    gitignore_lines = [
+        "# kendr output",
+        "output/",
+        "",
+        "# Python",
+        "__pycache__/",
+        "*.pyc",
+        ".venv/",
+        "venv/",
+        ".env",
+        "",
+        "# Node",
+        "node_modules/",
+        "dist/",
+        "build/",
+        ".next/",
+        "",
+        "# General",
+        ".DS_Store",
+        "*.log",
+    ]
+    if stack:
+        gitignore_lines += _stack_gitignore_extras(stack)
+    with open(os.path.join(project_path, ".gitignore"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(gitignore_lines) + "\n")
+    readme_lines = [f"# {name}", "", "Created with kendr.", ""]
+    with open(os.path.join(project_path, "README.md"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(readme_lines))
+    import subprocess as _sp
+    _sp.run(["git", "init"], cwd=project_path, capture_output=True, timeout=10)
+    _sp.run(["git", "add", ".gitignore", "README.md"], cwd=project_path, capture_output=True, timeout=10)
+    _sp.run(["git", "commit", "-m", "Initial commit"], cwd=project_path, capture_output=True, timeout=10)
+    entry = add_project(project_path, name)
+    entry["initialized"] = True
+    entry["stack"] = stack
+    return entry
+
+
+def _stack_gitignore_extras(stack: str) -> list[str]:
+    s = stack.lower()
+    if "django" in s or "flask" in s or "fastapi" in s or "python" in s:
+        return ["*.egg-info/", ".pytest_cache/", ".mypy_cache/"]
+    if "node" in s or "react" in s or "next" in s or "vue" in s:
+        return ["*.tsbuildinfo", ".turbo/"]
+    if "go" in s:
+        return ["*.exe", "*.test", "vendor/"]
+    if "rust" in s:
+        return ["target/"]
+    return []
+
+
 def _path_to_id(path: str) -> str:
     import hashlib
     return hashlib.md5(path.encode()).hexdigest()[:12]
@@ -207,17 +269,33 @@ def read_file_content(file_path: str, project_root: str = "") -> dict:
 # Shell execution
 # ---------------------------------------------------------------------------
 
-def run_shell(command: str, cwd: str, timeout: int = 30) -> dict:
-    """Run a shell command in the given directory. Returns stdout, stderr, exit code."""
+def _build_shell_env() -> dict:
+    """Build a rich environment for shell commands including all nix/system paths."""
+    base = dict(os.environ)
+    path_parts = base.get("PATH", "").split(":")
+    extra_paths = [
+        "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+        "/nix/var/nix/profiles/default/bin",
+    ]
+    for p in extra_paths:
+        if p and p not in path_parts:
+            path_parts.append(p)
+    base["PATH"] = ":".join(p for p in path_parts if p)
+    base.setdefault("TERM", "xterm-256color")
+    base.setdefault("LANG", "en_US.UTF-8")
+    return base
+
+
+def run_shell(command: str, cwd: str, timeout: int = 60) -> dict:
+    """Run a shell command in the given directory via bash. Returns stdout, stderr, exit code."""
     try:
         result = subprocess.run(
-            command,
-            shell=True,
+            ["/bin/bash", "-c", command],
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "TERM": "dumb"},
+            env=_build_shell_env(),
         )
         return {
             "ok": result.returncode == 0,

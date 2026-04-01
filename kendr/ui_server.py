@@ -97,6 +97,7 @@ try:
         set_active_project as _pm_set_active,
         add_project as _pm_add_project,
         remove_project as _pm_remove_project,
+        init_project_from_scratch as _pm_init_project,
         read_file_tree as _pm_file_tree,
         read_file_content as _pm_read_file,
         run_shell as _pm_shell,
@@ -1763,22 +1764,29 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
 <div class="modal-overlay" id="addModal">
   <div class="modal">
     <div class="modal-title">Add Project</div>
-    <div style="display:flex;gap:10px;margin-bottom:18px">
-      <button class="btn btn-outline" id="tabDir" onclick="setAddMode('dir')" style="flex:1">&#x1F4C1; Open Directory</button>
-      <button class="btn btn-outline" id="tabClone" onclick="setAddMode('clone')" style="flex:1">&#x2B07; Clone from GitHub</button>
+    <div style="display:flex;gap:8px;margin-bottom:18px">
+      <button class="btn btn-outline" id="tabNew" onclick="setAddMode('new')" style="flex:1;font-size:12px">&#x2728; New Project</button>
+      <button class="btn btn-outline" id="tabDir" onclick="setAddMode('dir')" style="flex:1;font-size:12px">&#x1F4C1; Open Existing</button>
+      <button class="btn btn-outline" id="tabClone" onclick="setAddMode('clone')" style="flex:1;font-size:12px">&#x2B07; Clone Repo</button>
     </div>
-    <div id="formDir">
+    <div id="formNew">
+      <div class="form-field"><label>Project Name</label><input type="text" id="inputNewName" placeholder="my-awesome-app"></div>
+      <div class="form-field"><label>Parent Directory <span style="color:var(--muted);font-weight:400">(where folder will be created)</span></label><input type="text" id="inputNewParent" placeholder="leave blank to use current directory"></div>
+      <div class="form-field"><label>Stack / Language <span style="color:var(--muted);font-weight:400">(optional)</span></label><input type="text" id="inputNewStack" placeholder="e.g. Python, React, Go, Rust"></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Creates the folder, initializes git, adds <code>output/</code> to .gitignore.</div>
+    </div>
+    <div id="formDir" style="display:none">
       <div class="form-field"><label>Project Path</label><input type="text" id="inputPath" placeholder="/home/user/my-project"></div>
-      <div class="form-field"><label>Display Name (optional)</label><input type="text" id="inputName" placeholder="My Project"></div>
+      <div class="form-field"><label>Display Name <span style="color:var(--muted);font-weight:400">(optional)</span></label><input type="text" id="inputName" placeholder="My Project"></div>
     </div>
     <div id="formClone" style="display:none">
-      <div class="form-field"><label>GitHub Repository URL</label><input type="text" id="inputCloneUrl" placeholder="https://github.com/user/repo.git"></div>
+      <div class="form-field"><label>Repository URL</label><input type="text" id="inputCloneUrl" placeholder="https://github.com/user/repo.git"></div>
       <div class="form-field"><label>Clone into directory</label><input type="text" id="inputCloneDest" placeholder="/home/user/projects"></div>
     </div>
     <div id="addModalMsg" style="font-size:12px;color:var(--muted);min-height:18px"></div>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" id="addModalBtn" onclick="submitAddProject()">Add Project</button>
+      <button class="btn btn-primary" id="addModalBtn" onclick="submitAddProject()">Create Project</button>
     </div>
   </div>
 </div>
@@ -1813,10 +1821,25 @@ async function loadProjects() {
     box.innerHTML = projects.map(p =>
       `<div class="proj-item ${p.id === _activeProjectId ? 'active' : ''}" onclick="openProject('${p.id}','${esc(p.path)}','${esc(p.name)}')">
         <span style="font-size:14px">&#x1F4C1;</span>
-        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.path)}">${esc(p.name)}</span>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="${esc(p.path)}">${esc(p.name)}</span>
+        <button onclick="event.stopPropagation();deleteProject('${p.id}','${esc(p.name)}')" title="Remove project" style="background:none;border:none;color:var(--muted);cursor:pointer;padding:0 2px;font-size:13px;line-height:1;opacity:0.6" onmouseover="this.style.color='var(--crimson)';this.style.opacity='1'" onmouseout="this.style.color='var(--muted)';this.style.opacity='0.6'">&#x1F5D1;</button>
       </div>`
     ).join('') || '<div style="padding:8px 10px;font-size:12px;color:var(--muted)">No projects yet.</div>';
   } catch(e) { console.warn('load projects error', e); }
+}
+
+async function deleteProject(id, name) {
+  if (!confirm('Remove "' + name + '" from the project list? (Files are not deleted.)')) return;
+  await fetch(API + '/api/projects/' + id + '/remove', { method: 'POST' });
+  if (_activeProjectId === id) {
+    _activeProjectId = null; _activeProjectPath = null; _activeProjectName = '';
+    document.getElementById('wsTitle').textContent = 'Projects';
+    document.getElementById('wsPath').style.display = 'none';
+    document.getElementById('wsBranch').style.display = 'none';
+    document.getElementById('filePanelTitle').textContent = 'No project open';
+    document.getElementById('fileTree').innerHTML = '<div style="padding:14px;font-size:12px;color:var(--muted)">Open a project to see its files.</div>';
+  }
+  await loadProjects();
 }
 
 async function openProject(id, path, name) {
@@ -1956,11 +1979,13 @@ async function sendChat() {
   const bubble = agentDiv.querySelector('.msg-bubble');
   bubble.innerHTML = '<span class="spinner"></span>';
   _runId = 'proj-' + Math.random().toString(36).slice(2, 10);
+  const contextNote = _activeProjectName ? '[Project: ' + _activeProjectName + ' at ' + _activeProjectPath + ']\n' : '';
+  const fullText = contextNote + text;
   try {
     const resp = await fetch(API + '/api/chat', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ text, run_id: _runId, working_directory: _activeProjectPath, channel: 'project_chat', sender_id: 'project_ui' })
+      body: JSON.stringify({ text: fullText, run_id: _runId, working_directory: _activeProjectPath, channel: 'webchat', sender_id: 'project_ui' })
     });
     const d = await resp.json();
     if (!d.run_id) { bubble.textContent = 'Error: ' + (d.error || 'No run id'); btn.disabled = false; return; }
@@ -1969,16 +1994,20 @@ async function sendChat() {
     const sse = new EventSource(API + '/api/stream?run_id=' + encodeURIComponent(_runId));
     sse.addEventListener('result', e => {
       const data = JSON.parse(e.data || '{}');
-      const reply = data.final_response || data.response || data.result || data.output || '';
-      collected = reply;
-      bubble.innerHTML = esc(reply).replace(/\n/g,'<br>') || '<em style="color:var(--muted)">No response</em>';
-      document.getElementById('chatMessages').scrollTop = 999999;
+      const reply = data.final_output || data.output || data.draft_response || data.final_response || data.response || data.result || '';
+      if (reply) { collected = reply; bubble.innerHTML = esc(reply).replace(/\n/g,'<br>'); document.getElementById('chatMessages').scrollTop = 999999; }
     });
     sse.addEventListener('step', e => {
       const data = JSON.parse(e.data || '{}');
       if (!collected) bubble.innerHTML = '<span style="color:var(--muted);font-size:11px">&#x1F504; ' + esc(data.agent || 'working') + '...</span>';
     });
-    sse.addEventListener('done', () => { sse.close(); btn.disabled = false; });
+    sse.addEventListener('done', e => {
+      sse.close(); btn.disabled = false;
+      if (!collected) {
+        try { const dd = JSON.parse((e && e.data) || '{}'); collected = dd.final_output || dd.output || ''; } catch(_) {}
+      }
+      if (!collected) bubble.innerHTML = '<em style="color:var(--muted)">Run completed with no text output.</em>';
+    });
     sse.addEventListener('error', () => { sse.close(); if (!collected) bubble.textContent = 'Connection error'; btn.disabled = false; });
   } catch(e) { bubble.textContent = 'Error: ' + e; btn.disabled = false; }
 }
@@ -2098,17 +2127,23 @@ async function doGitAction(url, body = {}) {
 }
 
 // ── Add project modal ─────────────────────────────────────────────────────────
-let _addMode = 'dir';
-function openAddModal(mode) { setAddMode(mode || 'dir'); document.getElementById('addModal').classList.add('open'); }
+let _addMode = 'new';
+function openAddModal(mode) { setAddMode(mode || 'new'); document.getElementById('addModal').classList.add('open'); }
 function closeModal() { document.getElementById('addModal').classList.remove('open'); document.getElementById('addModalMsg').textContent = ''; }
 function setAddMode(mode) {
   _addMode = mode;
+  document.getElementById('formNew').style.display = mode === 'new' ? '' : 'none';
   document.getElementById('formDir').style.display = mode === 'dir' ? '' : 'none';
   document.getElementById('formClone').style.display = mode === 'clone' ? '' : 'none';
-  document.getElementById('tabDir').style.borderColor = mode === 'dir' ? 'var(--teal)' : '';
-  document.getElementById('tabDir').style.color = mode === 'dir' ? 'var(--teal)' : '';
-  document.getElementById('tabClone').style.borderColor = mode === 'clone' ? 'var(--teal)' : '';
-  document.getElementById('tabClone').style.color = mode === 'clone' ? 'var(--teal)' : '';
+  ['new','dir','clone'].forEach(function(m) {
+    var el = document.getElementById('tab' + m.charAt(0).toUpperCase() + m.slice(1));
+    if (!el) return;
+    el.style.borderColor = m === mode ? 'var(--teal)' : '';
+    el.style.color = m === mode ? 'var(--teal)' : '';
+  });
+  var labels = { new: 'Create Project', dir: 'Add Project', clone: 'Clone & Add' };
+  document.getElementById('addModalBtn').textContent = labels[mode] || 'Add Project';
+  document.getElementById('addModalMsg').textContent = '';
 }
 
 async function submitAddProject() {
@@ -2118,7 +2153,14 @@ async function submitAddProject() {
   msg.textContent = 'Working...'; msg.style.color = 'var(--muted)';
   try {
     let r, d;
-    if (_addMode === 'dir') {
+    if (_addMode === 'new') {
+      const name = document.getElementById('inputNewName').value.trim();
+      const parent_dir = document.getElementById('inputNewParent').value.trim();
+      const stack = document.getElementById('inputNewStack').value.trim();
+      if (!name) { msg.textContent = 'Project name is required'; msg.style.color = 'var(--crimson)'; btn.disabled = false; return; }
+      msg.textContent = 'Creating project...';
+      r = await fetch(API + '/api/projects/new', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name, parent_dir, stack }) });
+    } else if (_addMode === 'dir') {
       const path = document.getElementById('inputPath').value.trim();
       const name = document.getElementById('inputName').value.trim();
       if (!path) { msg.textContent = 'Path is required'; msg.style.color = 'var(--crimson)'; btn.disabled = false; return; }
@@ -2127,6 +2169,7 @@ async function submitAddProject() {
       const url = document.getElementById('inputCloneUrl').value.trim();
       const dest = document.getElementById('inputCloneDest').value.trim();
       if (!url || !dest) { msg.textContent = 'URL and destination are required'; msg.style.color = 'var(--crimson)'; btn.disabled = false; return; }
+      msg.textContent = 'Cloning repository...';
       r = await fetch(API + '/api/projects/clone', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ url, dest }) });
     }
     d = await r.json();
@@ -3823,6 +3866,9 @@ class KendrUIHandler(BaseHTTPRequestHandler):
         if path == "/api/projects/clone":
             self._handle_project_clone(body)
             return
+        if path == "/api/projects/new":
+            self._handle_project_new(body)
+            return
         if path == "/api/projects/shell":
             self._handle_project_shell(body)
             return
@@ -4222,6 +4268,22 @@ class KendrUIHandler(BaseHTTPRequestHandler):
             self._json(200, result)
         except Exception as exc:
             self._json(500, {"error": str(exc)})
+
+    def _handle_project_new(self, body: dict) -> None:
+        if not _HAS_PROJECT_MANAGER:
+            self._json(503, {"error": "Project manager not available"})
+            return
+        name = str(body.get("name", "")).strip()
+        parent_dir = str(body.get("parent_dir", "")).strip()
+        stack = str(body.get("stack", "")).strip()
+        if not name:
+            self._json(400, {"error": "name is required"})
+            return
+        try:
+            entry = _pm_init_project(name, parent_dir, stack)
+            self._json(200, entry)
+        except Exception as exc:
+            self._json(400, {"error": str(exc)})
 
     def _handle_project_activate(self, project_id: str) -> None:
         if not _HAS_PROJECT_MANAGER:

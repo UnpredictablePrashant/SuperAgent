@@ -1,0 +1,520 @@
+{
+  "results": {
+    "web": {
+      "search_metadata": {
+        "id": "69ccd3ffc29c3d019ca38c14",
+        "status": "Success",
+        "json_endpoint": "https://serpapi.com/searches/4_FmznP7Oo2NQ1QZTSAXxA/69ccd3ffc29c3d019ca38c14.json",
+        "pixel_position_endpoint": "https://serpapi.com/searches/4_FmznP7Oo2NQ1QZTSAXxA/69ccd3ffc29c3d019ca38c14.json_with_pixel_position",
+        "created_at": "2026-04-01 08:14:55 UTC",
+        "processed_at": "2026-04-01 08:14:55 UTC",
+        "google_url": "https://www.google.com/search?q=analyze+the+project&oq=analyze+the+project&hl=en&gl=us&num=10&sourceid=chrome&ie=UTF-8",
+        "raw_html_file": "https://serpapi.com/searches/4_FmznP7Oo2NQ1QZTSAXxA/69ccd3ffc29c3d019ca38c14.html",
+        "total_time_taken": 1.85
+      },
+      "search_parameters": {
+        "engine": "google",
+        "q": "analyze the project",
+        "google_domain": "google.com",
+        "hl": "en",
+        "gl": "us",
+        "num": "10",
+        "device": "desktop"
+      },
+      "search_information": {
+        "query_displayed": "analyze the project",
+        "total_results": 154,
+        "time_taken_displayed": 0.19,
+        "organic_results_state": "Results for exact spelling"
+      },
+      "inline_images": [
+        {
+          "source": "https://fastercapital.com/content/What-is-Project-Analysis.html",
+          "thumbnail": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/OzKUq48czXR2X9Ko5SKMOHwvAyW5-Ig7GIn2jkQoJTY.jpeg",
+          "original": "https://fastercapital.com/i/What-is-Project-Analysis---Best-Practices-for-Project-Analysis.webp",
+          "title": "What is Project Analysis? - FasterCapital",
+          "source_name": "FasterCapital"
+        },
+        {
+          "source": "https://twproject.com/blog/project-data-analysis-how-to-maximize-results/",
+          "thumbnail": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/IiscHFtJVbMKxyp1sWLe1C3DR94vovpB4-vvgM062XM.jpeg",
+          "original": "https://cdn.twproject.com/blog/wp-content/uploads/2023/06/Lanalisi-dei-dati-dei-progetti.jpg",
+          "title": "Project data analysis: how to maximize results - Twproject",
+          "source_name": "Twproject"
+        },
+        {
+          "source": "https://fastercapital.com/content/What-is-Project-Analysis.html",
+          "thumbnail": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/XIMjaJQyW6FV25b8Zx-CABAsYPKgMgUzJIuB1WP1nXo.jpeg",
+          "original": "https://fastercapital.com/i/What-is-Project-Analysis---Steps-in-Project-Analysis.webp",
+          "title": "What is Project Analysis? - FasterCapital",
+          "source_name": "FasterCapital"
+        }
+      ],
+      "inline_videos": [
+        {
+          "position": 1,
+          "title": "Project Analysis and Evaluation",
+          "link": "https://www.youtube.com/watch?v=47d0smNPfU4",
+          "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQjSQyNC56fyk9lfYik7YdY-ljv3Kz83VgMay46MUkMBzqwjL04SxzCJw&s",
+          "channel": "elliowb2",
+          "platform": "YouTube",
+          "key_moments": [
+            {
+              "time": "00:41",
+              "title": "Break Even Analyses",
+              "link": "https://www.youtube.com/watch?v=47d0smNPfU4&t=41",
+              "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcStWbL1q4yN0yvFjvTH8qSNB3iT5UWtgHYScbHMsqA4nQ&s"
+            },
+            {
+              "time": "07:39",
+              "title": "Annuity Factor",
+              "link": "https://www.youtube.com/watch?v=47d0smNPfU4&t=459",
+              "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQWyl3gmMEvKPru06S1hD_st3c7UGXVauhnNrwFah7q2Q&s"
+            },
+            {
+              "time": "10:37",
+              "title": "Calculate a Rate of Return",
+              "link": "https://www.youtube.com/watch?v=47d0smNPfU4&t=637",
+              "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTMh9eG7n8tH94HxWk602VS4jrMJ1mQuk4TXD9CEgNTzA&s"
+            },
+            {
+              "time": "19:35",
+              "title": "Monte Carlo Simulation",
+              "link": "https://www.youtube.com/watch?v=47d0smNPfU4&t=1175",
+              "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQn1H8myYKSOFEOydnLJCjAFiGfrtKG5kfF2rsEeEvoKA&s"
+            },
+            {
+              "time": "22:30",
+              "title": "Total Variable Cost",
+              "link": "https://www.youtube.com/watch?v=47d0smNPfU4&t=1350",
+              "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRGdMUz8rC0MK3RSMBbrMUr4QTDZfEPz4YxH2xpXzxN0A&s"
+            },
+            {
+              "time": "27:21",
+              "title": "Break Even Uh for Accounting",
+              "link": "https://www.youtube.com/watch?v=47d0smNPfU4&t=1641",
+              "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRsdlvOLk31zIDEN2dRYmNfz2XxyCJAZ7NEqxf-tteY6A&s"
+            },
+            {
+              "time": "32:46",
+              "title": "Operating Cash Flow for a an Accounting Break Even",
+              "link": "https://www.youtube.com/watch?v=47d0smNPfU4&t=1966",
+              "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRmXX08XW1q1kXTTnW59QonkY68uJMVJMtCK541bS--9Q&s"
+            },
+            {
+              "time": "38:52",
+              "title": "Financial Break Even Point",
+              "link": "https://www.youtube.com/watch?v=47d0smNPfU4&t=2332",
+              "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcS_VGD6bseqjoKZ4cR1efdMmpJuOnylU9rlNukoo_fRWQ&s"
+            },
+            {
+              "time": "52:19",
+              "title": "The Accounting Break Even Level",
+              "link": "https://www.youtube.com/watch?v=47d0smNPfU4&t=3139",
+              "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR2R1rlTov8DwtPlXuWWSe-WuPGv_rklgfKAXOPNfCM0Q&s"
+            },
+            {
+              "time": "54:45",
+              "title": "Hard Capital Rationing",
+              "link": "https://www.youtube.com/watch?v=47d0smNPfU4&t=3285",
+              "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRSPVPqsipwyEZLEwwuBjocjWaN6C7YkWAm4080_qrDIQ&s"
+            }
+          ]
+        },
+        {
+          "position": 2,
+          "title": "What Is The Process For Project Impact Analysis?",
+          "link": "https://www.youtube.com/watch?v=DfeGu3_apNo",
+          "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTwA1ES3sDcPvliEZ-x8LoC1gc22tlA0fq-eq5DuWVyLVAK4ipbDQz_pg&s",
+          "channel": "The Project Manager Toolkit",
+          "platform": "YouTube"
+        },
+        {
+          "position": 3,
+          "title": "Project Analysis and Evaluation",
+          "link": "https://www.youtube.com/watch?v=WSho58cFTkk",
+          "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR70vWpHChSn8yHyLCoiNUxDYFIkkRK3_LnhBa1GL7RtlTWNXMqFpmdyQ&s",
+          "channel": "Fresh Finance with Professor McElfresh",
+          "platform": "YouTube"
+        }
+      ],
+      "related_questions": [
+        {
+          "question": "What is analysis of a project?",
+          "type": "featured_snippet",
+          "next_page_token": "eyJvbnMiOiI2NzYxIiwiZmMiOiJFc3dCQ293QlFVMXVNeTE1VWtwdWFUaEpUV1ZRT0d3eWFWTXhTSGRCUnpsT1VXMVpabVJsYVUxQk5FUndRMFZLUldoVU9VOXBRVGRPYlRoV1ptOUtlVEZqUWxsalNISndYMnhXWlRadGFFOUhVRFpqUlMxQmRFbHdkMEpGY0ZwZk1GRmhZVUZ2Tm1rMFkwUkxVVGhrUW5Wa1pHWm1OVlUyV0ZOWlNuUXhSbkpuV2trNU9WQnRPVlJNUkMxdWFVSnNVV0lTRjBGT1ZFMWhZVWhVVDNOeU9IQTRORkJzV21FdGExRlZHaUpCU2t0TVJtMUtNVEZGWDFwbFZVVlFkRk5IVUdaTmRYQjVSRXBOU1hCck5qbFIiLCJmY3YiOiIzIiwiZWkiOiJBTlRNYWFIVE9zcjhwODRQbFphLWtRVSIsInFjIjoiQ2hOaGJtRnNlWHBsSUhSb1pTQndjbTlxWldOMEVBQjkzMDB4UHciLCJxdWVzdGlvbiI6IldoYXQgaXMgYW5hbHlzaXMgb2YgYSBwcm9qZWN0PyIsImxrIjoiR2gxM2FHRjBJR2x6SUdGdVlXeDVjMmx6SUc5bUlHRWdjSEp2YW1WamRBIiwiYnMiOiJjLU55NUpJTHowZ3NVY2dzVmtqTVM4eXBMQVl5OHRNVUVoVUtpdkt6VXBOTDdJM2twV1RMOGFuZ0N1RlM4OGd2VnlqSlZ5Z3Z5aXhKQmFyQ1laVEVYRzhqZFNuVkRHSVVjMFZ3YWNBY1ZwS1JxbEJRV2xTUVg1d0tVZ05WQWRkbkwzR1kzMGhUU3IyY09PVmNUbHl5SVBlbTVDdFU1cGRDaEt0U0lUWW5weFlEalR0dVp5UW5KWk9CUjQwQUl3QSIsImlkIjoiZmNfQU5UTWFhSFRPc3I4cDg0UGxaYS1rUVVfMiJ9",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google_related_questions&google_domain=google.com&next_page_token=eyJvbnMiOiI2NzYxIiwiZmMiOiJFc3dCQ293QlFVMXVNeTE1VWtwdWFUaEpUV1ZRT0d3eWFWTXhTSGRCUnpsT1VXMVpabVJsYVUxQk5FUndRMFZLUldoVU9VOXBRVGRPYlRoV1ptOUtlVEZqUWxsalNISndYMnhXWlRadGFFOUhVRFpqUlMxQmRFbHdkMEpGY0ZwZk1GRmhZVUZ2Tm1rMFkwUkxVVGhrUW5Wa1pHWm1OVlUyV0ZOWlNuUXhSbkpuV2trNU9WQnRPVlJNUkMxdWFVSnNVV0lTRjBGT1ZFMWhZVWhVVDNOeU9IQTRORkJzV21FdGExRlZHaUpCU2t0TVJtMUtNVEZGWDFwbFZVVlFkRk5IVUdaTmRYQjVSRXBOU1hCck5qbFIiLCJmY3YiOiIzIiwiZWkiOiJBTlRNYWFIVE9zcjhwODRQbFphLWtRVSIsInFjIjoiQ2hOaGJtRnNlWHBsSUhSb1pTQndjbTlxWldOMEVBQjkzMDB4UHciLCJxdWVzdGlvbiI6IldoYXQgaXMgYW5hbHlzaXMgb2YgYSBwcm9qZWN0PyIsImxrIjoiR2gxM2FHRjBJR2x6SUdGdVlXeDVjMmx6SUc5bUlHRWdjSEp2YW1WamRBIiwiYnMiOiJjLU55NUpJTHowZ3NVY2dzVmtqTVM4eXBMQVl5OHRNVUVoVUtpdkt6VXBOTDdJM2twV1RMOGFuZ0N1RlM4OGd2VnlqSlZ5Z3Z5aXhKQmFyQ1laVEVYRzhqZFNuVkRHSVVjMFZ3YWNBY1ZwS1JxbEJRV2xTUVg1d0tVZ05WQWRkbkwzR1kzMGhUU3IyY09PVmNUbHl5SVBlbTVDdFU1cGRDaEt0U0lUWW5weFlEalR0dVp5UW5KWk9CUjQwQUl3QSIsImlkIjoiZmNfQU5UTWFhSFRPc3I4cDg0UGxaYS1rUVVfMiJ9"
+        },
+        {
+          "question": "How to write an analysis of a project?",
+          "type": "featured_snippet",
+          "snippet": "In analyzing a text you should quote specific passages, but make sure you do not simply summarize or repeat the content or ideas of the text; maintain an analytical focus. 7. Write the closing section of the analysis to draw together the pattern found in all the detailed analysis of the body section of the paper.",
+          "title": "How to Write an Analysis [PDF]",
+          "link": "https://www.pfw.edu/offices/learning-support/documents/how-to-write-an-analysis.pdf",
+          "displayed_link": "https://www.pfw.edu › learning-support › documents › h...",
+          "source_logo": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/-DbFV9yG_91rbpJOO502qmkazXnHCQZ-E52V6YZDlSI.png",
+          "next_page_token": "eyJvbnMiOiI2NzYxIiwiZmMiOiJFc3dCQ293QlFVMXVNeTE1VWtwdWFUaEpUV1ZRT0d3eWFWTXhTSGRCUnpsT1VXMVpabVJsYVUxQk5FUndRMFZLUldoVU9VOXBRVGRPYlRoV1ptOUtlVEZqUWxsalNISndYMnhXWlRadGFFOUhVRFpqUlMxQmRFbHdkMEpGY0ZwZk1GRmhZVUZ2Tm1rMFkwUkxVVGhrUW5Wa1pHWm1OVlUyV0ZOWlNuUXhSbkpuV2trNU9WQnRPVlJNUkMxdWFVSnNVV0lTRjBGT1ZFMWhZVWhVVDNOeU9IQTRORkJzV21FdGExRlZHaUpCU2t0TVJtMUtNVEZGWDFwbFZVVlFkRk5IVUdaTmRYQjVSRXBOU1hCck5qbFIiLCJmY3YiOiIzIiwiZWkiOiJBTlRNYWFIVE9zcjhwODRQbFphLWtRVSIsInFjIjoiQ2hOaGJtRnNlWHBsSUhSb1pTQndjbTlxWldOMEVBQjkzMDB4UHciLCJxdWVzdGlvbiI6IkhvdyB0byB3cml0ZSBhbiBhbmFseXNpcyBvZiBhIHByb2plY3Q/IiwibGsiOiJHaVZvYjNjZ2RHOGdkM0pwZEdVZ1lXNGdZVzVoYkhsemFYTWdiMllnWVNCd2NtOXFaV04wIiwiYnMiOiJjLU55NUpJTHowZ3NVY2dzVmtqTVM4eXBMQVl5OHRNVUVoVUtpdkt6VXBOTDdJM2twV1RMOGFuZ0N1RlM4OGd2VnlqSlZ5Z3Z5aXhKQmFyQ1laVEVYRzhqZFNuVkRHSVVjMFZ3YWNBY1ZwS1JxbEJRV2xTUVg1d0tVZ05WQWRkbkwzR1kzMGhUU3IyY09PVmNUbHl5SVBlbTVDdFU1cGRDaEt0U0lUWW5weFlEalR0dVp5UW5KWk9CUjQwQUl3QSIsImlkIjoiZmNfQU5UTWFhSFRPc3I4cDg0UGxaYS1rUVVfMiJ9",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google_related_questions&google_domain=google.com&next_page_token=eyJvbnMiOiI2NzYxIiwiZmMiOiJFc3dCQ293QlFVMXVNeTE1VWtwdWFUaEpUV1ZRT0d3eWFWTXhTSGRCUnpsT1VXMVpabVJsYVUxQk5FUndRMFZLUldoVU9VOXBRVGRPYlRoV1ptOUtlVEZqUWxsalNISndYMnhXWlRadGFFOUhVRFpqUlMxQmRFbHdkMEpGY0ZwZk1GRmhZVUZ2Tm1rMFkwUkxVVGhrUW5Wa1pHWm1OVlUyV0ZOWlNuUXhSbkpuV2trNU9WQnRPVlJNUkMxdWFVSnNVV0lTRjBGT1ZFMWhZVWhVVDNOeU9IQTRORkJzV21FdGExRlZHaUpCU2t0TVJtMUtNVEZGWDFwbFZVVlFkRk5IVUdaTmRYQjVSRXBOU1hCck5qbFIiLCJmY3YiOiIzIiwiZWkiOiJBTlRNYWFIVE9zcjhwODRQbFphLWtRVSIsInFjIjoiQ2hOaGJtRnNlWHBsSUhSb1pTQndjbTlxWldOMEVBQjkzMDB4UHciLCJxdWVzdGlvbiI6IkhvdyB0byB3cml0ZSBhbiBhbmFseXNpcyBvZiBhIHByb2plY3Q%2FIiwibGsiOiJHaVZvYjNjZ2RHOGdkM0pwZEdVZ1lXNGdZVzVoYkhsemFYTWdiMllnWVNCd2NtOXFaV04wIiwiYnMiOiJjLU55NUpJTHowZ3NVY2dzVmtqTVM4eXBMQVl5OHRNVUVoVUtpdkt6VXBOTDdJM2twV1RMOGFuZ0N1RlM4OGd2VnlqSlZ5Z3Z5aXhKQmFyQ1laVEVYRzhqZFNuVkRHSVVjMFZ3YWNBY1ZwS1JxbEJRV2xTUVg1d0tVZ05WQWRkbkwzR1kzMGhUU3IyY09PVmNUbHl5SVBlbTVDdFU1cGRDaEt0U0lUWW5weFlEalR0dVp5UW5KWk9CUjQwQUl3QSIsImlkIjoiZmNfQU5UTWFhSFRPc3I4cDg0UGxaYS1rUVVfMiJ9"
+        },
+        {
+          "question": "What is the purpose of project analysis?",
+          "type": "featured_snippet",
+          "snippet": "Its purpose is to determine and evaluate the prospects for success and risks of a project to make informed decisions about the project's continuation, adjustment, or termination. A thorough project analysis contributes to ensuring project success and to the early detection and resolution of potential problems.",
+          "title": "Project Analysis: Key to Management Success - awork",
+          "link": "https://www.awork.com/glossary/project-analysis#:~:text=Its%20purpose%20is%20to%20determine,and%20resolution%20of%20potential%20problems.",
+          "displayed_link": "https://www.awork.com › glossary › project-analysis",
+          "next_page_token": "eyJvbnMiOiI2NzYxIiwiZmMiOiJFc3dCQ293QlFVMXVNeTE1VWtwdWFUaEpUV1ZRT0d3eWFWTXhTSGRCUnpsT1VXMVpabVJsYVUxQk5FUndRMFZLUldoVU9VOXBRVGRPYlRoV1ptOUtlVEZqUWxsalNISndYMnhXWlRadGFFOUhVRFpqUlMxQmRFbHdkMEpGY0ZwZk1GRmhZVUZ2Tm1rMFkwUkxVVGhrUW5Wa1pHWm1OVlUyV0ZOWlNuUXhSbkpuV2trNU9WQnRPVlJNUkMxdWFVSnNVV0lTRjBGT1ZFMWhZVWhVVDNOeU9IQTRORkJzV21FdGExRlZHaUpCU2t0TVJtMUtNVEZGWDFwbFZVVlFkRk5IVUdaTmRYQjVSRXBOU1hCck5qbFIiLCJmY3YiOiIzIiwiZWkiOiJBTlRNYWFIVE9zcjhwODRQbFphLWtRVSIsInFjIjoiQ2hOaGJtRnNlWHBsSUhSb1pTQndjbTlxWldOMEVBQjkzMDB4UHciLCJxdWVzdGlvbiI6IldoYXQgaXMgdGhlIHB1cnBvc2Ugb2YgcHJvamVjdCBhbmFseXNpcz8iLCJsayI6IkdpZDNhR0YwSUdseklIUm9aU0J3ZFhKd2IzTmxJRzltSUhCeWIycGxZM1FnWVc1aGJIbHphWE0iLCJicyI6ImMtTnk1SklMejBnc1VjZ3NWa2pNUzh5cExBWXk4dE1VRWhVS2l2S3pVcE5MN0kza3BXVEw4YW5nQ3VGUzg4Z3ZWeWpKVnlndnlpeEpCYXJDWVpURVhHOGpkU25WREdJVWMwVndhY0FjVnBLUnFsQlFXbFNRWDV3S1VnTlZBZGRuTDNHWTMwaFRTcjJjT09WY1RseXlJUGVtNUN0VTVwZENoS3RTSVRZbnB4WURqVHR1WnlRbkpaT0JSNDBBSXdBIiwiaWQiOiJmY19BTlRNYWFIVE9zcjhwODRQbFphLWtRVV8yIn0=",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google_related_questions&google_domain=google.com&next_page_token=eyJvbnMiOiI2NzYxIiwiZmMiOiJFc3dCQ293QlFVMXVNeTE1VWtwdWFUaEpUV1ZRT0d3eWFWTXhTSGRCUnpsT1VXMVpabVJsYVUxQk5FUndRMFZLUldoVU9VOXBRVGRPYlRoV1ptOUtlVEZqUWxsalNISndYMnhXWlRadGFFOUhVRFpqUlMxQmRFbHdkMEpGY0ZwZk1GRmhZVUZ2Tm1rMFkwUkxVVGhrUW5Wa1pHWm1OVlUyV0ZOWlNuUXhSbkpuV2trNU9WQnRPVlJNUkMxdWFVSnNVV0lTRjBGT1ZFMWhZVWhVVDNOeU9IQTRORkJzV21FdGExRlZHaUpCU2t0TVJtMUtNVEZGWDFwbFZVVlFkRk5IVUdaTmRYQjVSRXBOU1hCck5qbFIiLCJmY3YiOiIzIiwiZWkiOiJBTlRNYWFIVE9zcjhwODRQbFphLWtRVSIsInFjIjoiQ2hOaGJtRnNlWHBsSUhSb1pTQndjbTlxWldOMEVBQjkzMDB4UHciLCJxdWVzdGlvbiI6IldoYXQgaXMgdGhlIHB1cnBvc2Ugb2YgcHJvamVjdCBhbmFseXNpcz8iLCJsayI6IkdpZDNhR0YwSUdseklIUm9aU0J3ZFhKd2IzTmxJRzltSUhCeWIycGxZM1FnWVc1aGJIbHphWE0iLCJicyI6ImMtTnk1SklMejBnc1VjZ3NWa2pNUzh5cExBWXk4dE1VRWhVS2l2S3pVcE5MN0kza3BXVEw4YW5nQ3VGUzg4Z3ZWeWpKVnlndnlpeEpCYXJDWVpURVhHOGpkU25WREdJVWMwVndhY0FjVnBLUnFsQlFXbFNRWDV3S1VnTlZBZGRuTDNHWTMwaFRTcjJjT09WY1RseXlJUGVtNUN0VTVwZENoS3RTSVRZbnB4WURqVHR1WnlRbkpaT0JSNDBBSXdBIiwiaWQiOiJmY19BTlRNYWFIVE9zcjhwODRQbFphLWtRVV8yIn0%3D"
+        },
+        {
+          "question": "How do you analyze a process?",
+          "type": "featured_snippet",
+          "title": "How process analysis works",
+          "link": "https://www.ibm.com/think/topics/process-analysis",
+          "list": [
+            "Identify the process. Clearly define the process to be analyzed. ... ",
+            "Gather information. ... ",
+            "Break down the process. ... ",
+            "Map the process. ... ",
+            "Analyze each step. ... ",
+            "Identify bottlenecks and inefficiencies. ... ",
+            "Propose improvements. ... ",
+            "Implement changes."
+          ],
+          "displayed_link": "https://www.ibm.com › think › topics › process-analysis",
+          "source_logo": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/-DbFV9yG_91rbpJOO502qnZ0LnpUqBr8x1VRJg6B_30.png",
+          "next_page_token": "eyJvbnMiOiI2NzYxIiwiZmMiOiJFc3dCQ293QlFVMXVNeTE1VWtwdWFUaEpUV1ZRT0d3eWFWTXhTSGRCUnpsT1VXMVpabVJsYVUxQk5FUndRMFZLUldoVU9VOXBRVGRPYlRoV1ptOUtlVEZqUWxsalNISndYMnhXWlRadGFFOUhVRFpqUlMxQmRFbHdkMEpGY0ZwZk1GRmhZVUZ2Tm1rMFkwUkxVVGhrUW5Wa1pHWm1OVlUyV0ZOWlNuUXhSbkpuV2trNU9WQnRPVlJNUkMxdWFVSnNVV0lTRjBGT1ZFMWhZVWhVVDNOeU9IQTRORkJzV21FdGExRlZHaUpCU2t0TVJtMUtNVEZGWDFwbFZVVlFkRk5IVUdaTmRYQjVSRXBOU1hCck5qbFIiLCJmY3YiOiIzIiwiZWkiOiJBTlRNYWFIVE9zcjhwODRQbFphLWtRVSIsInFjIjoiQ2hOaGJtRnNlWHBsSUhSb1pTQndjbTlxWldOMEVBQjkzMDB4UHciLCJxdWVzdGlvbiI6IkhvdyBkbyB5b3UgYW5hbHl6ZSBhIHByb2Nlc3M/IiwibGsiOiJHaHhvYjNjZ1pHOGdlVzkxSUdGdVlXeDVlbVVnWVNCd2NtOWpaWE56IiwiYnMiOiJjLU55NUpJTHowZ3NVY2dzVmtqTVM4eXBMQVl5OHRNVUVoVUtpdkt6VXBOTDdJM2twV1RMOGFuZ0N1RlM4OGd2VnlqSlZ5Z3Z5aXhKQmFyQ1laVEVYRzhqZFNuVkRHSVVjMFZ3YWNBY1ZwS1JxbEJRV2xTUVg1d0tVZ05WQWRkbkwzR1kzMGhUU3IyY09PVmNUbHl5SVBlbTVDdFU1cGRDaEt0U0lUWW5weFlEalR0dVp5UW5KWk9CUjQwQUl3QSIsImlkIjoiZmNfQU5UTWFhSFRPc3I4cDg0UGxaYS1rUVVfMiJ9",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google_related_questions&google_domain=google.com&next_page_token=eyJvbnMiOiI2NzYxIiwiZmMiOiJFc3dCQ293QlFVMXVNeTE1VWtwdWFUaEpUV1ZRT0d3eWFWTXhTSGRCUnpsT1VXMVpabVJsYVUxQk5FUndRMFZLUldoVU9VOXBRVGRPYlRoV1ptOUtlVEZqUWxsalNISndYMnhXWlRadGFFOUhVRFpqUlMxQmRFbHdkMEpGY0ZwZk1GRmhZVUZ2Tm1rMFkwUkxVVGhrUW5Wa1pHWm1OVlUyV0ZOWlNuUXhSbkpuV2trNU9WQnRPVlJNUkMxdWFVSnNVV0lTRjBGT1ZFMWhZVWhVVDNOeU9IQTRORkJzV21FdGExRlZHaUpCU2t0TVJtMUtNVEZGWDFwbFZVVlFkRk5IVUdaTmRYQjVSRXBOU1hCck5qbFIiLCJmY3YiOiIzIiwiZWkiOiJBTlRNYWFIVE9zcjhwODRQbFphLWtRVSIsInFjIjoiQ2hOaGJtRnNlWHBsSUhSb1pTQndjbTlxWldOMEVBQjkzMDB4UHciLCJxdWVzdGlvbiI6IkhvdyBkbyB5b3UgYW5hbHl6ZSBhIHByb2Nlc3M%2FIiwibGsiOiJHaHhvYjNjZ1pHOGdlVzkxSUdGdVlXeDVlbVVnWVNCd2NtOWpaWE56IiwiYnMiOiJjLU55NUpJTHowZ3NVY2dzVmtqTVM4eXBMQVl5OHRNVUVoVUtpdkt6VXBOTDdJM2twV1RMOGFuZ0N1RlM4OGd2VnlqSlZ5Z3Z5aXhKQmFyQ1laVEVYRzhqZFNuVkRHSVVjMFZ3YWNBY1ZwS1JxbEJRV2xTUVg1d0tVZ05WQWRkbkwzR1kzMGhUU3IyY09PVmNUbHl5SVBlbTVDdFU1cGRDaEt0U0lUWW5weFlEalR0dVp5UW5KWk9CUjQwQUl3QSIsImlkIjoiZmNfQU5UTWFhSFRPc3I4cDg0UGxaYS1rUVVfMiJ9"
+        }
+      ],
+      "ai_overview": {
+        "page_token": "AwUjfXicxVbbkqJIEH3f_xheZhS89LR2BLGRILa0V7y0lxcDC0xEEKVQRt_mX_ar9mu2QGXQlo7YidjYfCApyKw8lXk4wc-_nNVm_fcfX6wg2NIXng_DMI-eh46ZJ57L6_S4IfzSc6hPrD_REfeUsxzR3HDHg1jiCBULnLkSoTNs63pj2KV-ZVsp95yZnltrIy5OF-cLnZo22_2HTfk5zy7rL6UaW-Rp3tzkFUlDtTE69cdqvigUqvkur7ssAP4rU1WQmZM1UCN3_xahhqBlZ0sgMVdLRaigsKuUCpoCIHOIynknGTN2U9YYZQ5kdulJh1w4FbIrx2VSNeKq8pRVUKK3_YcFPj5KTuxB3IHH9gCxFmXE1n2w2w3SOBqSGY6iXkiVFB4pPLsrArmMNbbXFU8bpXJPgZqlkEyE0ERQw9pRq6hZ7b3YNtxNr3UXEILMG8gYJvALn7kCvyIWiW98GhFPHlYFT1HqVUkfT8K9tps_zyrdetMZbJbL03QLPFmwOMfTDdOYW3PhW0xxQhOO0zTH3adXQXiT34InzLfyUiFFcDlu1g16hT18MLQMu-_-r0wpnoAWDbKvpEvk2Fywrl0m3EBoA1i3GKLFR4JfbtNBiEkiG3HM9fRnEAHC9eXZ9UX5MWKFzQUwqapC-CEqQSQp50219nkd3gSiLIOGEVIvzuimNwI1aVmMHFUtOsXZtOR83aQW45bEUtrsE57GZxhAJBwsiy1kSZXiyJGUxncBleppC-Scfcr-WD61TPVIDK9MviPmDaFJ7fmVdPz-3gOtOqO2Opqcitpw9r7DC4E9d_EvVJr8jxSPNVyKNZx1fXVPcfyc4kzDLcjU8MtAfmk4XjQ8i-Lr9Z2GVx4gjn2owjpN8WwNT1M8ivmE4momxfERxb2PFF9lUZzBqaUojti_03CERMMTiv-Ohg9-R8Njxptndyvoexszhb3u2Vq4ym2LzYbt2PT5KPdJa295RJhoH4V96QYvuuF8m6-MF6n4FhwNbifqG905nsyvgWV-3fqebZKAcx3fEwW9fOwPba-yaxr9XWniq0M6bE3KWH1tN0u9evd4sEvLXscM1--zSRNOuR0scbypFw-e1FGrJdndBoedJ78Xgt4PwOKi3pIXytBdvNdtIdQa_RD8I1hjZwZhJSBhf26QpjH5boI76JYbyyG1w8A3YzRUxE2B2Mtu268TztUNarLfNdcnIht2GaGjwRiBzYajRJ-b9CAay-KTSb4TvSyUnnVD4FwMjluxXODoxhcL_wDZKuq0",
+        "serpapi_link": "https://serpapi.com/search.json?engine=google_ai_overview&page_token=AwUjfXicxVbbkqJIEH3f_xheZhS89LR2BLGRILa0V7y0lxcDC0xEEKVQRt_mX_ar9mu2QGXQlo7YidjYfCApyKw8lXk4wc-_nNVm_fcfX6wg2NIXng_DMI-eh46ZJ57L6_S4IfzSc6hPrD_REfeUsxzR3HDHg1jiCBULnLkSoTNs63pj2KV-ZVsp95yZnltrIy5OF-cLnZo22_2HTfk5zy7rL6UaW-Rp3tzkFUlDtTE69cdqvigUqvkur7ssAP4rU1WQmZM1UCN3_xahhqBlZ0sgMVdLRaigsKuUCpoCIHOIynknGTN2U9YYZQ5kdulJh1w4FbIrx2VSNeKq8pRVUKK3_YcFPj5KTuxB3IHH9gCxFmXE1n2w2w3SOBqSGY6iXkiVFB4pPLsrArmMNbbXFU8bpXJPgZqlkEyE0ERQw9pRq6hZ7b3YNtxNr3UXEILMG8gYJvALn7kCvyIWiW98GhFPHlYFT1HqVUkfT8K9tps_zyrdetMZbJbL03QLPFmwOMfTDdOYW3PhW0xxQhOO0zTH3adXQXiT34InzLfyUiFFcDlu1g16hT18MLQMu-_-r0wpnoAWDbKvpEvk2Fywrl0m3EBoA1i3GKLFR4JfbtNBiEkiG3HM9fRnEAHC9eXZ9UX5MWKFzQUwqapC-CEqQSQp50219nkd3gSiLIOGEVIvzuimNwI1aVmMHFUtOsXZtOR83aQW45bEUtrsE57GZxhAJBwsiy1kSZXiyJGUxncBleppC-Scfcr-WD61TPVIDK9MviPmDaFJ7fmVdPz-3gOtOqO2Opqcitpw9r7DC4E9d_EvVJr8jxSPNVyKNZx1fXVPcfyc4kzDLcjU8MtAfmk4XjQ8i-Lr9Z2GVx4gjn2owjpN8WwNT1M8ivmE4momxfERxb2PFF9lUZzBqaUojti_03CERMMTiv-Ohg9-R8Njxptndyvoexszhb3u2Vq4ym2LzYbt2PT5KPdJa295RJhoH4V96QYvuuF8m6-MF6n4FhwNbifqG905nsyvgWV-3fqebZKAcx3fEwW9fOwPba-yaxr9XWniq0M6bE3KWH1tN0u9evd4sEvLXscM1--zSRNOuR0scbypFw-e1FGrJdndBoedJ78Xgt4PwOKi3pIXytBdvNdtIdQa_RD8I1hjZwZhJSBhf26QpjH5boI76JYbyyG1w8A3YzRUxE2B2Mtu268TztUNarLfNdcnIht2GaGjwRiBzYajRJ-b9CAay-KTSb4TvSyUnnVD4FwMjluxXODoxhcL_wDZKuq0"
+      },
+      "organic_results": [
+        {
+          "position": 1,
+          "title": "Project Analysis: Key to Management Success - awork",
+          "link": "https://www.awork.com/glossary/project-analysis",
+          "redirect_link": "https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.awork.com/glossary/project-analysis&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQFnoECEQQAQ",
+          "displayed_link": "https://www.awork.com › glossary › project-analysis",
+          "favicon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE0JKFu3MdLnLnUNpvxoai1s.jpeg",
+          "snippet": "Project analysis is an important component of project management and refers to the systematic examination of a project to assess its potential for success and ...",
+          "snippet_highlighted_words": [
+            "Project analysis is an important component of project management"
+          ],
+          "about_this_result": {
+            "source": {
+              "description": "Project analysis is an important component of project management and refers to the systematic examination of a project to assess its potential for success and ...",
+              "source_info_link": "https://www.awork.com/glossary/project-analysis",
+              "icon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdExOhukFRYUlnc0JmfJV63jxbldFp1AhUd4qnX4BgqlJJ.jpeg"
+            },
+            "languages": [
+              "en"
+            ],
+            "regions": [
+              "US"
+            ]
+          },
+          "about_page_link": "https://www.google.com/search?q=About+https://www.awork.com/glossary/project-analysis&tbm=ilp",
+          "about_page_serpapi_link": "https://serpapi.com/search.json?engine=google_about_this_result&google_domain=google.com&q=About+https%3A%2F%2Fwww.awork.com%2Fglossary%2Fproject-analysis",
+          "source": "awork.com"
+        },
+        {
+          "position": 2,
+          "title": "Project Analysis: Quick Guide With Techniques & Templates",
+          "link": "https://www.projectmanager.com/blog/project-analysis",
+          "redirect_link": "https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.projectmanager.com/blog/project-analysis&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQFnoECEMQAQ",
+          "displayed_link": "https://www.projectmanager.com › blog › project-analy...",
+          "favicon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE-pTI44XKSHCOjHixrd3n1w.png",
+          "date": "Sep 12, 2025",
+          "snippet": "Project analysis is the process of evaluating a project to assess its viability, performance and outcomes at different stages of the project ...",
+          "snippet_highlighted_words": [
+            "Project analysis"
+          ],
+          "about_this_result": {
+            "source": {
+              "description": "Project analysis is the process of evaluating a project to assess its viability, performance and outcomes at different stages of the project ...",
+              "source_info_link": "https://www.projectmanager.com/blog/project-analysis",
+              "icon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE0NbtmjVXc3gCtTlTK2hXHglYjKHg3SfmVgkWF_ShdCk.png"
+            },
+            "languages": [
+              "en"
+            ],
+            "regions": [
+              "US"
+            ]
+          },
+          "about_page_link": "https://www.google.com/search?q=About+https://www.projectmanager.com/blog/project-analysis&tbm=ilp",
+          "about_page_serpapi_link": "https://serpapi.com/search.json?engine=google_about_this_result&google_domain=google.com&q=About+https%3A%2F%2Fwww.projectmanager.com%2Fblog%2Fproject-analysis",
+          "source": "ProjectManager"
+        },
+        {
+          "position": 3,
+          "title": "What is project analysis? (Types and why it's important)",
+          "link": "https://uk.indeed.com/career-advice/career-development/project-analysis",
+          "redirect_link": "https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://uk.indeed.com/career-advice/career-development/project-analysis&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQFnoECEYQAQ",
+          "displayed_link": "https://uk.indeed.com › ... › Career development",
+          "favicon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE8uSRAh708vUrllUkzjxBx8.png",
+          "date": "Nov 25, 2025",
+          "snippet": "Project analysis (PA) is the process of evaluating a project's current status and identifying potential problems as the project progresses.",
+          "snippet_highlighted_words": [
+            "evaluating a project's current status"
+          ],
+          "about_this_result": {
+            "source": {
+              "description": "Project analysis (PA) is the process of evaluating a project's current status and identifying potential problems as the project progresses.",
+              "source_info_link": "https://uk.indeed.com/career-advice/career-development/project-analysis",
+              "icon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE1VHOQK6YeKVo0QpXPowa0iCfIA78wIRD1QkPyMvxAG9.png"
+            },
+            "languages": [
+              "en"
+            ],
+            "regions": [
+              "US"
+            ]
+          },
+          "about_page_link": "https://www.google.com/search?q=About+https://uk.indeed.com/career-advice/career-development/project-analysis&tbm=ilp",
+          "about_page_serpapi_link": "https://serpapi.com/search.json?engine=google_about_this_result&google_domain=google.com&q=About+https%3A%2F%2Fuk.indeed.com%2Fcareer-advice%2Fcareer-development%2Fproject-analysis",
+          "source": "Indeed"
+        },
+        {
+          "position": 4,
+          "title": "What is Project Analysis and Why it is Important?",
+          "link": "https://www.smarttask.io/blog/project-analysis",
+          "redirect_link": "https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.smarttask.io/blog/project-analysis&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQFnoECEcQAQ",
+          "displayed_link": "https://www.smarttask.io › blog › project-analysis",
+          "favicon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE1vJ5B6WJ5ccA2HdQWsg3g0.png",
+          "date": "Jan 25, 2022",
+          "snippet": "It is assessing every expense or problem related to a project before working on it and evaluating the outcome once the work is done.",
+          "snippet_highlighted_words": [
+            "assessing every expense or problem related to a project"
+          ],
+          "about_this_result": {
+            "source": {
+              "description": "It is assessing every expense or problem related to a project before working on it and evaluating the outcome once the work is done.",
+              "source_info_link": "https://www.smarttask.io/blog/project-analysis",
+              "icon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE3DklJT6rZxYk8JkGqfH-L8lK9dwdO-SQbUVz3Nb3eqy.png"
+            },
+            "languages": [
+              "en"
+            ],
+            "regions": [
+              "US"
+            ]
+          },
+          "about_page_link": "https://www.google.com/search?q=About+https://www.smarttask.io/blog/project-analysis&tbm=ilp",
+          "about_page_serpapi_link": "https://serpapi.com/search.json?engine=google_about_this_result&google_domain=google.com&q=About+https%3A%2F%2Fwww.smarttask.io%2Fblog%2Fproject-analysis",
+          "source": "SmartTask"
+        },
+        {
+          "position": 5,
+          "title": "How to analyze your project",
+          "link": "https://www.helpndoc.com/step-by-step-guides/how-to-analyze-your-project/",
+          "redirect_link": "https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.helpndoc.com/step-by-step-guides/how-to-analyze-your-project/&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQFnoECEEQAQ",
+          "displayed_link": "https://www.helpndoc.com › step-by-step-guides › how...",
+          "favicon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdExqXV9dvZ_a9WExsY-d0tLk.png",
+          "snippet": "To access the Project Analyzer, click Analyze Project in the Project section on the Home ribbon tab. Then click Analyze in the lower left-hand corner to view ...",
+          "snippet_highlighted_words": [
+            "click Analyze Project in the Project section on the Home ribbon tab"
+          ],
+          "about_this_result": {
+            "source": {
+              "description": "To access the Project Analyzer, click Analyze Project in the Project section on the Home ribbon tab. Then click Analyze in the lower left-hand corner to view ...",
+              "source_info_link": "https://www.helpndoc.com/step-by-step-guides/how-to-analyze-your-project/",
+              "icon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE_nu7U7nsBN7dTCkITyZ5dL8f8ayiFNy4Zt5LzdfzDr4.png"
+            },
+            "languages": [
+              "en"
+            ],
+            "regions": [
+              "US"
+            ]
+          },
+          "about_page_link": "https://www.google.com/search?q=About+https://www.helpndoc.com/step-by-step-guides/how-to-analyze-your-project/&tbm=ilp",
+          "about_page_serpapi_link": "https://serpapi.com/search.json?engine=google_about_this_result&google_domain=google.com&q=About+https%3A%2F%2Fwww.helpndoc.com%2Fstep-by-step-guides%2Fhow-to-analyze-your-project%2F",
+          "source": "HelpNDoc"
+        },
+        {
+          "position": 6,
+          "title": "Overview of the Analyze project performance business ...",
+          "link": "https://learn.microsoft.com/en-us/dynamics365/guidance/business-processes/project-to-profit-monitor-analyze-project-performance-overview",
+          "redirect_link": "https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://learn.microsoft.com/en-us/dynamics365/guidance/business-processes/project-to-profit-monitor-analyze-project-performance-overview&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQFnoECEoQAQ",
+          "displayed_link": "https://learn.microsoft.com › ... › Project to profit",
+          "favicon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE_-AZP1q-6JtFWRtMetwOzs.png",
+          "date": "Jul 24, 2025",
+          "snippet": "The Analyze project performance business process area focuses on systematically monitoring, assessing, and evaluating various project elements.",
+          "snippet_highlighted_words": [
+            "systematically monitoring, assessing, and evaluating various project elements"
+          ],
+          "sitelinks": {
+            "inline": [
+              {
+                "title": "Introduction to Analyze project...",
+                "link": "https://learn.microsoft.com/en-us/dynamics365/guidance/business-processes/project-to-profit-monitor-analyze-project-performance-overview#introduction-to-analyze-project-performance"
+              },
+              {
+                "title": "Stakeholders",
+                "link": "https://learn.microsoft.com/en-us/dynamics365/guidance/business-processes/project-to-profit-monitor-analyze-project-performance-overview#stakeholders"
+              }
+            ]
+          },
+          "about_this_result": {
+            "source": {
+              "description": "The Analyze project performance business process area focuses on systematically monitoring, assessing, and evaluating various project elements.",
+              "source_info_link": "https://learn.microsoft.com/en-us/dynamics365/guidance/business-processes/project-to-profit-monitor-analyze-project-performance-overview",
+              "icon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE3lwTzilggX28VYj_Upnj7WRW5XM6kxDcg0pVMgU_x_1.png"
+            },
+            "languages": [
+              "en"
+            ],
+            "regions": [
+              "US"
+            ]
+          },
+          "about_page_link": "https://www.google.com/search?q=About+https://learn.microsoft.com/en-us/dynamics365/guidance/business-processes/project-to-profit-monitor-analyze-project-performance-overview&tbm=ilp",
+          "about_page_serpapi_link": "https://serpapi.com/search.json?engine=google_about_this_result&google_domain=google.com&q=About+https%3A%2F%2Flearn.microsoft.com%2Fen-us%2Fdynamics365%2Fguidance%2Fbusiness-processes%2Fproject-to-profit-monitor-analyze-project-performance-overview",
+          "source": "Microsoft Learn"
+        },
+        {
+          "position": 7,
+          "title": "What Is Project Analysis & How Can You Do It In 2026?",
+          "link": "https://www.smartsuite.com/blog/project-analysis",
+          "redirect_link": "https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.smartsuite.com/blog/project-analysis&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQFnoECEIQAQ",
+          "displayed_link": "https://www.smartsuite.com › blog › project-analysis",
+          "favicon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE8n6pD3HXeEkwPF1ITigmBQ.png",
+          "snippet": "Project analysis involves an examination of a project's elements to assess its viability, risks, and alignment with your strategic goals. This multifaceted ...",
+          "snippet_highlighted_words": [
+            "Project analysis involves an examination of a project's elements"
+          ],
+          "about_this_result": {
+            "source": {
+              "description": "Project analysis involves an examination of a project's elements to assess its viability, risks, and alignment with your strategic goals. This multifaceted ...",
+              "source_info_link": "https://www.smartsuite.com/blog/project-analysis",
+              "icon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE14dwDGXqTGgbb7x2hb5OspuEFvt2vokXCyZsQog4bno.png"
+            },
+            "languages": [
+              "en"
+            ],
+            "regions": [
+              "US"
+            ]
+          },
+          "about_page_link": "https://www.google.com/search?q=About+https://www.smartsuite.com/blog/project-analysis&tbm=ilp",
+          "about_page_serpapi_link": "https://serpapi.com/search.json?engine=google_about_this_result&google_domain=google.com&q=About+https%3A%2F%2Fwww.smartsuite.com%2Fblog%2Fproject-analysis",
+          "source": "SmartSuite"
+        },
+        {
+          "position": 8,
+          "title": "Project Management Analysis Tools",
+          "link": "https://employees.brooklyn.edu/base/project-management-tools/",
+          "redirect_link": "https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://employees.brooklyn.edu/base/project-management-tools/&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQFnoECF4QAQ",
+          "displayed_link": "https://employees.brooklyn.edu › base › project-manag...",
+          "favicon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE9TydP1S2074sUqt4YnJ4uE.png",
+          "snippet": "The tools below can be used to analyze data gathered in order to understand the root cause or causes of a problem, identify the gaps in a process, improve a ...",
+          "snippet_highlighted_words": [
+            "analyze data gathered"
+          ],
+          "about_this_result": {
+            "source": {
+              "description": "The tools below can be used to analyze data gathered in order to understand the root cause or causes of a problem, identify the gaps in a process, improve a ...",
+              "source_info_link": "https://employees.brooklyn.edu/base/project-management-tools/",
+              "icon": "https://serpapi.com/searches/69ccd3ffc29c3d019ca38c14/images/K3Ng2QhkmU_z3YSKrWJdE5uqOD4gAHF4zRU-xiRC504axSZkzPSa5tl5ZOeyJJ_N.png"
+            },
+            "languages": [
+              "en"
+            ],
+            "regions": [
+              "US"
+            ]
+          },
+          "about_page_link": "https://www.google.com/search?q=About+https://employees.brooklyn.edu/base/project-management-tools/&tbm=ilp",
+          "about_page_serpapi_link": "https://serpapi.com/search.json?engine=google_about_this_result&google_domain=google.com&q=About+https%3A%2F%2Femployees.brooklyn.edu%2Fbase%2Fproject-management-tools%2F",
+          "source": "Brooklyn College"
+        }
+      ],
+      "related_searches": [
+        {
+          "block_position": 1,
+          "query": "Project analysis example",
+          "link": "https://www.google.com/search?sca_esv=df25ec6ca4037ad0&gl=us&hl=en&q=Project+analysis+example&sa=X&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ1QJ6BAg8EAE",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=Project+analysis+example"
+        },
+        {
+          "block_position": 1,
+          "query": "Analyze the project template",
+          "link": "https://www.google.com/search?sca_esv=df25ec6ca4037ad0&gl=us&hl=en&q=Analyze+the+project+template&sa=X&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ1QJ6BAhLEAE",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=Analyze+the+project+template"
+        },
+        {
+          "block_position": 1,
+          "query": "Project analysis PDF",
+          "link": "https://www.google.com/search?sca_esv=df25ec6ca4037ad0&gl=us&hl=en&q=Project+analysis+PDF&sa=X&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ1QJ6BAhJEAE",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=Project+analysis+PDF"
+        },
+        {
+          "block_position": 1,
+          "query": "Types of project analysis",
+          "link": "https://www.google.com/search?sca_esv=df25ec6ca4037ad0&gl=us&hl=en&q=Types+of+project+analysis&sa=X&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ1QJ6BAhIEAE",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=Types+of+project+analysis"
+        },
+        {
+          "block_position": 1,
+          "query": "Project analysis in project management",
+          "link": "https://www.google.com/search?sca_esv=df25ec6ca4037ad0&gl=us&hl=en&q=Project+analysis+in+project+management&sa=X&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ1QJ6BAhAEAE",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=Project+analysis+in+project+management"
+        },
+        {
+          "block_position": 1,
+          "query": "Importance of project analysis",
+          "link": "https://www.google.com/search?sca_esv=df25ec6ca4037ad0&gl=us&hl=en&q=Importance+of+project+analysis&sa=X&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ1QJ6BAg_EAE",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=Importance+of+project+analysis"
+        },
+        {
+          "block_position": 1,
+          "query": "Project analysis report",
+          "link": "https://www.google.com/search?sca_esv=df25ec6ca4037ad0&gl=us&hl=en&q=Project+analysis+report&sa=X&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ1QJ6BAg-EAE",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=Project+analysis+report"
+        },
+        {
+          "block_position": 1,
+          "query": "Elements of project analysis",
+          "link": "https://www.google.com/search?sca_esv=df25ec6ca4037ad0&gl=us&hl=en&q=Elements+of+project+analysis&sa=X&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ1QJ6BAg9EAE",
+          "serpapi_link": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=Elements+of+project+analysis"
+        }
+      ],
+      "pagination": {
+        "current": 1,
+        "next": "https://www.google.com/search?q=analyze+the+project&sca_esv=df25ec6ca4037ad0&gl=us&hl=en&ei=ANTMaaHTOsr8p84PlZa-kQU&start=10&sa=N&sstk=Af77f_ePsCJozI1Ccim0my7tJDehTj5mZ-IA2QdaaRKVIGq3xjrqfsopVd770ScsauYb56BDWaHj_7UwvSrtSshfohBSWuv_Jine_Q&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ8NMDegQICRAW",
+        "other_pages": {
+          "2": "https://www.google.com/search?q=analyze+the+project&sca_esv=df25ec6ca4037ad0&gl=us&hl=en&ei=ANTMaaHTOsr8p84PlZa-kQU&start=10&sa=N&sstk=Af77f_ePsCJozI1Ccim0my7tJDehTj5mZ-IA2QdaaRKVIGq3xjrqfsopVd770ScsauYb56BDWaHj_7UwvSrtSshfohBSWuv_Jine_Q&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ8tMDegQICRAE",
+          "3": "https://www.google.com/search?q=analyze+the+project&sca_esv=df25ec6ca4037ad0&gl=us&hl=en&ei=ANTMaaHTOsr8p84PlZa-kQU&start=20&sa=N&sstk=Af77f_ePsCJozI1Ccim0my7tJDehTj5mZ-IA2QdaaRKVIGq3xjrqfsopVd770ScsauYb56BDWaHj_7UwvSrtSshfohBSWuv_Jine_Q&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ8tMDegQICRAG",
+          "4": "https://www.google.com/search?q=analyze+the+project&sca_esv=df25ec6ca4037ad0&gl=us&hl=en&ei=ANTMaaHTOsr8p84PlZa-kQU&start=30&sa=N&sstk=Af77f_ePsCJozI1Ccim0my7tJDehTj5mZ-IA2QdaaRKVIGq3xjrqfsopVd770ScsauYb56BDWaHj_7UwvSrtSshfohBSWuv_Jine_Q&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ8tMDegQICRAI",
+          "5": "https://www.google.com/search?q=analyze+the+project&sca_esv=df25ec6ca4037ad0&gl=us&hl=en&ei=ANTMaaHTOsr8p84PlZa-kQU&start=40&sa=N&sstk=Af77f_ePsCJozI1Ccim0my7tJDehTj5mZ-IA2QdaaRKVIGq3xjrqfsopVd770ScsauYb56BDWaHj_7UwvSrtSshfohBSWuv_Jine_Q&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ8tMDegQICRAK",
+          "6": "https://www.google.com/search?q=analyze+the+project&sca_esv=df25ec6ca4037ad0&gl=us&hl=en&ei=ANTMaaHTOsr8p84PlZa-kQU&start=50&sa=N&sstk=Af77f_ePsCJozI1Ccim0my7tJDehTj5mZ-IA2QdaaRKVIGq3xjrqfsopVd770ScsauYb56BDWaHj_7UwvSrtSshfohBSWuv_Jine_Q&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ8tMDegQICRAM",
+          "7": "https://www.google.com/search?q=analyze+the+project&sca_esv=df25ec6ca4037ad0&gl=us&hl=en&ei=ANTMaaHTOsr8p84PlZa-kQU&start=60&sa=N&sstk=Af77f_ePsCJozI1Ccim0my7tJDehTj5mZ-IA2QdaaRKVIGq3xjrqfsopVd770ScsauYb56BDWaHj_7UwvSrtSshfohBSWuv_Jine_Q&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ8tMDegQICRAO",
+          "8": "https://www.google.com/search?q=analyze+the+project&sca_esv=df25ec6ca4037ad0&gl=us&hl=en&ei=ANTMaaHTOsr8p84PlZa-kQU&start=70&sa=N&sstk=Af77f_ePsCJozI1Ccim0my7tJDehTj5mZ-IA2QdaaRKVIGq3xjrqfsopVd770ScsauYb56BDWaHj_7UwvSrtSshfohBSWuv_Jine_Q&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ8tMDegQICRAQ",
+          "9": "https://www.google.com/search?q=analyze+the+project&sca_esv=df25ec6ca4037ad0&gl=us&hl=en&ei=ANTMaaHTOsr8p84PlZa-kQU&start=80&sa=N&sstk=Af77f_ePsCJozI1Ccim0my7tJDehTj5mZ-IA2QdaaRKVIGq3xjrqfsopVd770ScsauYb56BDWaHj_7UwvSrtSshfohBSWuv_Jine_Q&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ8tMDegQICRAS",
+          "10": "https://www.google.com/search?q=analyze+the+project&sca_esv=df25ec6ca4037ad0&gl=us&hl=en&ei=ANTMaaHTOsr8p84PlZa-kQU&start=90&sa=N&sstk=Af77f_ePsCJozI1Ccim0my7tJDehTj5mZ-IA2QdaaRKVIGq3xjrqfsopVd770ScsauYb56BDWaHj_7UwvSrtSshfohBSWuv_Jine_Q&ved=2ahUKEwih067vmsyTAxVK_skDHRWLL1IQ8tMDegQICRAU"
+        }
+      },
+      "serpapi_pagination": {
+        "current": 1,
+        "next_link": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=10",
+        "next": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=10",
+        "other_pages": {
+          "2": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=10",
+          "3": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=20",
+          "4": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=30",
+          "5": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=40",
+          "6": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=50",
+          "7": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=60",
+          "8": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=70",
+          "9": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=80",
+          "10": "https://serpapi.com/search.json?device=desktop&engine=google&gl=us&google_domain=google.com&hl=en&num=10&q=analyze+the+project&start=90"
+        }
+      }
+    }
+  },
+  "errors": {}
+}

@@ -1,0 +1,17 @@
+**Summary of Inbound Channel Message Normalization Result:**
+- **Channel:** project_chat
+- **Sender ID:** project_ui
+- **Chat ID:** project_ui
+- **Workspace ID:** Not provided (empty)
+- **Text:** "analyze the project"
+- **Is Group Message:** No (false)
+- **Mentioned:** No (false)
+- **Should Activate Workflow:** Yes (true)
+
+**Should the Message Activate the Main Workflow?**
+Yes, the message should activate the main workflow. The key factors contributing to this decision are:
+1. The message content, "analyze the project," indicates a clear intent to initiate a specific action related to project analysis.
+2. The `should_activate` field is set to true, explicitly suggesting that this message is intended to trigger the workflow.
+3. The message is not sent in a group context and does not involve mentions, further emphasizing that it is a straightforward request from an individual user.
+
+Based on these indicators, the message aligns strongly with the criteria for activating the main workflow.

@@ -1,0 +1,10 @@
+{
+  "channel": "project_chat",
+  "sender_id": "project_ui",
+  "chat_id": "project_ui",
+  "workspace_id": "",
+  "text": "analyze the project",
+  "is_group": false,
+  "mentioned": false,
+  "should_activate": true
+}
