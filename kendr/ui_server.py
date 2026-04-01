@@ -3553,23 +3553,47 @@ body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,san
 .filter-btn{background:var(--surface);border:1px solid var(--border);color:var(--muted);padding:6px 14px;border-radius:20px;cursor:pointer;font-size:13px;transition:all .15s}
 .filter-btn:hover,.filter-btn.active{background:var(--teal);border-color:var(--teal);color:#000;font-weight:600}
 .cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
-.skill-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:10px;transition:box-shadow .2s}
-.skill-card:hover{box-shadow:0 4px 20px rgba(0,201,167,.12)}
-.skill-card.inactive{opacity:.55}
-.skill-card.inactive:hover{opacity:.75}
-.card-header{display:flex;align-items:flex-start;gap:12px}
-.card-emoji{font-size:28px;line-height:1;flex-shrink:0}
+.skill-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:8px;transition:box-shadow .2s,border-color .2s}
+.skill-card:hover{box-shadow:0 4px 20px rgba(0,201,167,.10);border-color:rgba(0,201,167,.25)}
+.skill-card.needs-config{border-color:rgba(255,179,71,.3)}
+.skill-card.needs-config:hover{border-color:rgba(255,179,71,.6);box-shadow:0 4px 20px rgba(255,179,71,.10)}
+.skill-card.inactive{opacity:.5}
+.card-header{display:flex;align-items:flex-start;gap:10px}
+.card-emoji{font-size:26px;line-height:1;flex-shrink:0;margin-top:2px}
 .card-info{flex:1;min-width:0}
-.card-name{font-size:15px;font-weight:700;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.card-category{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
-.card-status{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:.03em}
-.status-active{background:rgba(0,201,167,.15);color:var(--teal)}
-.status-inactive{background:rgba(255,179,71,.1);color:var(--amber)}
-.card-desc{font-size:13px;color:var(--muted);line-height:1.5;flex:1}
-.card-hint{background:rgba(255,179,71,.08);border:1px solid rgba(255,179,71,.2);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--amber)}
-.skills-chips{display:flex;flex-wrap:wrap;gap:6px}
-.chip{background:var(--surface2);border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:10px;font-size:11px}
+.card-name{font-size:14px;font-weight:700;margin-bottom:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-category{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.card-status{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.03em;white-space:nowrap;flex-shrink:0}
+.status-ready{background:rgba(0,201,167,.15);color:var(--teal)}
+.status-needs-config{background:rgba(255,179,71,.12);color:var(--amber)}
+.status-inactive{background:rgba(120,120,120,.12);color:var(--muted)}
+.card-desc{font-size:12px;color:var(--muted);line-height:1.5;flex:1}
+.card-hint{background:rgba(255,179,71,.06);border:1px solid rgba(255,179,71,.18);border-radius:6px;padding:6px 10px;font-size:11px;color:var(--amber)}
+.skills-chips{display:flex;flex-wrap:wrap;gap:4px}
+.chip{background:var(--surface2);border:1px solid var(--border);color:var(--muted);padding:1px 7px;border-radius:10px;font-size:10px}
 .empty-msg{text-align:center;color:var(--muted);padding:60px 20px;grid-column:1/-1}
+.setup-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:6px;border:1px solid rgba(255,179,71,.4);background:rgba(255,179,71,.06);color:var(--amber);font-size:11px;font-weight:600;cursor:pointer;transition:background .15s;margin-top:2px;width:fit-content}
+.setup-btn:hover{background:rgba(255,179,71,.14)}
+/* setup panel */
+.skills-layout{display:flex;gap:20px;align-items:flex-start;min-height:0}
+.skills-left{flex:1;min-width:0;display:flex;flex-direction:column;gap:0}
+.setup-panel{width:340px;flex-shrink:0;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:flex;flex-direction:column;height:calc(100vh - 120px);position:sticky;top:20px}
+.setup-panel-header{padding:14px 16px 10px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.setup-panel-title{font-size:14px;font-weight:700}
+.setup-chat{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.setup-msg{max-width:90%;padding:8px 12px;border-radius:8px;font-size:12px;line-height:1.5}
+.setup-msg.bot{background:var(--surface2);border:1px solid var(--border);align-self:flex-start}
+.setup-msg.user{background:rgba(83,82,237,.18);border:1px solid rgba(83,82,237,.3);align-self:flex-end}
+.setup-input-row{padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px}
+.setup-input{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:12px;color:var(--text);outline:none}
+.setup-input:focus{border-color:var(--teal)}
+.setup-send{background:var(--teal);color:#0d1117;border:none;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer}
+.setup-send:hover{opacity:.85}
+/* field rows in setup */
+.setup-field{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.setup-field label{font-size:10px;font-weight:700;color:var(--teal);text-transform:uppercase;letter-spacing:.05em}
+.setup-field input{background:transparent;border:none;color:var(--text);font-size:12px;outline:none;width:100%}
+.setup-field.secret input{font-family:monospace}
 </style>
 </head>
 <body>
@@ -3582,20 +3606,149 @@ body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,san
   <a href="/mcp" class="nav-btn"><span class="icon">&#x1F9E9;</span> MCP Servers</a>
   <a href="/projects" class="nav-btn"><span class="icon">&#x1F4C1;</span> Projects</a>
 </nav>
-<main class="main">
-  <div class="page-header">
+<main class="main" style="padding:20px 24px;overflow-y:auto">
+  <div class="page-header" style="margin-bottom:14px">
     <div class="page-title">&#x1F9E0; Skill Cards</div>
-    <div id="refreshBtn" style="cursor:pointer;background:var(--surface);border:1px solid var(--border);padding:8px 16px;border-radius:8px;font-size:13px;color:var(--muted)" onclick="loadSkills()">&#x21BB; Refresh</div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <div style="cursor:pointer;background:var(--surface);border:1px solid var(--border);padding:6px 14px;border-radius:8px;font-size:12px;color:var(--muted)" onclick="loadSkills()">&#x21BB; Refresh</div>
+    </div>
   </div>
-  <div class="summary-bar" id="summaryBar"></div>
-  <div class="filter-bar" id="filterBar">
-    <button class="filter-btn active" data-cat="all" onclick="setFilter('all',this)">All</button>
+  <div class="summary-bar" id="summaryBar" style="margin-bottom:14px"></div>
+  <div class="skills-layout">
+    <div class="skills-left">
+      <div class="filter-bar" id="filterBar" style="margin-bottom:14px">
+        <button class="filter-btn active" data-cat="all" onclick="setFilter('all',this)">All</button>
+      </div>
+      <div class="cards-grid" id="cardsGrid"><div class="empty-msg">Loading skill cards&#x2026;</div></div>
+    </div>
+    <div class="setup-panel" id="setupPanel">
+      <div class="setup-panel-header">
+        <div class="setup-panel-title">&#x26A1; Setup Assistant</div>
+        <div style="font-size:10px;color:var(--muted)">Type to activate skills</div>
+      </div>
+      <div class="setup-chat" id="setupChat"></div>
+      <div class="setup-input-row">
+        <input class="setup-input" id="setupInput" placeholder='e.g. "set up Slack" or "activate GitHub"' onkeydown="if(event.key==='Enter')sendSetup()">
+        <button class="setup-send" onclick="sendSetup()">&#x27A4;</button>
+      </div>
+    </div>
   </div>
-  <div class="cards-grid" id="cardsGrid"><div class="empty-msg">Loading skill cards…</div></div>
 </main>
+
+<!-- Configure modal -->
+<div id="cfgModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;display:none;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:500px;max-height:80vh;overflow-y:auto;padding:24px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div style="font-size:16px;font-weight:700" id="cfgModalTitle">Configure Integration</div>
+      <button onclick="closeCfgModal()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer">&times;</button>
+    </div>
+    <div id="cfgModalBody"></div>
+    <div style="display:flex;gap:10px;margin-top:20px">
+      <button onclick="saveCfgModal()" style="flex:1;background:var(--teal);color:#0d1117;border:none;border-radius:8px;padding:10px;font-size:13px;font-weight:700;cursor:pointer">Save &amp; Activate</button>
+      <button onclick="closeCfgModal()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:10px 18px;font-size:13px;cursor:pointer">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let _allCards = [];
 let _activeFilter = 'all';
+let _setupState = { step: 'idle', integration: null, fields: [], current: 0, values: {} };
+
+// Integration metadata for setup wizard
+const INTEGRATION_META = {
+  slack: {
+    title: 'Slack',
+    emoji: '💬',
+    description: 'Connect your Slack workspace to enable the Slack agent.',
+    fields: [
+      { key: 'SLACK_BOT_TOKEN', label: 'Bot Token', description: 'Slack Bot User OAuth Token (starts with xoxb-)', secret: true },
+      { key: 'SLACK_SIGNING_SECRET', label: 'Signing Secret', description: 'From your Slack app\'s Basic Information page.', secret: true },
+      { key: 'SLACK_APP_TOKEN', label: 'App-Level Token (optional)', description: 'For socket mode (starts with xapp-).', secret: true, optional: true },
+    ]
+  },
+  github: {
+    title: 'GitHub',
+    emoji: '🐙',
+    description: 'Authenticate with GitHub to enable the GitHub agent.',
+    fields: [
+      { key: 'GITHUB_TOKEN', label: 'Personal Access Token', description: 'A GitHub PAT with repo and read:org scopes.', secret: true },
+    ]
+  },
+  whatsapp: {
+    title: 'WhatsApp',
+    emoji: '📱',
+    description: 'Connect WhatsApp via Meta Business API.',
+    fields: [
+      { key: 'WHATSAPP_ACCESS_TOKEN', label: 'Access Token', description: 'Meta Graph API access token.', secret: true },
+      { key: 'WHATSAPP_PHONE_NUMBER_ID', label: 'Phone Number ID', description: 'From Meta Business Suite > WhatsApp.', secret: false },
+    ]
+  },
+  telegram: {
+    title: 'Telegram',
+    emoji: '✈️',
+    description: 'Connect a Telegram bot via BotFather.',
+    fields: [
+      { key: 'TELEGRAM_BOT_TOKEN', label: 'Bot Token', description: 'Get from @BotFather on Telegram.', secret: true },
+    ]
+  },
+  aws: {
+    title: 'AWS',
+    emoji: '☁️',
+    description: 'AWS credentials for cloud automation agents.',
+    fields: [
+      { key: 'AWS_ACCESS_KEY_ID', label: 'Access Key ID', description: 'AWS IAM access key.', secret: false },
+      { key: 'AWS_SECRET_ACCESS_KEY', label: 'Secret Access Key', description: 'AWS IAM secret key.', secret: true },
+      { key: 'AWS_DEFAULT_REGION', label: 'Region (optional)', description: 'Default AWS region e.g. us-east-1.', secret: false, optional: true },
+    ]
+  },
+  qdrant: {
+    title: 'Qdrant',
+    emoji: '🔍',
+    description: 'Connect to a Qdrant vector database for Super-RAG.',
+    fields: [
+      { key: 'QDRANT_URL', label: 'Qdrant URL', description: 'e.g. http://localhost:6333 or your cloud URL.', secret: false },
+      { key: 'QDRANT_API_KEY', label: 'API Key (optional)', description: 'Only needed for cloud deployments.', secret: true, optional: true },
+    ]
+  },
+  elevenlabs: {
+    title: 'ElevenLabs',
+    emoji: '🎙️',
+    description: 'AI voice generation via ElevenLabs.',
+    fields: [
+      { key: 'ELEVENLABS_API_KEY', label: 'API Key', description: 'From elevenlabs.io > Profile.', secret: true },
+    ]
+  },
+  serpapi: {
+    title: 'SerpApi',
+    emoji: '🔍',
+    description: 'Web search via SerpApi (Google, Bing, etc.).',
+    fields: [
+      { key: 'SERPAPI_API_KEY', label: 'API Key', description: 'From serpapi.com > Dashboard.', secret: true },
+    ]
+  },
+  microsoft_graph: {
+    title: 'Microsoft 365',
+    emoji: '🪟',
+    description: 'Access Microsoft 365, Teams, OneDrive via Graph API.',
+    fields: [
+      { key: 'MICROSOFT_CLIENT_ID', label: 'Client ID', description: 'Azure AD app registration Client ID.', secret: false },
+      { key: 'MICROSOFT_CLIENT_SECRET', label: 'Client Secret', description: 'Azure AD app secret.', secret: true },
+      { key: 'MICROSOFT_TENANT_ID', label: 'Tenant ID', description: 'Your Azure AD tenant ID.', secret: false },
+    ]
+  },
+  google_workspace: {
+    title: 'Google Workspace',
+    emoji: '🔵',
+    description: 'Gmail, Google Drive, Google Calendar integration.',
+    fields: [
+      { key: 'GOOGLE_CLIENT_ID', label: 'Client ID', description: 'From Google Cloud Console OAuth credentials.', secret: false },
+      { key: 'GOOGLE_CLIENT_SECRET', label: 'Client Secret', description: 'Google OAuth client secret.', secret: true },
+    ]
+  },
+};
+
+function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 async function loadSkills() {
   try {
@@ -3605,6 +3758,9 @@ async function loadSkills() {
     renderSummary(d.summary || {});
     renderFilters(_allCards);
     renderCards(_allCards, _activeFilter);
+    if (_setupState.step === 'idle') {
+      _initSetupChat();
+    }
   } catch(e) {
     document.getElementById('cardsGrid').innerHTML = '<div class="empty-msg">Gateway is offline. Start it with <code>kendr gateway start</code>.</div>';
   }
@@ -3612,10 +3768,12 @@ async function loadSkills() {
 
 function renderSummary(s) {
   const bar = document.getElementById('summaryBar');
+  const needsCfg = s.needs_config || 0;
   bar.innerHTML = `
     <div class="stat"><div class="num">${s.total||0}</div><div class="lbl">Total Agents</div></div>
-    <div class="stat"><div class="num">${s.active||0}</div><div class="lbl">Active Now</div></div>
-    <div class="stat inactive"><div class="num">${s.inactive||0}</div><div class="lbl">Needs Config</div></div>
+    <div class="stat"><div class="num" style="color:var(--teal)">${s.active||0}</div><div class="lbl">Ready to Use</div></div>
+    <div class="stat"><div class="num" style="color:var(--amber)">${needsCfg}</div><div class="lbl">Need Setup</div></div>
+    <div class="stat inactive"><div class="num">${s.inactive - needsCfg >= 0 ? s.inactive - needsCfg : 0}</div><div class="lbl">Inactive</div></div>
   `;
 }
 
@@ -3628,7 +3786,9 @@ function renderFilters(cards) {
   });
   const bar = document.getElementById('filterBar');
   const total = cards.length;
-  bar.innerHTML = `<button class="filter-btn ${_activeFilter==='all'?'active':''}" data-cat="all" onclick="setFilter('all',this)">All (${total})</button>`;
+  bar.innerHTML = `<button class="filter-btn ${_activeFilter==='all'?'active':''}" data-cat="all" onclick="setFilter('all',this)">All (${total})</button>`
+    + `<button class="filter-btn ${_activeFilter==='__ready'?'active':''}" data-cat="__ready" onclick="setFilter('__ready',this)" style="color:var(--teal)">\u2714 Ready</button>`
+    + `<button class="filter-btn ${_activeFilter==='__setup'?'active':''}" data-cat="__setup" onclick="setFilter('__setup',this)" style="color:var(--amber)">\u26A0 Needs Setup</button>`;
   Object.entries(cats).sort((a,b)=>b[1].count-a[1].count).forEach(([cat,meta]) => {
     bar.innerHTML += `<button class="filter-btn ${_activeFilter===cat?'active':''}" data-cat="${cat}" onclick="setFilter('${cat}',this)">${meta.emoji} ${meta.label} (${meta.count})</button>`;
   });
@@ -3641,33 +3801,160 @@ function setFilter(cat, btn) {
   renderCards(_allCards, cat);
 }
 
+function _cardSortKey(c) {
+  if (c.is_active && !c.needs_config) return 0;
+  if (c.needs_config) return 1;
+  return 2;
+}
+
 function renderCards(cards, filter) {
   const grid = document.getElementById('cardsGrid');
-  const filtered = filter === 'all' ? cards : cards.filter(c => (c.category||'general') === filter);
+  let filtered;
+  if (filter === 'all') filtered = cards;
+  else if (filter === '__ready') filtered = cards.filter(c => c.is_active && !c.needs_config);
+  else if (filter === '__setup') filtered = cards.filter(c => c.needs_config);
+  else filtered = cards.filter(c => (c.category||'general') === filter);
   if (!filtered.length) { grid.innerHTML = '<div class="empty-msg">No agents in this category.</div>'; return; }
-
-  // Sort: active first
-  filtered.sort((a,b) => (b.is_active ? 1 : 0) - (a.is_active ? 1 : 0));
+  filtered.sort((a,b) => _cardSortKey(a) - _cardSortKey(b));
 
   grid.innerHTML = filtered.map(c => {
-    const active = c.is_active;
-    const chips = (c.skills||[]).slice(0,6).map(s => `<span class="chip">${s}</span>`).join('');
-    const hint = (!active && c.config_hint) ? `<div class="card-hint">&#x1F4A1; ${c.config_hint}</div>` : '';
-    return `
-      <div class="skill-card ${active?'':'inactive'}">
-        <div class="card-header">
-          <div class="card-emoji">${c.category_emoji||'✨'}</div>
-          <div class="card-info">
-            <div class="card-name" title="${c.agent_name}">${c.display_name}</div>
-            <div class="card-category">${c.category_label||c.category||'general'}</div>
-          </div>
-          <div class="card-status ${active?'status-active':'status-inactive'}">${active?'&#x2714; Active':'&#x26A0; Config needed'}</div>
+    const ready = c.is_active && !c.needs_config;
+    const needsCfg = c.needs_config;
+    const statusCls = ready ? 'status-ready' : needsCfg ? 'status-needs-config' : 'status-inactive';
+    const statusLabel = ready ? '\u2714 Ready' : needsCfg ? '\u26A1 Set Up to Enable' : '\u25CB Inactive';
+    const cardCls = needsCfg ? 'needs-config' : ready ? '' : 'inactive';
+    const chips = (c.skills||[]).slice(0,5).map(s => `<span class="chip">${escHtml(s)}</span>`).join('');
+    const hint = (needsCfg && c.config_hint) ? `<div class="card-hint">\uD83D\uDCA1 ${escHtml(c.config_hint)}</div>` : '';
+    const cfgBtn = needsCfg
+      ? `<button class="setup-btn" onclick="openSetupFor('${escHtml(c.integration_id)}','${escHtml(c.display_name)}')">&#x2699;&#xFE0F; Configure ${escHtml(c.integration_id||'')}</button>`
+      : '';
+    return `<div class="skill-card ${cardCls}">
+      <div class="card-header">
+        <div class="card-emoji">${c.category_emoji||'\u2728'}</div>
+        <div class="card-info">
+          <div class="card-name" title="${escHtml(c.agent_name)}">${escHtml(c.display_name)}</div>
+          <div class="card-category">${escHtml(c.category_label||c.category||'general')}</div>
         </div>
-        <div class="card-desc">${c.description||''}</div>
-        ${hint}
-        ${chips ? `<div class="skills-chips">${chips}</div>` : ''}
-      </div>`;
+        <div class="card-status ${statusCls}">${statusLabel}</div>
+      </div>
+      <div class="card-desc">${escHtml(c.description||'')}</div>
+      ${hint}
+      ${cfgBtn}
+      ${chips ? `<div class="skills-chips">${chips}</div>` : ''}
+    </div>`;
   }).join('');
+}
+
+// ── Setup modal ──────────────────────────────────────────────────────────────
+let _cfgIntegration = null;
+
+function openSetupFor(integrationId, agentName) {
+  const meta = INTEGRATION_META[integrationId];
+  if (!meta) {
+    // fallback: redirect to setup page
+    window.location.href = '/setup';
+    return;
+  }
+  _cfgIntegration = integrationId;
+  document.getElementById('cfgModalTitle').textContent = meta.emoji + ' Configure ' + meta.title;
+  const body = document.getElementById('cfgModalBody');
+  body.innerHTML = `<div style="font-size:13px;color:var(--muted);margin-bottom:16px">${escHtml(meta.description)}</div>`
+    + meta.fields.map(f => `
+    <div style="margin-bottom:14px">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--teal);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">${escHtml(f.label)}${f.optional?' <span style=\\'color:var(--muted);font-weight:400\\'>optional</span>':''}</label>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">${escHtml(f.description)}</div>
+      <input id="cfg-field-${f.key}" type="${f.secret?'password':'text'}" placeholder="${f.key}"
+        style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:12px;color:var(--text);font-family:${f.secret?'monospace':'inherit'};box-sizing:border-box;outline:none">
+    </div>`).join('');
+  const modal = document.getElementById('cfgModal');
+  modal.style.display = 'flex';
+}
+
+function closeCfgModal() {
+  document.getElementById('cfgModal').style.display = 'none';
+}
+
+async function saveCfgModal() {
+  const meta = INTEGRATION_META[_cfgIntegration];
+  if (!meta) return;
+  const values = {};
+  for (const f of meta.fields) {
+    const el = document.getElementById('cfg-field-' + f.key);
+    if (el && el.value.trim()) values[f.key] = el.value.trim();
+  }
+  if (!Object.keys(values).length) return;
+  try {
+    const r = await fetch('/api/setup/save', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ component_id: _cfgIntegration, values })
+    });
+    const d = await r.json();
+    closeCfgModal();
+    _addSetupMsg('bot', '\u2705 Saved! Refreshing skill status\u2026');
+    await loadSkills();
+    _addSetupMsg('bot', 'Done. ' + meta.title + ' integration is now configured. Relevant agents should now show as Ready.');
+  } catch(e) {
+    _addSetupMsg('bot', '\u274C Save failed: ' + e.message + '. Try Setup & Config page directly.');
+    closeCfgModal();
+  }
+}
+
+// ── Setup Chat Panel ─────────────────────────────────────────────────────────
+function _addSetupMsg(role, text) {
+  const chat = document.getElementById('setupChat');
+  const div = document.createElement('div');
+  div.className = 'setup-msg ' + role;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function _initSetupChat() {
+  const chat = document.getElementById('setupChat');
+  if (chat.children.length) return;
+  const needsSetup = _allCards.filter(c => c.needs_config);
+  if (needsSetup.length) {
+    const intIds = [...new Set(needsSetup.map(c => c.integration_id).filter(Boolean))];
+    _addSetupMsg('bot', 'Hi! I can help you activate more skills. You have ' + needsSetup.length + ' agent(s) waiting for credentials.');
+    _addSetupMsg('bot', 'Integrations that need setup: ' + intIds.join(', ') + '.\n\nType the name of one to get started, or click "Configure" on any card.');
+  } else {
+    _addSetupMsg('bot', 'All your skills are active! If you add a new integration, I\'ll help you configure it here.');
+  }
+}
+
+function _matchIntegration(text) {
+  const t = text.toLowerCase();
+  for (const [id, meta] of Object.entries(INTEGRATION_META)) {
+    if (t.includes(id.replace('_', ' ')) || t.includes(meta.title.toLowerCase()) || t.includes(id)) {
+      return id;
+    }
+  }
+  return null;
+}
+
+function sendSetup() {
+  const input = document.getElementById('setupInput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  _addSetupMsg('user', text);
+
+  const matched = _matchIntegration(text);
+  if (matched) {
+    const meta = INTEGRATION_META[matched];
+    _addSetupMsg('bot', 'Great! Let me help you set up ' + meta.title + '.');
+    setTimeout(() => {
+      openSetupFor(matched, meta.title);
+    }, 300);
+  } else if (text.toLowerCase().includes('list') || text.toLowerCase().includes('what')) {
+    const all = Object.entries(INTEGRATION_META).map(([id,m]) => m.emoji + ' ' + m.title).join(', ');
+    _addSetupMsg('bot', 'Available integrations: ' + all + '.\n\nType any name to start configuring it.');
+  } else if (text.toLowerCase().includes('help')) {
+    _addSetupMsg('bot', 'Type the name of an integration you want to set up, like "set up GitHub" or "configure AWS". I\'ll open a setup form for it. You can also click the "Configure" button on any skill card directly.');
+  } else {
+    _addSetupMsg('bot', 'I didn\'t recognise that integration. Try: GitHub, Slack, WhatsApp, Telegram, AWS, Qdrant, ElevenLabs, SerpApi, or Google Workspace. Or type "list" to see all options.');
+  }
 }
 
 loadSkills();

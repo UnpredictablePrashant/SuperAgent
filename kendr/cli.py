@@ -2169,6 +2169,7 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
     )
 
     setup_sub.add_parser("ui", help="Run the web-based setup UI.")
+    setup_sub.add_parser("wizard", help="Interactive CLI wizard to configure integrations step-by-step.")
     setup_oauth = setup_sub.add_parser("oauth", help="Run OAuth login/connect flows for supported providers.")
     setup_oauth.add_argument("provider", choices=["google", "microsoft", "slack", "all"])
     setup_oauth.add_argument("--no-browser", action="store_true", help="Print OAuth URLs without opening a browser.")
@@ -5390,6 +5391,117 @@ def _cmd_plugins(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_setup_wizard(style: "_CliStyle") -> int:  # noqa: F821
+    """Interactive CLI wizard that configures unconfigured integrations step-by-step."""
+    from kendr.setup.catalog import INTEGRATION_DEFINITIONS
+
+    if not sys.stdin.isatty():
+        raise SystemExit("Setup wizard requires an interactive terminal.")
+
+    print(style.heading("\n  kendr Setup Wizard"))
+    print("  Walk through each integration conversationally.\n")
+
+    # Build list of components that still need config
+    todo: list[dict] = []
+    for defn in INTEGRATION_DEFINITIONS:
+        comp_id = defn.id
+        snap = get_setup_component_snapshot(comp_id)
+        total = snap.get("total_fields", 0)
+        filled = snap.get("filled_fields", 0)
+        if total > 0 and filled < total:
+            todo.append({"id": comp_id, "title": defn.title, "defn": defn, "filled": filled, "total": total})
+
+    if not todo:
+        print(style.ok("All integrations are already configured. Nothing to set up!"))
+        return 0
+
+    print(f"  Found {len(todo)} integration(s) that need credentials:\n")
+    for i, item in enumerate(todo, 1):
+        pct = int(100 * item["filled"] / item["total"]) if item["total"] else 0
+        pct_bar = ("#" * (pct // 10)).ljust(10, ".")
+        print(f"  [{i}] {item['title']:35s}  [{pct_bar}] {pct}%")
+
+    print()
+    print("  Enter a number to configure it, 'all' to go through each, or 'q' to quit.\n")
+
+    def _pick_integration() -> list[dict]:
+        while True:
+            choice = input("  Your choice: ").strip().lower()
+            if choice in {"q", "quit", "exit"}:
+                return []
+            if choice == "all":
+                return todo
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(todo):
+                    return [todo[idx]]
+            print("  Please enter a number from the list, 'all', or 'q'.")
+
+    chosen = _pick_integration()
+    if not chosen:
+        print(style.warn("Wizard exited. No changes made."))
+        return 0
+
+    for item in chosen:
+        comp_id = item["id"]
+        title = item["title"]
+        defn = item["defn"]
+        fields = defn.fields
+        snap = get_setup_component_snapshot(comp_id)
+        current_vals = snap.get("values", {}) or {}
+
+        print()
+        print(style.heading(f"  Configuring: {title}"))
+        desc = getattr(defn, "description", "")
+        if desc:
+            print(f"  {desc}\n")
+
+        values_to_save: dict[str, str] = {}
+        for field in fields:
+            key = field.key
+            label = field.label
+            hint = field.description
+            is_secret = bool(field.secret)
+            existing = current_vals.get(key, "")
+
+            prompt_parts = [f"  {label}"]
+            if hint:
+                print(f"    {hint}")
+            if existing:
+                masked = ("*" * min(len(existing), 8)) if is_secret else existing[:20]
+                prompt_parts.append(f" [current: {masked}] (Enter to keep)")
+            prompt_parts.append(": ")
+            prompt_str = "".join(prompt_parts)
+
+            try:
+                if is_secret:
+                    import getpass
+                    value = getpass.getpass(prompt_str)
+                else:
+                    value = input(prompt_str)
+                value = value.strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Skipped.")
+                value = ""
+
+            if value:
+                values_to_save[key] = value
+            elif existing:
+                print(f"    Keeping existing value for {label}.")
+
+        if values_to_save:
+            result = save_component_values(comp_id, values_to_save)
+            filled = result.get("filled_fields", 0)
+            total = result.get("total_fields", 0)
+            print(style.ok(f"  Saved {title}: {filled}/{total} fields configured."))
+        else:
+            print(style.warn(f"  No changes saved for {title}."))
+
+    print()
+    print(style.ok("  Wizard complete! Run 'kendr setup status' to verify your configuration."))
+    return 0
+
+
 def _cmd_setup(args: argparse.Namespace) -> int:
     style = _style_from_args(args)
     apply_setup_env_defaults()
@@ -5619,6 +5731,9 @@ def _cmd_setup(args: argparse.Namespace) -> int:
                     else:
                         print(f"- {item.get('service')}: {item.get('hint', item.get('path', ''))}")
         return 0
+
+    if action == "wizard":
+        return _run_setup_wizard(style)
 
     if action == "ui":
         from .setup_ui import main as setup_main

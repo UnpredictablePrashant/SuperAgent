@@ -30,6 +30,35 @@ if TYPE_CHECKING:
     from kendr.registry import Registry
 
 
+# Maps agent-name prefix → (integration_id, required_env_vars)
+# Used to auto-detect which agents need additional credentials to work.
+_INTEGRATION_REQUIREMENTS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "slack_":           ("slack",           ("SLACK_BOT_TOKEN",)),
+    "whatsapp_":        ("whatsapp",        ("WHATSAPP_ACCESS_TOKEN",)),
+    "telegram_":        ("telegram",        ("TELEGRAM_BOT_TOKEN",)),
+    "github_":          ("github",          ("GITHUB_TOKEN",)),
+    "aws_":             ("aws",             ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")),
+    "qdrant_":          ("qdrant",          ("QDRANT_URL",)),
+    "elevenlabs_":      ("elevenlabs",      ("ELEVENLABS_API_KEY",)),
+    "serpapi_":         ("serpapi",         ("SERPAPI_API_KEY",)),
+    "gmail_":           ("google_workspace",("GMAIL_CLIENT_ID",)),
+    "google_drive_":    ("google_workspace",("GOOGLE_DRIVE_CLIENT_ID",)),
+    "microsoft_":       ("microsoft_graph", ("MICROSOFT_CLIENT_ID",)),
+    "onedrive_":        ("microsoft_graph", ("MICROSOFT_CLIENT_ID",)),
+    "nmap_":            ("nmap",            ("NMAP_PATH",)),
+    "zap_":             ("zap",             ("ZAP_API_KEY",)),
+}
+
+
+def _infer_integration(agent_name: str) -> tuple[str, tuple[str, ...]] | None:
+    """Return (integration_id, required_env_vars) inferred from agent name prefix, or None."""
+    name_lower = agent_name.lower()
+    for prefix, req in _INTEGRATION_REQUIREMENTS.items():
+        if name_lower.startswith(prefix):
+            return req
+    return None
+
+
 # Agents that are part of the orchestration infrastructure and must never
 # be offered as direct routing targets.
 _SYSTEM_AGENTS: frozenset[str] = frozenset({
@@ -79,6 +108,9 @@ class SkillCard:
     active_when: list[str] = field(default_factory=list)
     is_active: bool = True
     config_hint: str = ""
+    needs_config: bool = False
+    integration_id: str = ""
+    missing_vars: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         cat = self.category or "general"
@@ -92,6 +124,9 @@ class SkillCard:
             "category_emoji": cat_meta["emoji"],
             "skills": self.skills,
             "is_active": self.is_active,
+            "needs_config": self.needs_config,
+            "integration_id": self.integration_id,
+            "missing_vars": self.missing_vars,
             "config_hint": self.config_hint,
         }
 
@@ -142,6 +177,29 @@ class SkillRegistry:
         base = name[:-6] if name.endswith("_agent") else name
         default_display = base.replace("_", " ").title()
         active_when = list(meta.get("active_when") or [])
+        is_active = self._is_active(active_when)
+
+        integration_id = ""
+        missing_vars: list[str] = []
+        needs_config = False
+        config_hint = meta.get("config_hint", "")
+
+        inferred = _infer_integration(name)
+        if inferred:
+            int_id, required_vars = inferred
+            missing = [v for v in required_vars if not os.environ.get(v, "").strip()]
+            if missing:
+                needs_config = True
+                integration_id = int_id
+                missing_vars = list(missing)
+                if not config_hint:
+                    config_hint = (
+                        f"Requires {int_id} credentials. "
+                        f"Set {', '.join(missing)} in Setup & Config."
+                    )
+                if is_active and not active_when:
+                    is_active = False
+
         return SkillCard(
             agent_name=name,
             display_name=meta.get("display_name") or default_display,
@@ -150,8 +208,11 @@ class SkillRegistry:
             skills=list(agent.skills or []),
             intent_patterns=list(meta.get("intent_patterns") or []),
             active_when=active_when,
-            is_active=self._is_active(active_when),
-            config_hint=meta.get("config_hint", ""),
+            is_active=is_active,
+            config_hint=config_hint,
+            needs_config=needs_config,
+            integration_id=integration_id,
+            missing_vars=missing_vars,
         )
 
     def _index_card(self, card: SkillCard) -> None:
@@ -242,15 +303,18 @@ class SkillRegistry:
         return [c for c in self._cards if not c.is_active]
 
     def summary(self) -> dict:
-        active = sum(1 for c in self._cards if c.is_active)
+        active = sum(1 for c in self._cards if c.is_active and not c.needs_config)
+        needs_config = sum(1 for c in self._cards if c.needs_config)
+        inactive = sum(1 for c in self._cards if not c.is_active and not c.needs_config)
         by_cat: dict[str, int] = {}
         for c in self._cards:
-            if c.is_active:
+            if c.is_active and not c.needs_config:
                 by_cat[c.category] = by_cat.get(c.category, 0) + 1
         return {
             "total": len(self._cards),
             "active": active,
-            "inactive": len(self._cards) - active,
+            "needs_config": needs_config,
+            "inactive": inactive + needs_config,
             "by_category": by_cat,
         }
 
