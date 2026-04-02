@@ -4989,7 +4989,7 @@ function openSetupFor(integrationId, agentName) {
   body.innerHTML = `<div style="font-size:13px;color:var(--muted);margin-bottom:16px">${escHtml(meta.description)}</div>`
     + meta.fields.map(f => `
     <div style="margin-bottom:14px">
-      <label style="display:block;font-size:11px;font-weight:700;color:var(--teal);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">${escHtml(f.label)}${f.optional?' <span style=\\'color:var(--muted);font-weight:400\\'>optional</span>':''}</label>
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--teal);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">${escHtml(f.label)}${f.optional?' <span style="color:var(--muted);font-weight:400">optional</span>':''}</label>
       <div style="font-size:11px;color:var(--muted);margin-bottom:4px">${escHtml(f.description)}</div>
       <input id="cfg-field-${f.key}" type="${f.secret?'password':'text'}" placeholder="${f.key}"
         style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:12px;color:var(--text);font-family:${f.secret?'monospace':'inherit'};box-sizing:border-box;outline:none">
