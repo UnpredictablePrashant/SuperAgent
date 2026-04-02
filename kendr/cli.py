@@ -830,8 +830,8 @@ def _start_gateway_process() -> None:
 
 
 def _setup_ui_base_url() -> str:
-    host = os.getenv("SETUP_UI_HOST", "127.0.0.1")
-    port = int(os.getenv("SETUP_UI_PORT", "8787"))
+    host = os.getenv("KENDR_UI_HOST", "127.0.0.1")
+    port = int(os.getenv("KENDR_UI_PORT", "5000"))
     return f"http://{host}:{port}"
 
 
@@ -845,7 +845,7 @@ def _setup_ui_ready(timeout_seconds: float = 1.0) -> bool:
 
 def _start_setup_ui_process() -> None:
     subprocess.Popen(
-        [sys.executable, "-m", "kendr.cli", "setup", "ui"],
+        [sys.executable, "-m", "kendr.cli", "ui"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -854,7 +854,7 @@ def _start_setup_ui_process() -> None:
         if _setup_ui_ready(timeout_seconds=0.5):
             return
         time.sleep(0.25)
-    raise SystemExit(f"Setup UI did not become ready at {_setup_ui_base_url()}. Start it manually with: kendr setup ui")
+    raise SystemExit(f"Kendr UI did not become ready at {_setup_ui_base_url()}. Start it manually with: kendr ui")
 
 
 def _listener_pids_for_port(port: int) -> list[int]:
@@ -2099,7 +2099,7 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
     web_parser.add_argument("--port", type=int, default=0, help="Override port (default: KENDR_UI_PORT or 2151).")
     web_parser.add_argument("--host", default="", help="Override bind host.")
     web_parser.add_argument("--no-browser", action="store_true", help="Do not open a browser tab.")
-    subparsers.add_parser("setup-ui", help="Run the OAuth/setup UI.")
+    subparsers.add_parser("setup-ui", help="Launch the Kendr Web UI (alias for 'kendr ui').")
     ui_parser = subparsers.add_parser("ui", help="Launch the Kendr Web Chat & Config UI on port 2151.")
     command_parsers["ui"] = ui_parser
     ui_parser.add_argument("--port", type=int, default=0, help="Override port (default: KENDR_UI_PORT or 2151).")
@@ -2171,7 +2171,7 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
         help="Install only selected components.",
     )
 
-    setup_sub.add_parser("ui", help="Run the web-based setup UI.")
+    setup_sub.add_parser("ui", help="Launch the Kendr Web UI (alias for 'kendr ui').")
     setup_sub.add_parser("wizard", help="Interactive CLI wizard to configure integrations step-by-step.")
     setup_oauth = setup_sub.add_parser("oauth", help="Run OAuth login/connect flows for supported providers.")
     setup_oauth.add_argument("provider", choices=["google", "microsoft", "slack", "all"])
@@ -5940,14 +5940,14 @@ def _cmd_setup(args: argparse.Namespace) -> int:
                 if not missing:
                     continue
                 print(f"- {item}: missing {', '.join(missing)}")
-            print("Set these values in setup UI component pages or in .env, then retry.")
+            print("Set these values in the Kendr UI (Setup & Config) or in .env, then retry.")
             return 1
         if not _setup_ui_ready(timeout_seconds=0.8):
-            print(style.warn(f"Setup UI not detected at {base_url}; starting setup UI..."))
+            print(style.warn(f"Kendr UI not detected at {base_url}; starting it..."))
             _start_setup_ui_process()
 
         for item in providers:
-            url = f"{base_url}/oauth/{item}/start"
+            url = f"{base_url}/api/oauth/{item}/start"
             if bool(args.no_browser):
                 print(f"{item}: {url}")
                 continue
@@ -5995,10 +5995,9 @@ def _cmd_setup(args: argparse.Namespace) -> int:
         return _run_setup_wizard(style)
 
     if action == "ui":
-        from .setup_ui import main as setup_main
-
-        setup_main()
-        return 0
+        print(style.ok("Setup & Config is built into the main Kendr UI."))
+        print("Starting the main UI...")
+        return _cmd_ui(args)
 
     raise SystemExit(f"Unknown setup action: {action}")
 
@@ -6204,10 +6203,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "web":
             return _cmd_ui(args)
         if args.command == "setup-ui":
-            from .setup_ui import main as setup_main
-
-            setup_main()
-            return 0
+            return _cmd_ui(args)
         if args.command == "status":
             return _cmd_status(args)
         if args.command == "resume":
