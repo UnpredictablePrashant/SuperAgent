@@ -11,7 +11,7 @@ import tasks
 
 from .setup.catalog import channel_catalog, provider_catalog
 from .registry import Registry
-from .types import AgentDefinition, ChannelDefinition, PluginDefinition, PluginManifest, ProviderDefinition
+from .definitions import AgentDefinition, ChannelDefinition, PluginDefinition, PluginManifest, ProviderDefinition
 
 
 IGNORE_TASK_MODULES = {

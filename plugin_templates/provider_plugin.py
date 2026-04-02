@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from kendr.types import AgentDefinition, PluginManifest, ProviderDefinition
+from kendr.definitions import AgentDefinition, PluginManifest, ProviderDefinition
 
 
 PLUGIN = PluginManifest(
@@ -14,8 +14,8 @@ PLUGIN = PluginManifest(
     capabilities=["provider", "agent"],
     metadata={
         "stable_surfaces": [
-            "kendr.types.ProviderDefinition",
-            "kendr.types.AgentDefinition",
+            "kendr.definitions.ProviderDefinition",
+            "kendr.definitions.AgentDefinition",
             "register(registry)",
         ],
         "notes": (

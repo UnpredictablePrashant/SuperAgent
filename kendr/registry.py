@@ -4,7 +4,7 @@ from collections import OrderedDict
 
 from tasks.a2a_protocol import make_agent_card
 
-from .types import AgentDefinition, ChannelDefinition, PluginDefinition, ProviderDefinition
+from .definitions import AgentDefinition, ChannelDefinition, PluginDefinition, ProviderDefinition
 
 
 class Registry:

@@ -15,7 +15,7 @@ class PluginSdkTests(unittest.TestCase):
     def test_external_plugin_manifest_registers_agent_and_provider(self):
         plugin_source = textwrap.dedent(
             """
-            from kendr.types import AgentDefinition, PluginManifest, ProviderDefinition
+            from kendr.definitions import AgentDefinition, PluginManifest, ProviderDefinition
 
             PLUGIN = PluginManifest(
                 name="acme.test_plugin",

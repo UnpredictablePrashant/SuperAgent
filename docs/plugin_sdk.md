@@ -12,10 +12,10 @@ Stable SDK surface in `1.0`:
 - `register(registry)` as the default plugin entry point
 - plugin manifest metadata via `PLUGIN`
 - registration through:
-  - `kendr.types.AgentDefinition`
-  - `kendr.types.ProviderDefinition`
-  - `kendr.types.ChannelDefinition`
-  - `kendr.types.PluginManifest`
+  - `kendr.definitions.AgentDefinition`
+  - `kendr.definitions.ProviderDefinition`
+  - `kendr.definitions.ChannelDefinition`
+  - `kendr.definitions.PluginManifest`
 - runtime registry visibility through:
   - `kendr plugins list`
   - `kendr agents list`
@@ -60,13 +60,13 @@ Use these in your manifest so contributors and operators can see what your plugi
 
 You can declare `PLUGIN` as either:
 
-- a `kendr.types.PluginManifest`
+- a `kendr.definitions.PluginManifest`
 - a plain `dict`
 
 Recommended fields:
 
 ```python
-from kendr.types import PluginManifest
+from kendr.definitions import PluginManifest
 
 PLUGIN = PluginManifest(
     name="acme.example",
