@@ -15,7 +15,7 @@ from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
-from tasks.utils import llm
+from tasks.utils import llm, normalize_llm_text
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ def llm_text(prompt: str, *, max_retries: int = _LLM_MAX_RETRIES) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = llm.invoke(prompt)
-            return response.content.strip() if hasattr(response, "content") else str(response).strip()
+            return normalize_llm_text(response.content if hasattr(response, "content") else response).strip()
         except Exception as exc:
             last_exc = exc
             if attempt >= max_retries or not _is_transient_error(exc):

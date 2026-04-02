@@ -451,7 +451,7 @@ Do NOT repeat raw search result text verbatim — synthesize and paraphrase.
     try:
         if model and model.strip():
             response = _client_for_model(model.strip()).invoke(prompt)
-            synthesis = response.content.strip() if hasattr(response, "content") else str(response).strip()
+            synthesis = normalize_llm_text(response.content if hasattr(response, "content") else response).strip()
         else:
             synthesis = llm_text(prompt)
         return synthesis.strip()

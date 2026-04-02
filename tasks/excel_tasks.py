@@ -8,7 +8,7 @@ from xml.etree import ElementTree as ET
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.research_infra import parse_document
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file, normalize_llm_text
 
 
 XML_NS = {
@@ -247,7 +247,7 @@ def _interpret_summary_with_llm(objective: str, workbook_text: str, analysis_que
     Return a clear, practical analysis. Mention important patterns, anomalies, and recommended next checks when useful.
     """
     response = llm.invoke(prompt)
-    return response.content.strip() if hasattr(response, "content") else str(response).strip()
+    return normalize_llm_text(response.content if hasattr(response, "content") else response).strip()
 
 
 def excel_agent(state):

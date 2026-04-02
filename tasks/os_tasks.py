@@ -13,7 +13,7 @@ from tasks.privileged_control import (
     ensure_command_allowed,
     redact_sensitive_text,
 )
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_task_update, normalize_llm_text, write_text_file
 
 
 AGENT_METADATA = {
@@ -140,7 +140,7 @@ def _build_command_from_request(user_query: str, target_os: str) -> tuple[str, s
     TimeoutSeconds: integer
     """
     response = llm.invoke(prompt)
-    raw_output = response.content.strip() if hasattr(response, "content") else str(response).strip()
+    raw_output = normalize_llm_text(response.content if hasattr(response, "content") else response).strip()
 
     thought = "Generated a command from the user request."
     command = ""
@@ -489,7 +489,7 @@ STEP 2
 ...
 """
     response = llm.invoke(prompt)
-    raw = response.content.strip() if hasattr(response, "content") else str(response).strip()
+    raw = normalize_llm_text(response.content if hasattr(response, "content") else response).strip()
 
     steps = []
     current: dict = {}

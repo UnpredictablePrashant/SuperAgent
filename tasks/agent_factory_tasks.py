@@ -135,7 +135,7 @@ Return a concise but useful result for the requested work. If external setup is 
 """.strip()
 
     response = llm.invoke(prompt)
-    output_text = response.content if hasattr(response, "content") else str(response)
+    output_text = normalize_llm_text(response.content if hasattr(response, "content") else response)
     state["{primary_output_key}"] = output_text
     state["draft_response"] = output_text
     write_text_file("{function_name}_output_" + str(call_number) + ".txt", output_text)
@@ -170,7 +170,7 @@ def agent_factory_agent(state):
 
     prompt = _build_factory_prompt(request_text, missing_capability, existing_agents)
     response = llm.invoke(prompt)
-    raw_output = response.content if hasattr(response, "content") else str(response)
+    raw_output = normalize_llm_text(response.content if hasattr(response, "content") else response)
 
     try:
         spec = _parse_factory_output(raw_output)

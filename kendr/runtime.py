@@ -3485,7 +3485,13 @@ Return ONLY valid JSON in this exact schema:
             app = self.build_workflow()
             self.save_graph(app)
             result = app.invoke(initial_state)
-            final_output = result.get("final_output") or result.get("draft_response", "")
+            _fo_raw = result.get("final_output") or result.get("draft_response", "")
+            final_output = _fo_raw if isinstance(_fo_raw, str) else (
+                "\n".join(
+                    (b.get("text", "") if isinstance(b, dict) else str(b))
+                    for b in _fo_raw
+                ) if isinstance(_fo_raw, list) else str(_fo_raw or "")
+            )
             if create_outputs:
                 write_text_file("final_output.txt", final_output)
             completed_at = datetime.now(timezone.utc).isoformat()

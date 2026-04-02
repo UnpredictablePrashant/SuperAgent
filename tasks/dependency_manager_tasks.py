@@ -16,7 +16,7 @@ from tasks.privileged_control import (
     build_privileged_policy,
     ensure_command_allowed,
 )
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_task_update, write_text_file, normalize_llm_text
 
 
 AGENT_METADATA = {
@@ -224,7 +224,7 @@ Diagnose the root cause and provide:
 Be concise and actionable.
 """.strip()
     response = llm.invoke(prompt)
-    return response.content if hasattr(response, "content") else str(response)
+    return normalize_llm_text(response.content if hasattr(response, "content") else response)
 
 
 def dependency_manager_agent(state):

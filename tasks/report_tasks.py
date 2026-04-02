@@ -149,7 +149,7 @@ def _build_report_structure(requirement_text: str, context: dict, title: str, ta
     {json.dumps(context, indent=2, ensure_ascii=False)}
     """
     response = llm.invoke(prompt)
-    raw_output = response.content.strip() if hasattr(response, "content") else str(response).strip()
+    raw_output = normalize_llm_text(response.content if hasattr(response, "content") else response).strip()
 
     try:
         data = json.loads(_strip_code_fences(raw_output))

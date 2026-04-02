@@ -206,11 +206,28 @@ def log_file_action(action: str, path: str) -> None:
     logger.info(f"[files] {action}: {path}")
 
 
-def write_text_file(filename: str, content: str):
+def normalize_llm_response(response) -> str:
+    """Safely extract a plain string from any LangChain LLM response.
+
+    Some providers (Claude, Gemini, etc.) return ``response.content`` as a
+    list of typed content blocks rather than a plain string.  This wrapper
+    extracts the content field and delegates to :func:`normalize_llm_text`
+    which already handles all known shapes (str, list[str], list[dict], …).
+    """
+    content = response.content if hasattr(response, "content") else response
+    return normalize_llm_text(content)
+
+
+def _to_str(content) -> str:
+    """Ensure content is a str; delegates to normalize_llm_text."""
+    return normalize_llm_text(content)
+
+
+def write_text_file(filename: str, content):
     filepath = resolve_output_path(filename)
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "w", encoding="utf-8") as f:
-        f.write(content)
+        f.write(_to_str(content))
     log_file_action("wrote", filepath)
 
 
@@ -222,21 +239,21 @@ def write_binary_file(filename: str, content: bytes):
     log_file_action("wrote", filepath)
 
 
-def append_text_file(filename: str, content: str):
+def append_text_file(filename: str, content):
     filepath = resolve_output_path(filename)
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "a", encoding="utf-8") as f:
-        f.write(content)
+        f.write(_to_str(content))
 
 
-def reset_text_file(filename: str, content: str = ""):
+def reset_text_file(filename: str, content=""):
     filepath = resolve_output_path(filename)
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "w", encoding="utf-8") as f:
-        f.write(content)
+        f.write(_to_str(content))
 
 
-def record_work_note(state: dict | None, actor: str, stage: str, details: str):
+def record_work_note(state: dict | None, actor: str, stage: str, details):
     filename = "agent_work_notes.txt"
     if state and state.get("work_notes_file"):
         filename = state["work_notes_file"]
@@ -245,6 +262,6 @@ def record_work_note(state: dict | None, actor: str, stage: str, details: str):
     run_id = state.get("run_id", "no-run-id") if state else "no-run-id"
     note = (
         f"[{timestamp}] run={run_id} actor={actor} stage={stage}\n"
-        f"{details.strip()}\n\n"
+        f"{_to_str(details).strip()}\n\n"
     )
     append_text_file(filename, note)

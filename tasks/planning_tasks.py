@@ -440,7 +440,7 @@ Return ONLY valid JSON in this exact schema (no extra fields, no markdown, no ex
 """.strip()
 
     response = llm.invoke(prompt)
-    raw_plan = response.content if hasattr(response, "content") else str(response)
+    raw_plan = normalize_llm_text(response.content if hasattr(response, "content") else response)
     try:
         parsed_plan = json.loads(_strip_code_fences(raw_plan))
     except Exception:

@@ -595,7 +595,7 @@ def master_coding_agent(state):
         setup_actions=setup_actions if isinstance(setup_actions, list) else [],
     )
     response = llm.invoke(prompt)
-    raw_output = response.content if hasattr(response, "content") else str(response)
+    raw_output = normalize_llm_text(response.content if hasattr(response, "content") else response)
 
     try:
         result = _parse_master_coding_output(raw_output)

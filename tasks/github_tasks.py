@@ -121,7 +121,7 @@ Task: {task}
 File path:"""
     try:
         response = llm.invoke(prompt)
-        raw = response.content if hasattr(response, "content") else str(response)
+        raw = normalize_llm_text(response.content if hasattr(response, "content") else response)
         path = normalize_llm_text(raw).strip().strip('"\'`').strip()
         if "\n" in path or len(path) > 200 or not path:
             return ""
@@ -209,7 +209,7 @@ Rules:
 """.strip()
 
     response = llm.invoke(prompt)
-    raw = response.content if hasattr(response, "content") else str(response)
+    raw = normalize_llm_text(response.content if hasattr(response, "content") else response)
     cleaned = _strip_fences(raw)
     try:
         plan = json.loads(cleaned)
@@ -244,7 +244,7 @@ Instructions:
 - No explanation, no markdown fences, no surrounding text.
 """.strip()
     response = llm.invoke(prompt)
-    raw = response.content if hasattr(response, "content") else str(response)
+    raw = normalize_llm_text(response.content if hasattr(response, "content") else response)
     return normalize_llm_text(raw).strip()
 
 

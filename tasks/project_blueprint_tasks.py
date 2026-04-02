@@ -691,7 +691,7 @@ def project_blueprint_agent(state):
     # Generate blueprint via LLM
     prompt = _build_blueprint_prompt(description, stack_template, available_stack_names)
     response = llm.invoke(prompt)
-    raw_output = response.content if hasattr(response, "content") else str(response)
+    raw_output = normalize_llm_text(response.content if hasattr(response, "content") else response)
 
     # Parse
     try:

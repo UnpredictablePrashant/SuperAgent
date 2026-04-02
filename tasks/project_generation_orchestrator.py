@@ -53,9 +53,9 @@ def resolve_stack_name(stack: str) -> str:
 
 def _llm_call(prompt: str, model: str | None = None) -> str:
     """Call the configured LLM and return the text response."""
-    from tasks.utils import llm
+    from tasks.utils import llm, normalize_llm_text
     response = llm.invoke(prompt)
-    return response.content if hasattr(response, "content") else str(response)
+    return normalize_llm_text(response.content if hasattr(response, "content") else response)
 
 
 def _strip_fences(text: str) -> str:

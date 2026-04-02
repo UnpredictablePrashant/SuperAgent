@@ -121,7 +121,7 @@ def _strip_fences(text: str) -> str:
 
 def _llm_call(prompt: str) -> str:
     response = llm.invoke(prompt)
-    raw = response.content if hasattr(response, "content") else str(response)
+    raw = normalize_llm_text(response.content if hasattr(response, "content") else response)
     return normalize_llm_text(raw).strip()
 
 

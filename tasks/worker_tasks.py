@@ -1,5 +1,5 @@
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output, recent_messages_for_agent
-from tasks.utils import OUTPUT_DIR, llm, log_task_update, logger, write_text_file
+from tasks.utils import OUTPUT_DIR, llm, log_task_update, logger, normalize_llm_response, write_text_file
 
 def worker_agent(state):
     active_task, task_content, _ = begin_agent_session(state, "worker_agent")
@@ -48,7 +48,7 @@ def worker_agent(state):
     """
     response=llm.invoke(prompt)
 
-    draft_response=response.content if hasattr(response, "content") else str(response)
+    draft_response=normalize_llm_response(response)
 
     state['draft_response']=draft_response
 

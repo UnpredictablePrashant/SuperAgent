@@ -132,7 +132,7 @@ def reviewer_agent(state):
     }}
     """
     response=llm.invoke(prompt)
-    raw_output=response.content.strip() if hasattr(response, "content") else str(response)
+    raw_output=normalize_llm_text(response.content if hasattr(response, "content") else response).strip()
 
     try:
         review_data = _parse_review_output(raw_output)

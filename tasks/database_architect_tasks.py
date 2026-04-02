@@ -65,7 +65,7 @@ Technical context:
 Return ONLY the file content. No explanation, no markdown fences.
 """.strip()
     response = llm.invoke(prompt)
-    raw = response.content if hasattr(response, "content") else str(response)
+    raw = normalize_llm_text(response.content if hasattr(response, "content") else response)
     return _strip_code_fences(raw).strip() + "\n"
 
 
