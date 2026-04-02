@@ -2241,6 +2241,12 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
     ollama_rm.add_argument("model_name", help="Model name to remove.")
     ollama_run = model_ollama_sub.add_parser("run", help="Run Ollama with a model (interactive session).")
     ollama_run.add_argument("model_name", nargs="?", default="", help="Model to run (default: configured OLLAMA_MODEL).")
+    ollama_docker = model_ollama_sub.add_parser("docker", help="Manage the Ollama Docker container (start/stop/status).")
+    ollama_docker_sub = ollama_docker.add_subparsers(dest="docker_action", required=True)
+    ollama_docker_start = ollama_docker_sub.add_parser("start", help="Start Ollama via Docker (CPU by default).")
+    ollama_docker_start.add_argument("--gpu", action="store_true", help="Use GPU (NVIDIA) — passes --gpus=all to Docker.")
+    ollama_docker_sub.add_parser("stop", help="Stop and remove the kendr-ollama Docker container.")
+    ollama_docker_sub.add_parser("status", help="Show the kendr-ollama Docker container status.")
 
     resume_parser = subparsers.add_parser("resume", help="Inspect or resume a persisted run from an output folder.")
     command_parsers["resume"] = resume_parser
@@ -5644,6 +5650,94 @@ def _cmd_model(args: argparse.Namespace) -> int:
             except FileNotFoundError:
                 print(style.fail("  'ollama' command not found. Install from ollama.ai."))
                 return 1
+
+        if ollama_action == "docker":
+            docker_action = str(getattr(args, "docker_action", "status")).strip().lower()
+            container = "kendr-ollama"
+            image = "ollama/ollama"
+
+            def _docker_available() -> bool:
+                try:
+                    r = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+                    return r.returncode == 0
+                except Exception:
+                    return False
+
+            if docker_action == "status":
+                if not _docker_available():
+                    print(style.warn("  Docker is not running or not installed."))
+                    return 1
+                try:
+                    r = subprocess.run(
+                        ["docker", "inspect", container],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if r.returncode != 0:
+                        print(style.warn(f"  Container '{container}' does not exist."))
+                        print(f"  Start it with: kendr model ollama docker start")
+                        return 0
+                    import json as _json
+                    data = _json.loads(r.stdout)
+                    c = data[0]
+                    running = c.get("State", {}).get("Running", False)
+                    host_cfg = c.get("HostConfig", {})
+                    gpu = bool((host_cfg.get("DeviceRequests") or []))
+                    print(style.heading("\n  Ollama Docker Container"))
+                    print(f"  Container : {container}")
+                    print(f"  Status    : " + (style.ok("running") if running else style.fail("stopped")))
+                    print(f"  Mode      : " + ("GPU (NVIDIA)" if gpu else "CPU"))
+                    print(f"  Port      : 11434")
+                    print(f"  Image     : {c.get('Config', {}).get('Image', image)}")
+                    return 0
+                except Exception as exc:
+                    print(style.fail(f"  Error: {exc}"))
+                    return 1
+
+            if docker_action == "start":
+                gpu = bool(getattr(args, "gpu", False))
+                if not _docker_available():
+                    print(style.fail("  Docker is not running or not installed."))
+                    return 1
+                print(f"  Stopping any existing '{container}' container...")
+                subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=15)
+                cmd = ["docker", "run", "-d"]
+                if gpu:
+                    cmd += ["--gpus=all"]
+                cmd += ["--name", container, "-p", "11434:11434",
+                        "-v", "ollama:/root/.ollama", image]
+                mode = "GPU" if gpu else "CPU"
+                print(f"  Starting Ollama Docker container ({mode}) ...")
+                print(f"  Command: {' '.join(cmd)}")
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    if r.returncode == 0:
+                        print(style.ok(f"\n  Container started! Ollama is now running on port 11434."))
+                        print(f"  Pull a model: kendr model ollama pull llama3.2")
+                        return 0
+                    else:
+                        err = r.stderr.strip() or r.stdout.strip() or "Start failed"
+                        if "image" in err.lower() and "pull" in err.lower():
+                            print(style.warn("  Pulling ollama/ollama image from Docker Hub..."))
+                        print(style.fail(f"  {err}"))
+                        return 1
+                except subprocess.TimeoutExpired:
+                    print(style.warn("  Timed out — image may still be pulling in background."))
+                    return 1
+                except Exception as exc:
+                    print(style.fail(f"  Error: {exc}"))
+                    return 1
+
+            if docker_action == "stop":
+                if not _docker_available():
+                    print(style.fail("  Docker is not running or not installed."))
+                    return 1
+                print(f"  Stopping container '{container}'...")
+                subprocess.run(["docker", "stop", container], capture_output=True, timeout=30)
+                subprocess.run(["docker", "rm", container], capture_output=True, timeout=15)
+                print(style.ok(f"  Container '{container}' stopped and removed."))
+                return 0
+
+            raise SystemExit(f"Unknown docker action: {docker_action}")
 
         raise SystemExit(f"Unknown ollama action: {ollama_action}")
 

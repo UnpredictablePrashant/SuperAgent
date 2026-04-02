@@ -3975,11 +3975,43 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <!-- Ollama section -->
   <div class="section-title" id="ollamaTitle">&#x1F4BB; Ollama &mdash; Local Models</div>
   <div class="ollama-box" id="ollamaBox">
+    <!-- Server status row -->
     <div class="ollama-status" id="ollamaStatus">
       <div class="dot red" id="ollamaDot"></div>
       <span id="ollamaStatusText">Checking...</span>
       <span style="margin-left:auto;font-size:11px;color:var(--muted)">localhost:11434</span>
     </div>
+
+    <!-- Docker control panel -->
+    <div id="dockerPanel" style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="font-size:13px;font-weight:700">&#x1F433; Docker Container</span>
+        <span id="dockerStatusBadge" style="font-size:11px;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.08);color:var(--muted)">checking...</span>
+        <span id="dockerModeBadge" style="display:none;font-size:11px;padding:2px 8px;border-radius:999px"></span>
+      </div>
+      <div id="dockerContainerInfo" style="font-size:11px;color:var(--muted);margin-bottom:10px;display:none"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button id="dockerStartCpuBtn" onclick="dockerStart(false)"
+          style="background:rgba(0,201,167,.12);color:var(--teal);border:1px solid rgba(0,201,167,.3);border-radius:7px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer">
+          &#x25B6; Start (CPU)
+        </button>
+        <button id="dockerStartGpuBtn" onclick="dockerStart(true)"
+          style="background:rgba(139,92,246,.12);color:#a78bfa;border:1px solid rgba(139,92,246,.3);border-radius:7px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer">
+          &#x26A1; Start (GPU)
+        </button>
+        <button id="dockerStopBtn" onclick="dockerStop()" style="display:none;background:rgba(239,68,68,.12);color:#f87171;border:1px solid rgba(239,68,68,.3);border-radius:7px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer">
+          &#x25A0; Stop Container
+        </button>
+      </div>
+      <div id="dockerActionStatus" style="font-size:11px;color:var(--muted);margin-top:8px"></div>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)">
+        CLI: <code style="background:var(--surface);padding:1px 5px;border-radius:3px">kendr model ollama docker start</code> &nbsp;|&nbsp;
+        <code style="background:var(--surface);padding:1px 5px;border-radius:3px">kendr model ollama docker start --gpu</code> &nbsp;|&nbsp;
+        <code style="background:var(--surface);padding:1px 5px;border-radius:3px">kendr model ollama docker stop</code>
+      </div>
+    </div>
+
+    <!-- Installed models -->
     <div id="ollamaModelsArea">
       <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Installed models:</div>
       <div class="ollama-models-list" id="ollamaModelsList"></div>
@@ -3989,9 +4021,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
       <button class="pull-btn" onclick="pullOllamaModel()">&#x2193; Pull Model</button>
     </div>
     <div class="pull-status" id="pullStatus"></div>
-    <div style="margin-top:10px;font-size:11px;color:var(--muted)">
-      Not installed? <a href="https://ollama.ai" target="_blank" style="color:var(--teal)">Download Ollama</a>, then run <code style="background:var(--surface2);padding:1px 5px;border-radius:3px">ollama serve</code> to start the server.
-    </div>
   </div>
 </main>
 
@@ -4119,7 +4148,7 @@ function renderProviders(d) {
 function renderOllama(d) {
   const running = d.ollama_running;
   document.getElementById('ollamaDot').className = 'dot ' + (running ? 'green' : 'red');
-  document.getElementById('ollamaStatusText').textContent = running ? 'Running' : 'Not running — start with: ollama serve';
+  document.getElementById('ollamaStatusText').textContent = running ? 'Running \u2714' : 'Not running \u2014 use Docker below or run: ollama serve';
   const models = d.ollama_models || [];
   const list = document.getElementById('ollamaModelsList');
   if (models.length === 0) {
@@ -4132,6 +4161,99 @@ function renderOllama(d) {
        </div>`
     ).join('');
   }
+  loadDockerStatus();
+}
+
+async function loadDockerStatus() {
+  try {
+    const d = await fetch('/api/models/ollama/docker/status').then(r => r.json());
+    renderDockerStatus(d);
+  } catch(e) {
+    document.getElementById('dockerStatusBadge').textContent = 'docker unavailable';
+  }
+}
+
+function renderDockerStatus(d) {
+  const badge = document.getElementById('dockerStatusBadge');
+  const modeBadge = document.getElementById('dockerModeBadge');
+  const infoEl = document.getElementById('dockerContainerInfo');
+  const startCpu = document.getElementById('dockerStartCpuBtn');
+  const startGpu = document.getElementById('dockerStartGpuBtn');
+  const stopBtn = document.getElementById('dockerStopBtn');
+
+  if (d.running) {
+    badge.textContent = 'running';
+    badge.style.background = 'rgba(0,201,167,.15)';
+    badge.style.color = 'var(--teal)';
+    const gpu = d.gpu;
+    modeBadge.style.display = 'inline';
+    modeBadge.textContent = gpu ? '\u26A1 GPU' : '\uD83D\uDCBB CPU';
+    modeBadge.style.background = gpu ? 'rgba(139,92,246,.15)' : 'rgba(255,255,255,.06)';
+    modeBadge.style.color = gpu ? '#a78bfa' : 'var(--muted)';
+    infoEl.style.display = 'block';
+    infoEl.textContent = 'Container: ' + (d.name || 'kendr-ollama') + '  \u00b7  Port: 11434  \u00b7  Image: ' + (d.image || 'ollama/ollama');
+    startCpu.style.display = 'none';
+    startGpu.style.display = 'none';
+    stopBtn.style.display = 'inline-block';
+  } else {
+    badge.textContent = d.docker_available ? 'stopped' : 'docker not found';
+    badge.style.background = 'rgba(255,255,255,.06)';
+    badge.style.color = 'var(--muted)';
+    modeBadge.style.display = 'none';
+    infoEl.style.display = 'none';
+    startCpu.style.display = 'inline-block';
+    startGpu.style.display = 'inline-block';
+    stopBtn.style.display = 'none';
+  }
+}
+
+async function dockerStart(gpu) {
+  const statusEl = document.getElementById('dockerActionStatus');
+  const startCpu = document.getElementById('dockerStartCpuBtn');
+  const startGpu = document.getElementById('dockerStartGpuBtn');
+  statusEl.textContent = (gpu ? '\u26A1 Starting with GPU...' : '\u25B6 Starting with CPU...') + ' (pulling image if needed, ~30s)';
+  startCpu.disabled = true;
+  startGpu.disabled = true;
+  try {
+    const r = await fetch('/api/models/ollama/docker/start', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ gpu })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      statusEl.textContent = '\u2714 Container started! Ollama is now running on port 11434.';
+      showToast('\u2714 Ollama Docker container started');
+      await loadModels();
+    } else {
+      statusEl.textContent = '\u274C ' + (d.error || 'Start failed');
+    }
+  } catch(e) {
+    statusEl.textContent = '\u274C Error: ' + e.message;
+  }
+  startCpu.disabled = false;
+  startGpu.disabled = false;
+}
+
+async function dockerStop() {
+  const statusEl = document.getElementById('dockerActionStatus');
+  const stopBtn = document.getElementById('dockerStopBtn');
+  statusEl.textContent = 'Stopping container...';
+  stopBtn.disabled = true;
+  try {
+    const r = await fetch('/api/models/ollama/docker/stop', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      statusEl.textContent = '\u2714 Container stopped.';
+      showToast('\u25A0 Ollama Docker container stopped');
+      await loadModels();
+    } else {
+      statusEl.textContent = '\u274C ' + (d.error || 'Stop failed');
+    }
+  } catch(e) {
+    statusEl.textContent = '\u274C Error: ' + e.message;
+  }
+  stopBtn.disabled = false;
 }
 
 async function setActive(provider, model) {
@@ -5477,6 +5599,9 @@ strong { color: var(--text); }
             except Exception as exc:
                 self._json(500, {"error": str(exc)})
             return
+        if path == "/api/models/ollama/docker/status":
+            self._handle_ollama_docker_status()
+            return
         if path == "/api/skills":
             try:
                 data = _gateway_get("/registry/skills", timeout=5.0)
@@ -5757,6 +5882,12 @@ strong { color: var(--text); }
             return
         if path == "/api/models/ollama/pull":
             self._handle_ollama_pull(body)
+            return
+        if path == "/api/models/ollama/docker/start":
+            self._handle_ollama_docker_start(body)
+            return
+        if path == "/api/models/ollama/docker/stop":
+            self._handle_ollama_docker_stop()
             return
         if path == "/api/setup/save":
             self._handle_setup_save(body)
@@ -6149,6 +6280,102 @@ strong { color: var(--text); }
                 self._json(500, {"error": proc.stderr.strip() or "Pull failed"})
         except FileNotFoundError:
             self._json(503, {"error": "ollama not found — install from ollama.ai"})
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
+
+    _OLLAMA_CONTAINER = "kendr-ollama"
+    _OLLAMA_IMAGE = "ollama/ollama"
+
+    def _docker_available(self) -> bool:
+        import subprocess
+        try:
+            r = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def _ollama_container_info(self) -> dict:
+        import subprocess, json as _json
+        try:
+            r = subprocess.run(
+                ["docker", "inspect", self._OLLAMA_CONTAINER],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode != 0:
+                return {"running": False, "docker_available": True}
+            data = _json.loads(r.stdout)
+            if not data:
+                return {"running": False, "docker_available": True}
+            c = data[0]
+            running = c.get("State", {}).get("Running", False)
+            env = c.get("Config", {}).get("Env", [])
+            gpu = any("NVIDIA" in e or "gpu" in e.lower() for e in env)
+            # also check HostConfig for GPU
+            host_cfg = c.get("HostConfig", {})
+            device_requests = host_cfg.get("DeviceRequests") or []
+            if device_requests:
+                gpu = True
+            return {
+                "running": running,
+                "docker_available": True,
+                "gpu": gpu,
+                "name": self._OLLAMA_CONTAINER,
+                "image": c.get("Config", {}).get("Image", self._OLLAMA_IMAGE),
+            }
+        except FileNotFoundError:
+            return {"running": False, "docker_available": False}
+        except Exception:
+            return {"running": False, "docker_available": True}
+
+    def _handle_ollama_docker_status(self) -> None:
+        if not self._docker_available():
+            self._json(200, {"running": False, "docker_available": False})
+            return
+        self._json(200, self._ollama_container_info())
+
+    def _handle_ollama_docker_start(self, body: dict) -> None:
+        import subprocess
+        gpu = bool(body.get("gpu", False))
+        if not self._docker_available():
+            self._json(503, {"error": "Docker is not running or not installed"})
+            return
+        # Stop any existing container with the same name first
+        subprocess.run(
+            ["docker", "rm", "-f", self._OLLAMA_CONTAINER],
+            capture_output=True, timeout=15,
+        )
+        cmd = ["docker", "run", "-d", "--name", self._OLLAMA_CONTAINER,
+               "-p", "11434:11434",
+               "-v", "ollama:/root/.ollama"]
+        if gpu:
+            cmd = ["docker", "run", "-d", "--gpus=all",
+                   "--name", self._OLLAMA_CONTAINER,
+                   "-p", "11434:11434",
+                   "-v", "ollama:/root/.ollama"]
+        cmd.append(self._OLLAMA_IMAGE)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                self._json(200, {"ok": True, "gpu": gpu, "container": self._OLLAMA_CONTAINER})
+            else:
+                err = r.stderr.strip() or r.stdout.strip() or "Start failed"
+                self._json(500, {"error": err})
+        except subprocess.TimeoutExpired:
+            self._json(500, {"error": "Docker start timed out — image may still be pulling"})
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
+
+    def _handle_ollama_docker_stop(self) -> None:
+        import subprocess
+        if not self._docker_available():
+            self._json(503, {"error": "Docker is not running or not installed"})
+            return
+        try:
+            subprocess.run(["docker", "stop", self._OLLAMA_CONTAINER],
+                           capture_output=True, timeout=30)
+            subprocess.run(["docker", "rm", self._OLLAMA_CONTAINER],
+                           capture_output=True, timeout=15)
+            self._json(200, {"ok": True})
         except Exception as exc:
             self._json(500, {"error": str(exc)})
 
