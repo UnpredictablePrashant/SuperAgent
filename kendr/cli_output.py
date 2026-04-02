@@ -241,6 +241,13 @@ def gateway_started(base_url: str) -> None:
     _console.print(text)
 
 
+def gateway_restarted(base_url: str) -> None:
+    text = Text()
+    text.append("✓ Gateway restarted  ", style=f"bold {_TEAL}")
+    text.append(base_url, style=f"underline {_BLUE}")
+    _console.print(text)
+
+
 def gateway_already_running(base_url: str) -> None:
     _console.print(
         Text(f"  Gateway already running at {base_url} — nothing to do.", style=_AMBER)

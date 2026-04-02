@@ -91,3 +91,8 @@ Thumbs.db
 
 # User-uploaded and pasted assets (not source code)
 attached_assets/
+
+
+.codex
+.kendr
+.venv-ci/

@@ -45,3 +45,5 @@ credentials/
 .azure/
 .gcp/
 graph.png
+.codex
+.kendr

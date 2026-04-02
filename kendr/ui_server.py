@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import cgi
 import html as _html
 import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import traceback
@@ -13,6 +15,7 @@ import urllib.error
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 from urllib.parse import parse_qs, urlparse
 
 _log = logging.getLogger("kendr.ui")
@@ -31,10 +34,12 @@ try:
         cleanup_stale_runs as _db_cleanup_stale_runs,
         delete_chat_session as _db_delete_chat_session,
         delete_run as _db_delete_run,
+        get_channel_session as _db_get_channel_session,
         list_agent_executions_for_run as _list_run_steps,
         list_artifacts_for_run as _list_run_artifacts,
         list_run_messages as _db_list_run_messages,
         get_run as _db_get_run,
+        upsert_channel_session as _db_upsert_channel_session,
     )
     _HAS_PERSISTENCE = True
 except Exception:
@@ -45,6 +50,8 @@ except Exception:
         return {"deleted_runs": [], "deleted_dirs": [], "errors": []}
     def _db_delete_run(run_id, **kw):  # type: ignore[misc]
         return {"ok": True, "deleted_run": run_id, "errors": []}
+    def _db_get_channel_session(session_key, **kw):  # type: ignore[misc]
+        return None
     def _list_run_steps(run_id):  # type: ignore[misc]
         return []
     def _list_run_artifacts(run_id):  # type: ignore[misc]
@@ -52,6 +59,8 @@ except Exception:
     def _db_list_run_messages(run_id, **kw):  # type: ignore[misc]
         return []
     def _db_get_run(run_id):  # type: ignore[misc]
+        return None
+    def _db_upsert_channel_session(session_key, payload, **kw):  # type: ignore[misc]
         return None
 
 try:
@@ -84,6 +93,39 @@ except Exception:
 _UI_PORT = int(os.getenv("KENDR_UI_PORT", "2151"))
 _UI_HOST = os.getenv("KENDR_UI_HOST", "127.0.0.1")
 
+
+def _configure_ui_logging() -> str:
+    log_path = str(os.getenv("KENDR_UI_LOG_PATH", "") or "").strip()
+    if not log_path:
+        return ""
+
+    resolved = os.path.abspath(os.path.expanduser(log_path))
+    os.makedirs(os.path.dirname(resolved), exist_ok=True)
+    root_logger = logging.getLogger()
+    if not any(
+        isinstance(handler, RotatingFileHandler)
+        and os.path.abspath(getattr(handler, "baseFilename", "")) == resolved
+        for handler in root_logger.handlers
+    ):
+        max_bytes = int(str(os.getenv("KENDR_UI_LOG_MAX_BYTES", "2097152") or "2097152"))
+        backup_count = int(str(os.getenv("KENDR_UI_LOG_BACKUP_COUNT", "3") or "3"))
+        handler = RotatingFileHandler(
+            resolved,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+        )
+        root_logger.addHandler(handler)
+
+    level_name = str(os.getenv("KENDR_LOG_LEVEL", "info") or "info").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root_logger.setLevel(level)
+    _log.setLevel(level)
+    return resolved
+
 try:
     from kendr.mcp_manager import (
         list_servers_safe as _mcp_list_servers,
@@ -112,6 +154,11 @@ try:
         read_file_tree as _pm_file_tree,
         read_file_content as _pm_read_file,
         run_shell as _pm_shell,
+        list_project_services as _pm_list_services,
+        start_project_service as _pm_start_service,
+        stop_project_service as _pm_stop_service,
+        restart_project_service as _pm_restart_service,
+        read_project_service_log as _pm_read_service_log,
         git_status as _pm_git_status,
         git_pull as _pm_git_pull,
         git_push as _pm_git_push,
@@ -169,6 +216,228 @@ def _gateway_ready(timeout: float = 1.0) -> bool:
             return resp.status == 200
     except Exception:
         return False
+
+
+def _safe_upload_path_component(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._ -]+", "_", str(value or "").strip()).strip(" .")
+    return cleaned[:120] or "item"
+
+
+def _sanitize_relative_upload_path(value: str, fallback_name: str) -> str:
+    raw = str(value or "").replace("\\", "/").strip("/")
+    parts = []
+    for item in raw.split("/"):
+        cleaned = str(item or "").strip()
+        if not cleaned or cleaned in {".", ".."}:
+            continue
+        parts.append(_safe_upload_path_component(cleaned))
+    if not parts:
+        parts = [_safe_upload_path_component(fallback_name or "upload.bin")]
+    return os.path.join(*parts)
+
+
+def _deep_research_upload_root(chat_id: str) -> str:
+    safe_chat = _safe_upload_path_component(chat_id or "default-chat")
+    root = os.path.abspath(os.path.join("output", "ui_deep_research_uploads", safe_chat))
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _save_deep_research_upload_batch(
+    *,
+    chat_id: str,
+    files: list[tuple[str, bytes]],
+    relative_paths: list[str] | None = None,
+) -> dict:
+    batch_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    batch_dir = os.path.join(_deep_research_upload_root(chat_id), batch_id)
+    os.makedirs(batch_dir, exist_ok=True)
+    saved_files = []
+    relative_paths = list(relative_paths or [])
+    for index, (filename, data) in enumerate(files, start=1):
+        preferred_rel = relative_paths[index - 1] if index - 1 < len(relative_paths) else filename
+        safe_rel = _sanitize_relative_upload_path(preferred_rel, filename)
+        dest = os.path.join(batch_dir, safe_rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as fh:
+            fh.write(data)
+        saved_files.append(
+            {
+                "name": os.path.basename(dest),
+                "relative_path": safe_rel.replace("\\", "/"),
+                "path": dest,
+                "size": len(data),
+            }
+        )
+    return {
+        "upload_root": batch_dir,
+        "file_count": len(saved_files),
+        "saved_files": saved_files,
+        "kind": "folder" if any("/" in item.get("relative_path", "") for item in saved_files) else "files",
+    }
+
+
+def _project_chat_session_key(project_id: str) -> str:
+    return f"project_ui:{str(project_id or '').strip()}"
+
+
+def _utc_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _project_chat_guess_format(text: str) -> str:
+    body = str(text or "")
+    if not body.strip():
+        return "text"
+    patterns = (
+        r"(?m)^\s{0,3}(#{1,6}\s|[-*+]\s|>\s|\d+\.\s|```)",
+        r"\[[^\]]+\]\([^)]+\)",
+        r"`[^`]+`",
+        r"\*\*[^*]+\*\*",
+        r"(?m)^\|.+\|",
+    )
+    return "markdown" if any(re.search(pattern, body) for pattern in patterns) else "text"
+
+
+def _normalise_project_chat_message(message: dict) -> dict | None:
+    role = str(message.get("role") or "system").strip().lower()
+    if role not in {"user", "agent", "system"}:
+        role = "system"
+    content = str(message.get("content") or message.get("text") or "")
+    if not content and role != "system":
+        return None
+    content_format = str(message.get("content_format") or "").strip().lower()
+    if content_format not in {"text", "markdown"}:
+        content_format = _project_chat_guess_format(content)
+    created_at = str(message.get("created_at") or "").strip() or _utc_now_iso()
+    message_id = str(message.get("message_id") or "").strip() or f"msg-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+    item = {
+        "message_id": message_id,
+        "role": role,
+        "content": content,
+        "content_format": content_format,
+        "created_at": created_at,
+    }
+    if message.get("run_id"):
+        item["run_id"] = str(message.get("run_id"))
+    return item
+
+
+def _load_project_chat_history(project_id: str) -> dict:
+    project_id = str(project_id or "").strip()
+    if not project_id:
+        return {"project_id": "", "project_path": "", "project_name": "", "messages": [], "updated_at": ""}
+    if not _HAS_PERSISTENCE:
+        return {"project_id": project_id, "project_path": "", "project_name": "", "messages": [], "updated_at": ""}
+    row = _db_get_channel_session(_project_chat_session_key(project_id))
+    state = dict((row or {}).get("state") or {})
+    messages = []
+    for raw_message in state.get("messages") or []:
+        normalised = _normalise_project_chat_message(raw_message or {})
+        if normalised is not None:
+            messages.append(normalised)
+    updated_at = str(state.get("updated_at") or (row or {}).get("updated_at") or "").strip()
+    return {
+        "project_id": project_id,
+        "project_path": str(state.get("project_path") or "").strip(),
+        "project_name": str(state.get("project_name") or "").strip(),
+        "messages": messages[-200:],
+        "updated_at": updated_at,
+    }
+
+
+def _save_project_chat_history(
+    project_id: str,
+    *,
+    project_path: str = "",
+    project_name: str = "",
+    messages: list[dict] | None = None,
+) -> dict:
+    project_id = str(project_id or "").strip()
+    if not project_id:
+        return {"project_id": "", "project_path": "", "project_name": "", "messages": [], "updated_at": ""}
+    existing = _load_project_chat_history(project_id)
+    normalised_messages = []
+    for raw_message in messages or []:
+        normalised = _normalise_project_chat_message(raw_message or {})
+        if normalised is not None:
+            normalised_messages.append(normalised)
+    updated_at = _utc_now_iso()
+    payload = {
+        "project_id": project_id,
+        "project_path": str(project_path or existing.get("project_path") or "").strip(),
+        "project_name": str(project_name or existing.get("project_name") or "").strip(),
+        "messages": normalised_messages[-200:],
+        "updated_at": updated_at,
+    }
+    if _HAS_PERSISTENCE:
+        _db_upsert_channel_session(
+            _project_chat_session_key(project_id),
+            {
+                "channel": "project_ui",
+                "chat_id": project_id,
+                "sender_id": "ui_user",
+                "workspace_id": payload["project_path"],
+                "is_group": False,
+                "state": payload,
+                "updated_at": updated_at,
+            },
+        )
+    return payload
+
+
+def _append_project_chat_messages(
+    project_id: str,
+    *,
+    project_path: str = "",
+    project_name: str = "",
+    messages: list[dict],
+) -> dict:
+    existing = _load_project_chat_history(project_id)
+    merged = list(existing.get("messages") or [])
+    for raw_message in messages or []:
+        normalised = _normalise_project_chat_message(raw_message or {})
+        if normalised is not None:
+            merged.append(normalised)
+    return _save_project_chat_history(
+        project_id,
+        project_path=project_path or str(existing.get("project_path") or ""),
+        project_name=project_name or str(existing.get("project_name") or ""),
+        messages=merged,
+    )
+
+
+def _resolve_run_artifact_path(run_id: str, name: str) -> str:
+    file_path = ""
+    try:
+        run_row = _db_get_run(run_id)
+        output_dir = run_row.get("run_output_dir", "") if run_row else ""
+        if output_dir:
+            candidate = os.path.join(output_dir, name)
+            if os.path.isfile(candidate):
+                return candidate
+    except Exception:
+        pass
+
+    with _pending_lock:
+        run_state = _pending_runs.get(run_id, {})
+    result_data = run_state.get("result", {})
+    for af in result_data.get("artifact_files", []):
+        if af.get("name") == name:
+            candidate = af.get("path", "")
+            if candidate and os.path.isfile(candidate):
+                return candidate
+
+    for key in (
+        "long_document_compiled_path",
+        "long_document_compiled_html_path",
+        "long_document_compiled_pdf_path",
+        "long_document_compiled_docx_path",
+    ):
+        candidate = str(result_data.get(key) or "").strip()
+        if candidate and os.path.basename(candidate) == name and os.path.isfile(candidate):
+            return candidate
+    return file_path
 
 
 def _gateway_ingest(payload: dict) -> dict:
@@ -339,6 +608,7 @@ def _start_run_background(run_id: str, payload: dict) -> None:
                 existing_names = {f.get("name") for f in doc_files}
                 doc_keys = [
                     ("long_document_compiled_path", "md", "Markdown"),
+                    ("long_document_compiled_html_path", "html", "HTML"),
                     ("long_document_compiled_pdf_path", "pdf", "PDF"),
                     ("long_document_compiled_docx_path", "docx", "Word (DOCX)"),
                 ]
@@ -605,6 +875,31 @@ a:hover { text-decoration: underline; }
 .suggest-chip { padding: 8px 16px; border: 1px solid var(--border); border-radius: 20px; font-size: 13px; color: var(--muted); cursor: pointer; transition: all 0.15s; background: var(--surface); }
 .suggest-chip:hover { border-color: var(--teal); color: var(--teal); background: rgba(0,201,167,0.06); }
 .input-area { padding: 16px 24px 20px; border-top: 1px solid var(--border); background: var(--surface); }
+.mode-row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+.mode-pill { border:1px solid var(--border); background:var(--bg); color:var(--muted); border-radius:999px; padding:7px 12px; font-size:12px; font-weight:600; cursor:pointer; transition:all .15s; }
+.mode-pill:hover { border-color: var(--teal); color: var(--teal); }
+.mode-pill.active { background: rgba(0,201,167,0.12); border-color: rgba(0,201,167,0.45); color: var(--teal); }
+.deep-research-panel { display:none; margin-bottom:12px; padding:14px; border:1px solid rgba(0,201,167,0.18); border-radius:12px; background:linear-gradient(180deg, rgba(0,201,167,0.06), rgba(83,82,237,0.05)); }
+.deep-research-panel.visible { display:block; }
+.dr-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:10px; }
+.dr-title { font-size:12px; font-weight:700; color:var(--teal); letter-spacing:.08em; text-transform:uppercase; }
+.dr-subtitle { font-size:12px; color:var(--muted); line-height:1.5; max-width:620px; }
+.dr-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:10px; }
+.dr-field { display:flex; flex-direction:column; gap:6px; }
+.dr-field label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+.dr-select, .dr-input { background: var(--bg); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:8px 10px; font-size:12px; }
+.dr-textarea { min-height: 88px; resize: vertical; font-family: inherit; }
+.dr-checks { display:flex; flex-wrap:wrap; gap:8px; }
+.dr-check { display:inline-flex; align-items:center; gap:6px; padding:6px 8px; border:1px solid var(--border); border-radius:8px; background:rgba(255,255,255,0.02); font-size:12px; color:var(--text); }
+.dr-check input { accent-color: var(--teal); }
+.dr-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.dr-action-btn { border:1px solid var(--border); background:var(--bg); color:var(--text); border-radius:8px; padding:8px 12px; font-size:12px; font-weight:600; cursor:pointer; transition:all .15s; }
+.dr-action-btn:hover { border-color: var(--teal); color: var(--teal); }
+.dr-chip-list { display:flex; flex-wrap:wrap; gap:8px; }
+.dr-chip { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; background:rgba(0,201,167,0.08); border:1px solid rgba(0,201,167,0.18); font-size:12px; color:var(--text); }
+.dr-chip button { border:none; background:transparent; color:var(--muted); cursor:pointer; font-size:12px; padding:0; }
+.dr-chip button:hover { color: var(--crimson); }
+.dr-note { font-size:11px; color:var(--muted); line-height:1.5; }
 .input-row { display: flex; gap: 12px; align-items: flex-end; }
 .input-box { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 14px; padding: 14px 18px; color: var(--text); font-size: 14px; font-family: inherit; resize: none; min-height: 52px; max-height: 200px; overflow-y: auto; line-height: 1.5; transition: border-color 0.15s; outline: none; }
 .input-box:focus { border-color: var(--teal); }
@@ -620,7 +915,7 @@ a:hover { text-decoration: underline; }
 .streaming-status { font-size: 11px; color: var(--amber); margin-top: 4px; font-style: italic; }
 </style>
 </head>
-<body>
+<body class="mode-agent">
 <div class="sidebar">
   <div class="sidebar-header">
     <div class="logo">kendr<span>.</span></div>
@@ -709,6 +1004,118 @@ a:hover { text-decoration: underline; }
     </div>
   </div>
   <div class="input-area">
+    <div class="mode-row">
+      <button class="mode-pill active" id="modeAutoBtn" onclick="setResearchMode('auto')">Auto</button>
+      <button class="mode-pill" id="modeDeepResearchBtn" onclick="setResearchMode('deep_research')">Deep Research</button>
+    </div>
+    <div class="deep-research-panel" id="deepResearchPanel">
+      <div class="dr-head">
+        <div>
+          <div class="dr-title">Deep Research Mode</div>
+          <div class="dr-subtitle">Tiered research flow with planning, sectioned writing, citations, plagiarism reporting, and multi-format exports.</div>
+        </div>
+      </div>
+      <div class="dr-grid">
+        <div class="dr-field">
+          <label for="drPages">Page Target</label>
+          <select id="drPages" class="dr-select">
+            <option value="10">10 pages</option>
+            <option value="25">25 pages</option>
+            <option value="50" selected>50 pages</option>
+            <option value="100">100 pages</option>
+            <option value="150">150 pages</option>
+            <option value="200">200 pages</option>
+          </select>
+        </div>
+        <div class="dr-field">
+          <label for="drCitation">Citation Style</label>
+          <select id="drCitation" class="dr-select">
+            <option value="apa" selected>APA</option>
+            <option value="mla">MLA</option>
+            <option value="chicago">Chicago</option>
+            <option value="ieee">IEEE</option>
+            <option value="vancouver">Vancouver</option>
+            <option value="harvard">Harvard</option>
+          </select>
+        </div>
+        <div class="dr-field">
+          <label for="drDateRange">Date Range</label>
+          <select id="drDateRange" class="dr-select">
+            <option value="all_time" selected>All time</option>
+            <option value="1y">Last year</option>
+            <option value="2y">Last 2 years</option>
+            <option value="5y">Last 5 years</option>
+          </select>
+        </div>
+        <div class="dr-field">
+          <label for="drMaxSources">Max Sources</label>
+          <input id="drMaxSources" class="dr-input" type="number" min="0" step="10" value="0" placeholder="0 = tier default">
+        </div>
+      </div>
+      <div class="dr-grid" style="margin-top:10px">
+        <div class="dr-field">
+          <label>Output Formats</label>
+          <div class="dr-checks">
+            <label class="dr-check"><input type="checkbox" value="pdf" class="dr-format" checked> PDF</label>
+            <label class="dr-check"><input type="checkbox" value="docx" class="dr-format" checked> DOCX</label>
+            <label class="dr-check"><input type="checkbox" value="html" class="dr-format" checked> HTML</label>
+            <label class="dr-check"><input type="checkbox" value="md" class="dr-format" checked> Markdown</label>
+          </div>
+        </div>
+        <div class="dr-field">
+          <label>Source Families</label>
+          <div class="dr-checks">
+            <label class="dr-check"><input type="checkbox" id="drWebSearch" checked onchange="toggleDeepResearchWebSearch()"> Web Search</label>
+            <label class="dr-check"><input type="checkbox" value="web" class="dr-source dr-remote-source" checked> Web</label>
+            <label class="dr-check"><input type="checkbox" value="arxiv" class="dr-source dr-remote-source"> Academic</label>
+            <label class="dr-check"><input type="checkbox" value="patents" class="dr-source dr-remote-source"> Patents</label>
+            <label class="dr-check"><input type="checkbox" value="news" class="dr-source dr-remote-source"> News</label>
+            <label class="dr-check"><input type="checkbox" value="reddit" class="dr-source dr-remote-source"> Community</label>
+          </div>
+          <div class="dr-note" id="drWebModeNote">Web search and explicit links are enabled. Disable this to restrict the report to local files/folders only.</div>
+        </div>
+        <div class="dr-field">
+          <label>Quality Gates</label>
+          <div class="dr-checks">
+            <label class="dr-check"><input type="checkbox" id="drPlagiarism" checked> Plagiarism Check</label>
+            <label class="dr-check"><input type="checkbox" id="drCheckpoint"> Checkpointing</label>
+          </div>
+        </div>
+      </div>
+      <div class="dr-grid" style="margin-top:10px">
+        <div class="dr-field">
+          <label>Local Files And Folders</label>
+          <div class="dr-actions">
+            <button type="button" class="dr-action-btn" onclick="document.getElementById('drFileUploadInput').click()">Upload Files</button>
+            <button type="button" class="dr-action-btn" onclick="document.getElementById('drFolderUploadInput').click()">Upload Folder</button>
+          </div>
+          <input type="file" id="drFileUploadInput" multiple style="display:none" onchange="handleDeepResearchUpload('files')">
+          <input type="file" id="drFolderUploadInput" multiple webkitdirectory directory style="display:none" onchange="handleDeepResearchUpload('folder')">
+          <div class="dr-note">Uploaded folders keep their directory tree. Images are OCR processed automatically during local-file ingestion.</div>
+        </div>
+        <div class="dr-field">
+          <label>Add Local Path</label>
+          <div class="dr-actions">
+            <input id="drLocalPathInput" class="dr-input" type="text" placeholder="/path/to/folder or /path/to/file.pdf" style="flex:1;min-width:220px">
+            <button type="button" class="dr-action-btn" onclick="addDeepResearchLocalPath()">Add Path</button>
+          </div>
+          <div class="dr-note">Use this when the folder or file is already on the machine running Kendr.</div>
+        </div>
+      </div>
+      <div class="dr-grid" style="margin-top:10px">
+        <div class="dr-field">
+          <label>Explicit Content Links</label>
+          <textarea id="drLinks" class="dr-input dr-textarea" placeholder="https://example.com/report&#10;https://example.com/dataset" oninput="renderDeepResearchSourceSummary()"></textarea>
+          <div class="dr-note">These exact URLs will be fetched and extracted as part of the report only when Web Search is enabled.</div>
+        </div>
+      </div>
+      <div class="dr-grid" style="margin-top:10px">
+        <div class="dr-field">
+          <label>Attached Sources</label>
+          <div id="drSourceSummary" class="dr-chip-list"></div>
+        </div>
+      </div>
+    </div>
     <div class="input-row">
       <textarea class="input-box" id="userInput" placeholder="Ask kendr anything &#x2014; research, code, deploy, analyze..." rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
       <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send (Enter)">&#x27A4;</button>
@@ -727,6 +1134,137 @@ let workingDir = '';
 let activeEvtSource = null;
 let _loadRunToken = 0;
 let shellModeActive = false;
+let researchMode = 'auto';
+let deepResearchUploadedRoots = [];
+let deepResearchLocalPaths = [];
+
+function setResearchMode(mode) {
+  researchMode = mode || 'auto';
+  const autoBtn = document.getElementById('modeAutoBtn');
+  const drBtn = document.getElementById('modeDeepResearchBtn');
+  const panel = document.getElementById('deepResearchPanel');
+  if (autoBtn) autoBtn.classList.toggle('active', researchMode === 'auto');
+  if (drBtn) drBtn.classList.toggle('active', researchMode === 'deep_research');
+  if (panel) panel.classList.toggle('visible', researchMode === 'deep_research');
+  const input = document.getElementById('userInput');
+  if (!input) return;
+  input.placeholder = researchMode === 'deep_research'
+    ? 'Describe the deep research task, scope, and output you want...'
+    : 'Ask kendr anything — research, code, deploy, analyze...';
+  if (researchMode === 'deep_research') {
+    toggleDeepResearchWebSearch();
+    renderDeepResearchSourceSummary();
+  }
+}
+
+function _selectedDeepResearchFormats() {
+  return Array.from(document.querySelectorAll('.dr-format:checked')).map(el => el.value);
+}
+
+function _allDeepResearchLocalPaths() {
+  return Array.from(new Set([...(deepResearchLocalPaths || []), ...(deepResearchUploadedRoots || [])]));
+}
+
+function _selectedDeepResearchSources() {
+  const selected = Array.from(document.querySelectorAll('.dr-source:checked')).map(el => el.value);
+  if (_allDeepResearchLocalPaths().length) selected.push('local');
+  return Array.from(new Set(selected));
+}
+
+function _deepResearchLinks() {
+  const raw = ((document.getElementById('drLinks') || {}).value || '').trim();
+  if (!raw) return [];
+  return Array.from(new Set(raw.split(/[\n,\s]+/).map(item => item.trim()).filter(item => /^https?:\/\//i.test(item))));
+}
+
+function toggleDeepResearchWebSearch() {
+  const enabled = !!((document.getElementById('drWebSearch') || {}).checked);
+  document.querySelectorAll('.dr-remote-source').forEach(el => {
+    el.disabled = !enabled;
+    if (!enabled) el.checked = false;
+  });
+  const linksEl = document.getElementById('drLinks');
+  const noteEl = document.getElementById('drWebModeNote');
+  if (linksEl) linksEl.disabled = !enabled;
+  if (noteEl) {
+    noteEl.textContent = enabled
+      ? 'Web search and explicit links are enabled. Disable this to restrict the report to local files/folders only.'
+      : 'Web search is disabled. This report will use only attached local files/folders and added local paths.';
+  }
+  renderDeepResearchSourceSummary();
+}
+
+function addDeepResearchLocalPath() {
+  const input = document.getElementById('drLocalPathInput');
+  const value = (input && input.value || '').trim();
+  if (!value) return;
+  deepResearchLocalPaths.push(value);
+  deepResearchLocalPaths = Array.from(new Set(deepResearchLocalPaths));
+  if (input) input.value = '';
+  renderDeepResearchSourceSummary();
+}
+
+function removeDeepResearchLocalPath(value) {
+  deepResearchLocalPaths = deepResearchLocalPaths.filter(item => item !== value);
+  deepResearchUploadedRoots = deepResearchUploadedRoots.filter(item => item !== value);
+  renderDeepResearchSourceSummary();
+}
+
+async function handleDeepResearchUpload(kind) {
+  const input = document.getElementById(kind === 'folder' ? 'drFolderUploadInput' : 'drFileUploadInput');
+  const files = Array.from((input && input.files) || []);
+  if (!files.length) return;
+  const fd = new FormData();
+  fd.append('chat_id', chatSessionId);
+  fd.append('kind', kind);
+  files.forEach(file => {
+    fd.append('files', file, file.name);
+    fd.append('relative_path', (kind === 'folder' && file.webkitRelativePath) ? file.webkitRelativePath : file.name);
+  });
+  try {
+    const resp = await fetch(API + '/api/deep-research/upload', { method: 'POST', body: fd });
+    const data = await resp.json();
+    if (data.error) {
+      alert('Upload error: ' + data.error);
+      return;
+    }
+    if (data.upload_root) {
+      deepResearchUploadedRoots.push(data.upload_root);
+      deepResearchUploadedRoots = Array.from(new Set(deepResearchUploadedRoots));
+    }
+    renderDeepResearchSourceSummary();
+  } catch (err) {
+    alert('Upload failed: ' + String(err));
+  } finally {
+    if (input) input.value = '';
+  }
+}
+
+function renderDeepResearchSourceSummary() {
+  const el = document.getElementById('drSourceSummary');
+  if (!el) return;
+  const chips = [];
+  _allDeepResearchLocalPaths().forEach(path => {
+    chips.push('<span class="dr-chip"><span>📁 ' + esc(path) + '</span><button type="button" onclick="removeDeepResearchLocalPath(' + JSON.stringify(path).replace(/"/g, '&quot;') + ')">✕</button></span>');
+  });
+  if (!!((document.getElementById('drWebSearch') || {}).checked)) {
+    _deepResearchLinks().forEach(url => {
+      chips.push('<span class="dr-chip"><span>🌐 ' + esc(url) + '</span></span>');
+    });
+  }
+  if (!chips.length) {
+    chips.push('<span class="dr-note">No local files, folders, paths, or explicit links attached yet.</span>');
+  }
+  el.innerHTML = chips.join('');
+}
+
+function sendQuickReply(text) {
+  const input = document.getElementById('userInput');
+  if (!input || isRunning) return;
+  input.value = text;
+  autoResize(input);
+  sendMessage();
+}
 
 function toggleShellMode() {
   shellModeActive = !shellModeActive;
@@ -955,7 +1493,9 @@ function _removeAwaitingBanner() {
   const b = document.getElementById('awaiting-input-banner');
   if (b) b.remove();
   const inp = document.getElementById('userInput');
-  if (inp) inp.placeholder = 'Ask kendr anything \u2014 research, code, deploy, analyze\u2026';
+  if (inp) inp.placeholder = researchMode === 'deep_research'
+    ? 'Describe the deep research task, scope, and output you want...'
+    : 'Ask kendr anything \u2014 research, code, deploy, analyze\u2026';
 }
 
 async function checkGateway() {
@@ -1150,6 +1690,8 @@ function newChat() {
   _loadRunToken++;
   currentRunId = null;
   isAwaitingInput = false;
+  deepResearchUploadedRoots = [];
+  deepResearchLocalPaths = [];
   chatSessionId = _newChatSessionId();
   sessionStorage.setItem('kendr_chat_session_id', chatSessionId);
   if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
@@ -1160,6 +1702,7 @@ function newChat() {
   clearMessages();
   document.getElementById('chatTitle').textContent = 'New Chat';
   document.getElementById('clearChatBtn').style.display = 'none';
+  renderDeepResearchSourceSummary();
   document.getElementById('userInput').focus();
 }
 
@@ -1181,8 +1724,11 @@ async function deleteChat() {
   clearMessages();
   document.getElementById('chatTitle').textContent = 'New Chat';
   document.getElementById('clearChatBtn').style.display = 'none';
+  deepResearchUploadedRoots = [];
+  deepResearchLocalPaths = [];
   chatSessionId = _newChatSessionId();
   sessionStorage.setItem('kendr_chat_session_id', chatSessionId);
+  renderDeepResearchSourceSummary();
   document.getElementById('userInput').focus();
   try {
     await fetch(API + '/api/chat/delete', {
@@ -1516,8 +2062,8 @@ function renderMcpInvocationsCard(invocations) {
 
 function renderDocumentDownloadCard(runId, exports) {
   if (!exports || !exports.length) return '';
-  const EXT_ICON = { md: '📝', pdf: '📄', docx: '📘' };
-  const EXT_COLOR = { md: '#4ade80', pdf: '#f87171', docx: '#60a5fa' };
+  const EXT_ICON = { md: '📝', html: '🌐', pdf: '📄', docx: '📘' };
+  const EXT_COLOR = { md: '#4ade80', html: '#fbbf24', pdf: '#f87171', docx: '#60a5fa' };
   let html = '<div style="margin-top:12px;padding:14px 16px;background:linear-gradient(135deg,#1a2a1a,#0d1f2d);border:1px solid #2dd4bf44;border-radius:10px">';
   html += '<div style="font-size:12px;font-weight:700;color:#2dd4bf;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px">📥 Download Document</div>';
   html += '<div style="display:flex;gap:10px;flex-wrap:wrap">';
@@ -1534,7 +2080,80 @@ function renderDocumentDownloadCard(runId, exports) {
   return html;
 }
 
-function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpInvocations, docExports) {
+function renderDocumentPreviewCard(runId, exports) {
+  if (!exports || !exports.length) return '';
+  const htmlExport = exports.find(ex => ex.ext === 'html');
+  if (!htmlExport) return '';
+  let html = '<div style="margin-top:12px;padding:14px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:10px">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px">';
+  html += '<div style="font-size:12px;font-weight:700;color:var(--amber);text-transform:uppercase;letter-spacing:0.1em">Preview</div>';
+  html += '<a href="/api/artifacts/view?run_id=' + encodeURIComponent(runId) + '&name=' + encodeURIComponent(htmlExport.name) + '" target="_blank" rel="noopener" style="font-size:12px;color:var(--teal);text-decoration:underline">Open full preview</a>';
+  html += '</div>';
+  html += '<iframe sandbox="allow-same-origin" src="/api/artifacts/view?run_id=' + encodeURIComponent(runId) + '&name=' + encodeURIComponent(htmlExport.name) + '" style="width:100%;height:560px;border:1px solid var(--border);border-radius:8px;background:#fff"></iframe>';
+  html += '</div>';
+  return html;
+}
+
+function renderDeepResearchCard(card, runId) {
+  if (!card || typeof card !== 'object') return '';
+  const kind = card.kind || 'result';
+  let html = '<div style="margin-top:12px;padding:14px 16px;background:linear-gradient(135deg,#0f172a,#111827);border:1px solid rgba(83,82,237,0.28);border-radius:12px">';
+  html += '<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">';
+  html += '<div><div style="font-size:12px;font-weight:700;color:#8b8af0;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Deep Research</div>';
+  html += '<div style="font-size:16px;font-weight:700;color:var(--text)">' + esc(card.title || 'Deep Research') + '</div></div>';
+  if (card.tier) html += '<div style="padding:5px 10px;border-radius:999px;background:rgba(139,138,240,.14);color:#c4b5fd;font-size:12px;font-weight:700">Tier ' + esc(String(card.tier)) + '</div>';
+  html += '</div>';
+  if (kind === 'analysis' || kind === 'plan') {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-top:12px">';
+    const metrics = [
+      ['Pages', card.estimated_pages || card.section_count || '—'],
+      ['Sources', card.estimated_sources || '—'],
+      ['Minutes', card.estimated_duration_minutes || '—'],
+      ['Style', (card.citation_style || '').toUpperCase() || 'APA']
+    ];
+    metrics.forEach(([label,val]) => {
+      html += '<div style="padding:10px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">' + esc(label) + '</div><div style="font-size:16px;font-weight:700;color:var(--text);margin-top:2px">' + esc(String(val)) + '</div></div>';
+    });
+    html += '</div>';
+    if (card.subtopics && card.subtopics.length) {
+      html += '<div style="margin-top:12px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Detected Subtopics</div>';
+      html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">';
+      card.subtopics.forEach(topic => {
+        html += '<span style="padding:6px 10px;border-radius:999px;background:rgba(0,201,167,0.10);border:1px solid rgba(0,201,167,0.20);font-size:12px;color:#9ae6d8">' + esc(String(topic)) + '</span>';
+      });
+      html += '</div>';
+    }
+    if (kind === 'analysis') {
+      html += '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">';
+      html += '<button onclick="sendQuickReply(\'approve\')" style="padding:9px 14px;border:none;border-radius:8px;background:#00c9a7;color:#04130f;font-weight:700;cursor:pointer">Start Deep Research</button>';
+      html += '<button onclick="sendQuickReply(\'quick summary\')" style="padding:9px 14px;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:transparent;color:var(--text);font-weight:600;cursor:pointer">Quick Summary</button>';
+      html += '</div>';
+    }
+  } else {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin-top:12px">';
+    const metrics = [
+      ['Pages', card.pages || '—'],
+      ['Words', card.words || '—'],
+      ['Sources', card.sources || '—'],
+      ['Citations', card.citations || '—'],
+      ['Plagiarism', ((card.plagiarism_score ?? '—') + '%')],
+      ['Minutes', card.duration_minutes || '—']
+    ];
+    metrics.forEach(([label,val]) => {
+      html += '<div style="padding:10px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase">' + esc(label) + '</div><div style="font-size:16px;font-weight:700;color:var(--text);margin-top:2px">' + esc(String(val)) + '</div></div>';
+    });
+    html += '</div>';
+  }
+  html += '<div style="margin-top:12px;font-size:12px;color:var(--muted)">';
+  html += 'Web search: <strong style="color:var(--text)">' + (card.web_search_enabled === false ? 'disabled' : 'enabled') + '</strong>';
+  if (card.local_sources != null) html += ' · Local files: <strong style="color:var(--text)">' + esc(String(card.local_sources)) + '</strong>';
+  if (card.provided_urls != null) html += ' · Explicit URLs: <strong style="color:var(--text)">' + esc(String(card.provided_urls)) + '</strong>';
+  html += '</div>';
+  html += '</div>';
+  return html;
+}
+
+function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpInvocations, docExports, deepResearchCard) {
   const row = document.getElementById('stream-row-' + runId);
   if (!row) return;
   const typing = row.querySelector('.typing-indicator');
@@ -1560,6 +2179,12 @@ function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpI
     }
     if (mcpInvocations && mcpInvocations.length) {
       resultEl.innerHTML += renderMcpInvocationsCard(mcpInvocations);
+    }
+    if (deepResearchCard) {
+      resultEl.innerHTML += renderDeepResearchCard(deepResearchCard, runId);
+    }
+    if (docExports && docExports.length > 0) {
+      resultEl.innerHTML += renderDocumentPreviewCard(runId, docExports);
     }
     if (docExports && docExports.length > 0) {
       resultEl.innerHTML += renderDocumentDownloadCard(runId, docExports);
@@ -1658,7 +2283,7 @@ function openEventStream(runId) {
       const output = d.final_output || d.output || d.draft_response || '';
       const awaiting = d.awaiting_user_input || d.plan_waiting_for_approval || d.plan_needs_clarification || false;
       updateStreamStatus(runId, awaiting ? 'Awaiting your input\u2026' : 'Completed.');
-      finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null, d.mcp_invocations || null, d.long_document_exports || null);
+      finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null, d.mcp_invocations || null, d.long_document_exports || null, d.deep_research_result_card || null);
     } catch(_) {}
   });
 
@@ -1743,6 +2368,34 @@ async function sendMessage() {
       run_id: runId,
       working_directory: workingDir
     };
+    if (researchMode === 'deep_research') {
+      const webSearchEnabled = !!((document.getElementById('drWebSearch') || {}).checked);
+      const localPaths = _allDeepResearchLocalPaths();
+      const explicitLinks = webSearchEnabled ? _deepResearchLinks() : [];
+      if (!webSearchEnabled && !localPaths.length) {
+        finalizeStreamRow(runId, '', 'Deep Research with web search disabled requires at least one local file, uploaded folder, or local path.');
+        isRunning = false;
+        document.getElementById('sendBtn').disabled = false;
+        return;
+      }
+      payload.deep_research_mode = true;
+      payload.long_document_mode = true;
+      payload.long_document_pages = parseInt((document.getElementById('drPages') || {}).value || '50', 10) || 50;
+      payload.research_output_formats = _selectedDeepResearchFormats();
+      payload.research_citation_style = ((document.getElementById('drCitation') || {}).value || 'apa');
+      payload.research_enable_plagiarism_check = !!((document.getElementById('drPlagiarism') || {}).checked);
+      payload.research_web_search_enabled = webSearchEnabled;
+      payload.research_date_range = ((document.getElementById('drDateRange') || {}).value || 'all_time');
+      payload.research_sources = _selectedDeepResearchSources();
+      payload.research_max_sources = parseInt((document.getElementById('drMaxSources') || {}).value || '0', 10) || 0;
+      payload.research_checkpoint_enabled = !!((document.getElementById('drCheckpoint') || {}).checked);
+      payload.deep_research_source_urls = explicitLinks;
+      if (localPaths.length) {
+        payload.local_drive_paths = localPaths;
+        payload.local_drive_recursive = true;
+        payload.local_drive_force_long_document = true;
+      }
+    }
     if (shellModeActive) {
       payload.shell_auto_approve = true;
       payload.privileged_approval_note = 'Approved via Shell Automation mode in chat UI';
@@ -1765,7 +2418,7 @@ async function sendMessage() {
       openEventStream(runId);
     } else {
       const output = d.final_output || d.output || d.draft_response || '(Run completed)';
-      finalizeStreamRow(runId, output, '');
+      finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null, d.mcp_invocations || null, d.long_document_exports || null, d.deep_research_result_card || null);
       isRunning = false;
       document.getElementById('sendBtn').disabled = false;
       loadRuns();
@@ -1780,6 +2433,8 @@ async function sendMessage() {
 checkGateway();
 loadRuns();
 loadProjContext();
+setResearchMode('auto');
+renderDeepResearchSourceSummary();
 setInterval(checkGateway, 30000);
 setInterval(loadRuns, 15000);
 setInterval(loadProjContext, 60000);
@@ -1893,7 +2548,7 @@ a { color: var(--teal); }
 ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 </style>
 </head>
-<body>
+<body class="mode-agent" data-project-tab="chat">
 <div class="sidebar">
   <div class="sidebar-header"><div class="logo">kendr<span>.</span></div><div class="tagline">Multi-agent intelligence runtime</div></div>
   <div class="sidebar-nav">
@@ -2178,10 +2833,31 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
 .chat-messages { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
 .msg-row { display: flex; gap: 10px; }
 .msg-row.user { flex-direction: row-reverse; }
-.msg-bubble { max-width: 75%; padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.msg-bubble { max-width: 75%; padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.55; word-break: break-word; overflow-wrap: anywhere; }
 .msg-row.user .msg-bubble { background: rgba(0,201,167,0.15); border: 1px solid rgba(0,201,167,0.3); color: var(--text); border-radius: 12px 12px 3px 12px; }
 .msg-row.agent .msg-bubble { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 12px 12px 12px 3px; }
 .msg-row.system .msg-bubble { background: var(--surface3); border: 1px solid var(--border); color: var(--muted); font-size: 12px; font-style: italic; border-radius: 8px; }
+.msg-bubble .plain-text { white-space: pre-wrap; }
+.msg-bubble .markdown-body { display: block; }
+.msg-bubble .markdown-body > :first-child { margin-top: 0; }
+.msg-bubble .markdown-body > :last-child { margin-bottom: 0; }
+.msg-bubble .markdown-body h1,
+.msg-bubble .markdown-body h2,
+.msg-bubble .markdown-body h3,
+.msg-bubble .markdown-body h4,
+.msg-bubble .markdown-body h5,
+.msg-bubble .markdown-body h6 { margin: 0 0 10px; font-size: 14px; line-height: 1.35; }
+.msg-bubble .markdown-body p { margin: 0 0 10px; }
+.msg-bubble .markdown-body ul,
+.msg-bubble .markdown-body ol { margin: 0 0 10px 18px; padding: 0; }
+.msg-bubble .markdown-body li { margin: 0 0 4px; }
+.msg-bubble .markdown-body blockquote { margin: 0 0 10px; padding: 0 0 0 12px; border-left: 3px solid rgba(88,166,255,0.35); color: #c8d3e0; }
+.msg-bubble .markdown-body code { font-family: "Cascadia Code","Fira Code",monospace; font-size: 12px; background: rgba(10,12,16,0.55); border: 1px solid rgba(255,255,255,0.05); border-radius: 6px; padding: 1px 5px; }
+.msg-bubble .markdown-body pre { margin: 0 0 10px; background: #0a0c10; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow: auto; }
+.msg-bubble .markdown-body pre code { background: transparent; border: none; border-radius: 0; padding: 0; display: block; white-space: pre; }
+.msg-bubble .markdown-body a { color: #7ed3ff; text-decoration: none; }
+.msg-bubble .markdown-body a:hover { text-decoration: underline; }
+.msg-bubble .markdown-body hr { border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 10px 0; }
 .chat-input-bar { padding: 10px 20px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; background: var(--surface); }
 .chat-input-row { display: flex; gap: 10px; align-items: flex-end; }
 .chat-input { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 13px; color: var(--text); font-size: 13px; outline: none; resize: none; min-height: 40px; max-height: 120px; font-family: inherit; transition: border-color 0.15s; }
@@ -2204,6 +2880,17 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
 .terminal-input-bar { padding: 10px 12px; background: #0a0c10; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
 .terminal-prompt { color: var(--teal); font-family: monospace; font-size: 13px; flex-shrink: 0; }
 .terminal-input { flex: 1; background: transparent; border: none; color: var(--text); font-family: "Cascadia Code","Fira Code",monospace; font-size: 13px; outline: none; }
+.service-panel { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+.service-section { background: var(--surface2); border: 1px solid var(--border); border-radius: 9px; padding: 14px 16px; }
+.service-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 12px; }
+.service-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.service-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); }
+.service-pill.running { color: var(--teal); border-color: rgba(0,201,167,0.35); }
+.service-pill.stopped { color: var(--amber); border-color: rgba(255,179,71,0.35); }
+.service-pill.degraded { color: var(--crimson); border-color: rgba(255,71,87,0.35); }
+.service-command { font-family: "Cascadia Code","Fira Code",monospace; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; color: var(--text); white-space: pre-wrap; word-break: break-word; margin-top: 10px; }
+.service-log { background: #0a0c10; border: 1px solid var(--border); border-radius: 8px; min-height: 180px; max-height: 320px; overflow: auto; padding: 12px; font-family: "Cascadia Code","Fira Code",monospace; font-size: 12px; color: #b5c4de; white-space: pre-wrap; word-break: break-word; }
+.service-empty { color: var(--muted); font-size: 13px; }
 /* Git panel */
 .git-panel { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
 .git-section { background: var(--surface2); border: 1px solid var(--border); border-radius: 9px; padding: 14px 16px; }
@@ -2240,8 +2927,9 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
 .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 16px; }
 .form-field { margin-bottom: 14px; }
 .form-field label { display: block; font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 5px; }
-.form-field input, .form-field select { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; padding: 9px 12px; color: var(--text); font-size: 13px; outline: none; transition: border-color 0.15s; }
-.form-field input:focus, .form-field select:focus { border-color: var(--teal); }
+.form-field input, .form-field select, .form-field textarea { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; padding: 9px 12px; color: var(--text); font-size: 13px; outline: none; transition: border-color 0.15s; font-family: inherit; }
+.form-field textarea { min-height: 84px; resize: vertical; }
+.form-field input:focus, .form-field select:focus, .form-field textarea:focus { border-color: var(--teal); }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .status-dot.green { background: var(--teal); }
@@ -2250,6 +2938,111 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--teal); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; }
 @keyframes spin { to { transform: rotate(360deg); } }
 ::-webkit-scrollbar { width: 5px; height: 5px; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+/* IDE workbench overrides */
+:root { --activity-w: 56px; --inspector-w: 320px; --statusbar-h: 28px; }
+body { background:
+  radial-gradient(circle at top left, rgba(88,166,255,0.11), transparent 26%),
+  radial-gradient(circle at top right, rgba(0,201,167,0.10), transparent 22%),
+  linear-gradient(180deg, rgba(255,255,255,0.02), transparent 16%),
+  var(--bg);
+}
+body.mode-agent { --file-w: 276px; --inspector-w: 320px; }
+body.mode-code { --file-w: 340px; --inspector-w: 0px; }
+.activity-rail { position: fixed; top: 0; bottom: 0; left: var(--sidebar-w); width: var(--activity-w); background: #11161e; border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 76px 8px 12px; z-index: 9; }
+.activity-btn { width: 40px; height: 40px; border-radius: 10px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; font-size: 17px; transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.15s; }
+.activity-btn:hover { background: var(--surface2); color: var(--text); transform: translateY(-1px); }
+.activity-btn.active { color: var(--text); background: rgba(88,166,255,0.12); border-color: rgba(88,166,255,0.28); box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); }
+.activity-spacer { flex: 1; }
+.file-panel { left: calc(var(--sidebar-w) + var(--activity-w)); width: var(--file-w); background: linear-gradient(180deg, rgba(255,255,255,0.03), transparent 30%), var(--surface); transition: width 0.25s ease, left 0.25s ease; }
+.file-panel-header { flex-direction: column; align-items: flex-start; gap: 4px; padding-bottom: 12px; }
+.file-panel-subtitle { font-size: 11px; color: var(--muted); }
+.agent-lens-card { margin: 12px; padding: 14px; border-radius: 14px; border: 1px solid rgba(88,166,255,0.18); background: linear-gradient(145deg, rgba(88,166,255,0.13), rgba(0,201,167,0.08)); display: flex; flex-direction: column; gap: 10px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); }
+.agent-lens-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.agent-lens-title { font-size: 12px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #dbe9ff; }
+.agent-lens-mode { font-size: 10px; color: var(--teal); border: 1px solid rgba(0,201,167,0.25); background: rgba(0,0,0,0.18); border-radius: 999px; padding: 3px 7px; }
+.agent-lens-copy { font-size: 12px; line-height: 1.55; color: rgba(230,237,243,0.92); }
+.agent-lens-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.mini-btn { padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); background: rgba(10,12,16,0.24); color: var(--text); font-size: 11px; font-weight: 600; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+.mini-btn:hover { border-color: rgba(0,201,167,0.32); background: rgba(0,0,0,0.26); }
+.side-section-label { padding: 0 14px 8px; font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+body.mode-code .agent-lens-card { display: none; }
+.workspace { margin-left: calc(var(--sidebar-w) + var(--activity-w) + var(--file-w)); margin-right: var(--inspector-w); padding-bottom: var(--statusbar-h); transition: margin 0.25s ease; }
+.workspace-top { min-height: 68px; padding: 12px 20px; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; background: linear-gradient(180deg, rgba(255,255,255,0.04), transparent), var(--surface); }
+.workspace-top-left, .workspace-top-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.workspace-top-left { min-width: 0; flex: 1; align-items: flex-start; flex-direction: column; gap: 4px; }
+.ws-eyebrow { font-size: 10px; font-weight: 700; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; }
+.mode-switch { display: inline-flex; align-items: center; gap: 4px; padding: 4px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface2); }
+.mode-chip { padding: 7px 11px; border-radius: 9px; background: transparent; border: none; color: var(--muted); font-size: 12px; font-weight: 700; cursor: pointer; transition: background 0.15s, color 0.15s; }
+.mode-chip.active { background: #0f141b; color: var(--text); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); }
+.mode-chip:hover { color: var(--text); }
+.command-bar { min-height: 46px; padding: 8px 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid var(--border); background: #10151c; }
+.command-track { font-size: 12px; color: var(--muted); flex: 1; min-width: 220px; }
+.command-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.command-pill { padding: 7px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 11px; font-weight: 700; cursor: pointer; transition: border-color 0.15s, color 0.15s, transform 0.15s; }
+.command-pill:hover { border-color: rgba(88,166,255,0.35); transform: translateY(-1px); }
+.tab-bar { padding: 0 10px; gap: 6px; background: #10151c; }
+.tab { padding: 11px 14px; border-radius: 10px 10px 0 0; border: 1px solid transparent; border-bottom: none; }
+.tab.active { color: var(--text); border-color: var(--border); background: var(--surface2); }
+.tab-panels { background: var(--surface); }
+body[data-project-tab="chat"] .command-bar { background: linear-gradient(90deg, rgba(0,201,167,0.12), rgba(16,21,28,0.98) 34%, #10151c 100%); }
+body[data-project-tab="chat"] .workspace-top { box-shadow: inset 0 -2px 0 rgba(0,201,167,0.16); }
+body[data-project-tab="file"] .command-bar { background: linear-gradient(90deg, rgba(88,166,255,0.12), rgba(16,21,28,0.98) 34%, #10151c 100%); }
+body[data-project-tab="file"] .workspace-top { box-shadow: inset 0 -2px 0 rgba(88,166,255,0.18); }
+body[data-project-tab="terminal"] .command-bar { background: linear-gradient(90deg, rgba(21,28,37,0.98), rgba(10,12,16,0.98) 45%, #0a0c10 100%); }
+body[data-project-tab="terminal"] .tab-panels { background: #0a0c10; }
+body[data-project-tab="services"] .command-bar { background: linear-gradient(90deg, rgba(0,201,167,0.08), rgba(255,179,71,0.08), #10151c 70%); }
+body[data-project-tab="services"] .workspace-top { box-shadow: inset 0 -2px 0 rgba(255,179,71,0.18); }
+body[data-project-tab="git"] .command-bar { background: linear-gradient(90deg, rgba(255,179,71,0.10), rgba(16,21,28,0.98) 34%, #10151c 100%); }
+body[data-project-tab="git"] .workspace-top { box-shadow: inset 0 -2px 0 rgba(255,179,71,0.2); }
+.inspector-panel { position: fixed; top: 0; right: 0; bottom: 0; width: var(--inspector-w); background: linear-gradient(180deg, rgba(255,255,255,0.03), transparent 18%), #10151c; border-left: 1px solid var(--border); padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; transition: width 0.25s ease, opacity 0.25s ease, transform 0.25s ease; }
+body.mode-code .inspector-panel { opacity: 0; pointer-events: none; transform: translateX(18px); }
+.inspector-header { padding: 6px 2px 4px; }
+.inspector-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.inspector-sub { font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.45; }
+.inspector-card { border-radius: 14px; border: 1px solid var(--border); background: var(--surface); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.inspector-card-label { font-size: 10px; font-weight: 700; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
+.inspector-card-title { font-size: 14px; font-weight: 700; color: var(--text); }
+.inspector-copy { font-size: 12px; line-height: 1.55; color: var(--muted); }
+.inspector-stat-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.inspector-stat { padding: 10px; border-radius: 10px; background: var(--surface2); border: 1px solid rgba(255,255,255,0.04); }
+.inspector-stat span { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.inspector-stat strong { display: block; font-size: 13px; color: var(--text); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inspector-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.inspector-list { display: flex; flex-direction: column; gap: 8px; }
+.inspector-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px; border-radius: 10px; background: var(--surface2); border: 1px solid rgba(255,255,255,0.04); }
+.inspector-item-main { min-width: 0; }
+.inspector-item-title { font-size: 12px; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inspector-item-sub { font-size: 10px; color: var(--muted); margin-top: 3px; }
+.inspector-item-status { font-size: 10px; font-weight: 700; padding: 3px 7px; border-radius: 999px; }
+.inspector-item-status.running { color: var(--teal); background: rgba(0,201,167,0.12); }
+.inspector-item-status.stopped { color: var(--amber); background: rgba(255,179,71,0.12); }
+.inspector-item-status.degraded { color: var(--crimson); background: rgba(255,71,87,0.12); }
+.inspector-empty { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.status-bar { height: var(--statusbar-h); display: flex; align-items: center; gap: 14px; padding: 0 12px; background: linear-gradient(90deg, #096d87, #0a7f92 38%, #0e639c 100%); color: #eef9ff; font-size: 11px; border-top: 1px solid rgba(255,255,255,0.08); }
+.status-pill { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status-pill strong { font-weight: 800; letter-spacing: 0.04em; }
+@media (max-width: 1220px) {
+  body { --inspector-w: 0px; }
+  .inspector-panel { display: none; }
+  .workspace { margin-right: 0; }
+}
+@media (max-width: 980px) {
+  .activity-rail { display: none; }
+  .file-panel { left: var(--sidebar-w); }
+  .workspace { margin-left: calc(var(--sidebar-w) + var(--file-w)); }
+}
+@media (max-width: 760px) {
+  body { --sidebar-w: 72px; --file-w: 0px; }
+  .tagline, .proj-list-nav, .file-panel, .activity-rail { display: none; }
+  .nav-sidebar { width: var(--sidebar-w); min-width: var(--sidebar-w); }
+  .nav-header { padding: 16px 10px 12px; }
+  .nav-btn { font-size: 0; justify-content: center; padding: 10px 0; }
+  .nav-btn .icon { width: auto; font-size: 17px; }
+  .workspace { margin-left: var(--sidebar-w); }
+  .workspace-top, .command-bar { padding-left: 14px; padding-right: 14px; }
+  .tab-bar { overflow-x: auto; }
+  .status-bar { padding-left: 10px; padding-right: 10px; gap: 10px; overflow-x: auto; }
+}
 </style>
 </head>
 <body>
@@ -2275,31 +3068,77 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
   </div>
 </div>
 
+<div class="activity-rail">
+  <button class="activity-btn active" data-tab="chat" title="Agent Workspace" onclick="openAgentSurface('chat')">&#x1F916;</button>
+  <button class="activity-btn" data-tab="file" title="Explorer" onclick="switchTab('file')">&#x1F4C2;</button>
+  <button class="activity-btn" data-tab="terminal" title="Terminal" onclick="openCodingSurface('terminal')">&#x2328;</button>
+  <button class="activity-btn" data-tab="services" title="Services" onclick="openAgentSurface('services')">&#x2699;&#xFE0F;</button>
+  <button class="activity-btn" data-tab="git" title="Source Control" onclick="openCodingSurface('git')">&#x1F500;</button>
+  <div class="activity-spacer"></div>
+  <button class="activity-btn" title="Switch To Agent Mode" onclick="setWorkspaceMode('agent')">&#x2728;</button>
+  <button class="activity-btn" title="Switch To Coding Mode" onclick="setWorkspaceMode('code')">&#x1F4BB;</button>
+</div>
+
 <!-- File panel -->
 <div class="file-panel">
   <div class="file-panel-header">
     <span class="file-panel-title" id="filePanelTitle">No project open</span>
+    <span class="file-panel-subtitle" id="filePanelSubtitle">Agent-first explorer</span>
   </div>
+  <div class="agent-lens-card" id="agentLensCard">
+    <div class="agent-lens-top">
+      <div class="agent-lens-title">Agent Lens</div>
+      <div class="agent-lens-mode" id="agentLensMode">Agent mode</div>
+    </div>
+    <div class="agent-lens-copy" id="agentLensCopy">Open a project to start in an agent-guided workspace, then switch to coding mode when you want to edit, debug, or ship changes directly.</div>
+    <div class="agent-lens-actions">
+      <button class="mini-btn" onclick="openAgentSurface('chat')">Agent Chat</button>
+      <button class="mini-btn" onclick="openAgentSurface('services')">Services</button>
+      <button class="mini-btn" onclick="openCodingSurface('file')">Open Code</button>
+      <button class="mini-btn" onclick="openCodingSurface('terminal')">Terminal</button>
+    </div>
+  </div>
+  <div class="side-section-label">Explorer</div>
   <div class="file-tree" id="fileTree"><div style="padding:14px;font-size:12px;color:var(--muted)">Open a project to see its files.</div></div>
 </div>
 
 <!-- Main workspace -->
 <div class="workspace">
   <div class="workspace-top">
-    <span class="ws-title" id="wsTitle">Projects</span>
-    <span class="ws-badge" id="wsBranch" style="display:none">&#x1F533; <span id="wsBranchName">main</span></span>
-    <span class="ws-badge" id="wsPath" style="display:none;font-family:monospace;font-size:11px;color:var(--muted)"></span>
+    <div class="workspace-top-left">
+      <span class="ws-eyebrow">Project Workbench</span>
+      <span class="ws-title" id="wsTitle">Projects</span>
+    </div>
+    <div class="workspace-top-right">
+      <span class="ws-badge" id="wsBranch" style="display:none">&#x1F533; <span id="wsBranchName">main</span></span>
+      <span class="ws-badge" id="wsPath" style="display:none;font-family:monospace;font-size:11px;color:var(--muted)"></span>
+      <span class="ws-badge" id="wsModeBadge">Agent priority</span>
+      <div class="mode-switch">
+        <button class="mode-chip active" data-mode="agent" onclick="setWorkspaceMode('agent')">Agent Mode</button>
+        <button class="mode-chip" data-mode="code" onclick="setWorkspaceMode('code')">Coding Mode</button>
+      </div>
+    </div>
+  </div>
+  <div class="command-bar">
+    <div class="command-track" id="commandTrack">Open a project and start from the agent workspace. Use coding mode when you want a denser editor flow.</div>
+    <div class="command-actions">
+      <button class="command-pill" onclick="openAgentSurface('chat')">Agent Workspace</button>
+      <button class="command-pill" onclick="openCodingSurface('file')">Code Viewer</button>
+      <button class="command-pill" onclick="openCodingSurface('terminal')">Terminal</button>
+      <button class="command-pill" onclick="openAgentSurface('services')">Service Pulse</button>
+    </div>
   </div>
   <div class="tab-bar">
     <div class="tab active" onclick="switchTab('chat')">&#x1F4AC; Agent Chat</div>
     <div class="tab" onclick="switchTab('file')">&#x1F4C4; File Viewer</div>
     <div class="tab" onclick="switchTab('terminal')">&#x1F4BB; Terminal</div>
+    <div class="tab" onclick="switchTab('services')">&#x2699;&#xFE0F; Services</div>
     <div class="tab" onclick="switchTab('git')">&#x1F500; Git</div>
   </div>
   <div class="tab-panels">
 
     <!-- Chat tab -->
-    <div class="tab-panel active" id="panel-chat" style="display:flex;flex-direction:column;overflow:hidden">
+    <div class="tab-panel active" id="panel-chat">
       <!-- Recent chats history bar -->
       <div id="projChatHistory" style="display:none;border-bottom:1px solid var(--border);flex-shrink:0">
         <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 14px;cursor:pointer;user-select:none" onclick="toggleChatHistory()">
@@ -2346,6 +3185,62 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
       </div>
     </div>
 
+    <!-- Services tab -->
+    <div class="tab-panel" id="panel-services">
+      <div class="service-panel">
+        <div class="service-section">
+          <div class="git-section-title">Start Or Resume A Service</div>
+          <div class="service-form-grid">
+            <div class="form-field">
+              <label>Service Name</label>
+              <input type="text" id="svcName" placeholder="frontend">
+            </div>
+            <div class="form-field">
+              <label>Kind</label>
+              <select id="svcKind">
+                <option value="">service</option>
+                <option value="frontend">frontend</option>
+                <option value="backend">backend</option>
+                <option value="database">database</option>
+                <option value="worker">worker</option>
+                <option value="proxy">proxy</option>
+              </select>
+            </div>
+            <div class="form-field">
+              <label>Port</label>
+              <input type="number" id="svcPort" placeholder="3000">
+            </div>
+            <div class="form-field">
+              <label>Health URL</label>
+              <input type="text" id="svcHealthUrl" placeholder="http://127.0.0.1:3000/health">
+            </div>
+          </div>
+          <div class="form-field" style="margin-top:10px">
+            <label>Command</label>
+            <textarea id="svcCommand" placeholder="npm run dev"></textarea>
+          </div>
+          <div class="form-field" style="margin-top:10px">
+            <label>Working Directory <span style="color:var(--muted);font-weight:400">(optional; defaults to project root)</span></label>
+            <input type="text" id="svcCwd" placeholder="apps/web">
+          </div>
+          <div class="git-actions" style="margin-top:6px">
+            <button class="btn btn-primary" onclick="createProjectService()">Start Service</button>
+            <button class="btn btn-outline" onclick="loadProjectServices()">Refresh</button>
+          </div>
+          <div id="svcMsg" style="font-size:12px;color:var(--muted);min-height:18px;margin-top:10px"></div>
+        </div>
+        <div class="service-section">
+          <div class="git-section-title">Tracked Services</div>
+          <div id="servicesList" class="service-empty">Open a project to manage its services.</div>
+        </div>
+        <div class="service-section">
+          <div class="git-section-title">Service Log Tail</div>
+          <div id="serviceLogMeta" style="font-size:12px;color:var(--muted);margin-bottom:10px">Select a service to inspect its recent logs.</div>
+          <pre id="serviceLogOutput" class="service-log">No log selected.</pre>
+        </div>
+      </div>
+    </div>
+
     <!-- Git tab -->
     <div class="tab-panel" id="panel-git">
       <div class="git-panel" id="gitPanel">
@@ -2354,7 +3249,53 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
     </div>
 
   </div>
+  <div class="status-bar">
+    <span class="status-pill" id="statusMode"><strong>AGENT</strong> mode</span>
+    <span class="status-pill" id="statusProject">No project selected</span>
+    <span class="status-pill" id="statusBranch">No branch</span>
+    <span class="status-pill" id="statusServices">0 services tracked</span>
+    <span class="status-pill" id="statusView">Agent Chat</span>
+  </div>
 </div>
+
+<aside class="inspector-panel">
+  <div class="inspector-header">
+    <div class="inspector-title">Agent-Focused Workbench</div>
+    <div class="inspector-sub">VSCode-inspired shell, but biased toward orchestration, debugging, and agent-guided iteration before raw file editing.</div>
+  </div>
+  <div class="inspector-card">
+    <div class="inspector-card-label">Current Mode</div>
+    <div class="inspector-card-title" id="inspectorMode">Agent Mode</div>
+    <div class="inspector-copy" id="inspectorQuickTip">Agent mode keeps chat, services, and project context prominent so the assistant can steer the work before you drop into code.</div>
+  </div>
+  <div class="inspector-card">
+    <div class="inspector-card-label">Project Pulse</div>
+    <div class="inspector-card-title" id="inspectorProjectName">No project</div>
+    <div class="inspector-copy" id="inspectorProjectPath">Open a project to populate the workbench.</div>
+    <div class="inspector-stat-grid">
+      <div class="inspector-stat"><span>Branch</span><strong id="inspectorBranch">-</strong></div>
+      <div class="inspector-stat"><span>Services</span><strong id="inspectorServices">0</strong></div>
+      <div class="inspector-stat"><span>Chats</span><strong id="inspectorRuns">0</strong></div>
+      <div class="inspector-stat"><span>View</span><strong id="inspectorView">Agent Chat</strong></div>
+    </div>
+  </div>
+  <div class="inspector-card">
+    <div class="inspector-card-label">Service Pulse</div>
+    <div class="inspector-list" id="inspectorServiceList">
+      <div class="inspector-empty">Tracked project services will appear here once a project is open.</div>
+    </div>
+  </div>
+  <div class="inspector-card">
+    <div class="inspector-card-label">Quick Actions</div>
+    <div class="inspector-actions">
+      <button class="mini-btn" onclick="openAgentSurface('chat')">Ask Agent</button>
+      <button class="mini-btn" onclick="openAgentSurface('services')">Check Services</button>
+      <button class="mini-btn" onclick="openCodingSurface('file')">Review Code</button>
+      <button class="mini-btn" onclick="openCodingSurface('git')">Source Control</button>
+    </div>
+    <div class="inspector-copy" id="inspectorRunSummary">Open a project and start from chat, then switch to coding mode when you want tighter file, terminal, and git focus.</div>
+  </div>
+</aside>
 
 <!-- Delete project confirmation modal -->
 <div class="modal-overlay" id="projDeleteModal">
@@ -2434,16 +3375,155 @@ let _runId = null;
 let _sseSource = null;
 let _termHistory = [];
 let _termHistIdx = -1;
+let _activeServiceLogId = '';
+let _activeTab = 'chat';
+let _workspaceMode = 'agent';
+let _servicesCache = [];
+let _gitStatusCache = null;
+let _projectRunCount = 0;
+let _projectChatMessages = [];
+
+function _currentViewLabel() {
+  return {
+    chat: 'Agent Chat',
+    file: 'File Viewer',
+    terminal: 'Terminal',
+    services: 'Services',
+    git: 'Git',
+  }[_activeTab] || 'Workspace';
+}
+
+function _renderInspectorServices() {
+  const box = document.getElementById('inspectorServiceList');
+  if (!box) return;
+  if (!_servicesCache.length) {
+    box.innerHTML = '<div class="inspector-empty">No tracked services yet. Start your frontend, backend, or database here so agents can reason about the live stack.</div>';
+    return;
+  }
+  box.innerHTML = _servicesCache.slice(0, 5).map(service => {
+    const status = service.status || (service.running ? 'running' : 'stopped');
+    return `
+      <div class="inspector-item">
+        <div class="inspector-item-main">
+          <div class="inspector-item-title">${esc(service.name || service.id || 'service')}</div>
+          <div class="inspector-item-sub">${esc(service.kind || 'service')} · ${esc(service.port ? ('port ' + service.port) : 'no port')}</div>
+        </div>
+        <div class="inspector-item-status ${esc(status)}">${esc(status)}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function updateWorkbenchChrome() {
+  const modeLabel = _workspaceMode === 'code' ? 'Coding Mode' : 'Agent Mode';
+  const modeBadge = _workspaceMode === 'code' ? 'Code priority' : 'Agent priority';
+  const tip = _workspaceMode === 'code'
+    ? 'Coding mode widens the explorer and keeps the editor, terminal, git, and live stack closer together.'
+    : 'Agent mode keeps chat, services, and project context prominent so the assistant can guide the work before you edit directly.';
+  const viewTrack = {
+    chat: 'Agent Chat is active. Ask for reviews, summaries, debugging help, or implementation guidance against the open project.',
+    file: 'File Viewer is active. Open source files from the explorer and inspect code without leaving the workbench.',
+    terminal: 'Terminal is active. Run project commands here and keep the output tied to the active project context.',
+    services: 'Services is active. Start, stop, restart, and inspect tracked frontend, backend, and database processes from here.',
+    git: 'Git is active. Review repository state and ship changes without leaving the workspace.',
+  }[_activeTab] || 'Switch between agent, code, service, and git surfaces from the workbench.';
+  const track = !_activeProjectName
+    ? 'Open a project and start from the agent workspace. Use coding mode when you want a denser editor flow.'
+    : viewTrack;
+  const branch = (_gitStatusCache && _gitStatusCache.is_git && _gitStatusCache.branch) ? _gitStatusCache.branch : 'No git';
+  const runningServices = _servicesCache.filter(service => service.running).length;
+
+  const wsModeBadge = document.getElementById('wsModeBadge');
+  const agentLensMode = document.getElementById('agentLensMode');
+  const agentLensCopy = document.getElementById('agentLensCopy');
+  const commandTrack = document.getElementById('commandTrack');
+  const statusMode = document.getElementById('statusMode');
+  const statusProject = document.getElementById('statusProject');
+  const statusBranch = document.getElementById('statusBranch');
+  const statusServices = document.getElementById('statusServices');
+  const statusView = document.getElementById('statusView');
+  const inspectorMode = document.getElementById('inspectorMode');
+  const inspectorQuickTip = document.getElementById('inspectorQuickTip');
+  const inspectorProjectName = document.getElementById('inspectorProjectName');
+  const inspectorProjectPath = document.getElementById('inspectorProjectPath');
+  const inspectorBranch = document.getElementById('inspectorBranch');
+  const inspectorServices = document.getElementById('inspectorServices');
+  const inspectorRuns = document.getElementById('inspectorRuns');
+  const inspectorView = document.getElementById('inspectorView');
+  const inspectorRunSummary = document.getElementById('inspectorRunSummary');
+  const filePanelSubtitle = document.getElementById('filePanelSubtitle');
+
+  if (wsModeBadge) wsModeBadge.textContent = modeBadge;
+  if (agentLensMode) agentLensMode.textContent = modeLabel.toLowerCase();
+  if (agentLensCopy) {
+    agentLensCopy.textContent = _activeProjectName
+      ? `${tip} Current focus: ${_currentViewLabel()}.`
+      : 'Open a project to start in an agent-guided workspace, then switch to coding mode when you want to edit, debug, or ship changes directly.';
+  }
+  if (commandTrack) commandTrack.textContent = track;
+  if (statusMode) statusMode.innerHTML = `<strong>${_workspaceMode === 'code' ? 'CODE' : 'AGENT'}</strong> mode`;
+  if (statusProject) statusProject.textContent = _activeProjectName || 'No project selected';
+  if (statusBranch) statusBranch.textContent = branch;
+  if (statusServices) statusServices.textContent = `${runningServices}/${_servicesCache.length} services running`;
+  if (statusView) statusView.textContent = _currentViewLabel();
+  if (inspectorMode) inspectorMode.textContent = modeLabel;
+  if (inspectorQuickTip) inspectorQuickTip.textContent = tip;
+  if (inspectorProjectName) inspectorProjectName.textContent = _activeProjectName || 'No project';
+  if (inspectorProjectPath) inspectorProjectPath.textContent = _activeProjectPath || 'Open a project to populate the workbench.';
+  if (inspectorBranch) inspectorBranch.textContent = branch;
+  if (inspectorServices) inspectorServices.textContent = `${runningServices}/${_servicesCache.length}`;
+  if (inspectorRuns) inspectorRuns.textContent = String(_projectRunCount || 0);
+  if (inspectorView) inspectorView.textContent = _currentViewLabel();
+  if (inspectorRunSummary) {
+    inspectorRunSummary.textContent = !_activeProjectName
+      ? 'Open a project and start from chat, then switch to coding mode when you want tighter file, terminal, and git focus.'
+      : `${_projectRunCount} saved chat turn${_projectRunCount === 1 ? '' : 's'}. Active surface: ${_currentViewLabel()}.`;
+  }
+  if (filePanelSubtitle) {
+    filePanelSubtitle.textContent = _workspaceMode === 'code'
+      ? 'Code-first explorer and editor support'
+      : 'Agent-first explorer and project context';
+  }
+  _renderInspectorServices();
+}
+
+function setWorkspaceMode(mode, opts = {}) {
+  _workspaceMode = mode === 'code' ? 'code' : 'agent';
+  document.body.classList.toggle('mode-agent', _workspaceMode === 'agent');
+  document.body.classList.toggle('mode-code', _workspaceMode === 'code');
+  document.querySelectorAll('.mode-chip').forEach(btn => btn.classList.toggle('active', btn.dataset.mode === _workspaceMode));
+  try { localStorage.setItem('kendr.project_ui_mode', _workspaceMode); } catch(_) {}
+  if (!(opts && opts.keepTab)) {
+    if (_workspaceMode === 'code' && (_activeTab === 'chat' || _activeTab === 'services')) switchTab('file');
+    else if (_workspaceMode === 'agent' && (_activeTab === 'file' || _activeTab === 'terminal' || _activeTab === 'git')) switchTab('chat');
+  }
+  updateWorkbenchChrome();
+}
+
+function openAgentSurface(tab = 'chat') {
+  setWorkspaceMode('agent', { keepTab: true });
+  switchTab(tab);
+}
+
+function openCodingSurface(tab = 'file') {
+  setWorkspaceMode('code', { keepTab: true });
+  switchTab(tab);
+}
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 function switchTab(name) {
+  _activeTab = name;
   document.querySelectorAll('.tab').forEach((t, i) => {
-    const tabs = ['chat','file','terminal','git'];
+    const tabs = ['chat','file','terminal','services','git'];
     t.classList.toggle('active', tabs[i] === name);
   });
+  document.querySelectorAll('.activity-btn[data-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === name));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
+  document.body.dataset.projectTab = name;
+  if (name === 'services') loadProjectServices();
   if (name === 'git') loadGitStatus();
+  updateWorkbenchChrome();
 }
 
 // ── Projects ─────────────────────────────────────────────────────────────────
@@ -2475,11 +3555,24 @@ function closeDeleteProjModal() { document.getElementById('projDeleteModal').cla
 async function _clearProjectUI(id) {
   if (_activeProjectId === id) {
     _activeProjectId = null; _activeProjectPath = null; _activeProjectName = '';
+    _activeServiceLogId = '';
+    _servicesCache = [];
+    _gitStatusCache = null;
+    _projectRunCount = 0;
+    _projectChatMessages = [];
     document.getElementById('wsTitle').textContent = 'Projects';
     document.getElementById('wsPath').style.display = 'none';
     document.getElementById('wsBranch').style.display = 'none';
     document.getElementById('filePanelTitle').textContent = 'No project open';
+    document.getElementById('filePanelSubtitle').textContent = 'Agent-first explorer';
     document.getElementById('fileTree').innerHTML = '<div style="padding:14px;font-size:12px;color:var(--muted)">Open a project to see its files.</div>';
+    document.getElementById('chatMessages').innerHTML = '<div class="msg-row system"><div class="msg-bubble">Open a project, then ask me anything about it — review code, explain files, find bugs, add features.</div></div>';
+    document.getElementById('projChatHistory').style.display = 'none';
+    document.getElementById('projChatHistoryList').innerHTML = '';
+    document.getElementById('servicesList').innerHTML = 'Open a project to manage its services.';
+    document.getElementById('serviceLogMeta').textContent = 'Select a service to inspect its recent logs.';
+    document.getElementById('serviceLogOutput').textContent = 'No log selected.';
+    updateWorkbenchChrome();
   }
 }
 async function removeProjectFromList() {
@@ -2518,6 +3611,8 @@ async function openProject(id, path, name) {
   _activeProjectId = id;
   _activeProjectPath = path;
   _activeProjectName = name;
+  _activeServiceLogId = '';
+  _projectChatMessages = [];
   document.getElementById('wsTitle').textContent = name;
   document.getElementById('wsPath').textContent = path;
   document.getElementById('wsPath').style.display = '';
@@ -2526,16 +3621,18 @@ async function openProject(id, path, name) {
   await fetch(API + '/api/projects/' + id + '/activate', { method: 'POST' });
   await loadProjects();
   await loadFileTree();
-  appendSysMsg('Opened project: ' + name + ' (' + path + ')');
   const gitBadge = document.getElementById('wsBranch');
   const status = await fetch(API + '/api/projects/' + id + '/git/status').then(r => r.json()).catch(() => null);
+  _gitStatusCache = status;
   if (status && status.is_git) {
     document.getElementById('wsBranchName').textContent = status.branch || 'main';
     gitBadge.style.display = '';
   } else {
     gitBadge.style.display = 'none';
   }
-  loadProjectRuns();
+  loadProjectServices();
+  await loadProjectChatHistory();
+  updateWorkbenchChrome();
 }
 
 let _projHistoryOpen = true;
@@ -2545,42 +3642,41 @@ function toggleChatHistory() {
   document.getElementById('chatHistoryToggle').textContent = _projHistoryOpen ? '\u25BC' : '\u25B6';
 }
 
-async function loadProjectRuns() {
+function scrollToChatMessage(messageId) {
+  const box = document.getElementById('chatMessages');
+  const node = box.querySelector('[data-message-id="' + esc(messageId) + '"]');
+  if (!node) return;
+  node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function renderProjectChatHistoryRail() {
   const historyBar = document.getElementById('projChatHistory');
   const listEl = document.getElementById('projChatHistoryList');
-  if (!_activeProjectPath) { historyBar.style.display = 'none'; return; }
-  try {
-    const r = await fetch(API + '/api/runs');
-    if (!r.ok) return;
-    const runs = await r.json();
-    const projRuns = (runs || []).filter(run => {
-      const wd = run.working_directory || '';
-      const sid = run.session_id || '';
-      return wd === _activeProjectPath || sid.includes('project_ui');
-    });
-    if (!projRuns.length) { historyBar.style.display = 'none'; return; }
-    historyBar.style.display = '';
+  const turns = (_projectChatMessages || []).filter(message => message.role === 'user');
+  _projectRunCount = turns.length;
+  if (!turns.length) {
+    historyBar.style.display = 'none';
     listEl.innerHTML = '';
-    projRuns.slice(0, 20).forEach(run => {
-      const status = (run.status || 'completed').toLowerCase();
-      const isRunning = status === 'running' || status === 'started';
-      const rawText = run.user_query || run.query || '';
-      const cleanText = rawText.replace(/^\[Project:[^\]]*\]\s*/i, '').trim();
-      const title = cleanText.split('\n')[0].substring(0, 80) || 'Untitled';
-      const ts = _relTime(run.started_at || run.updated_at || '');
-      const dotColor = isRunning ? 'var(--teal)' : status === 'failed' ? '#ef4444' : '#6b7280';
-      const dot = isRunning
-        ? '<span class="spinner" style="width:8px;height:8px;display:inline-block;flex-shrink:0"></span>'
-        : '<span style="width:7px;height:7px;border-radius:50%;display:inline-block;flex-shrink:0;background:' + dotColor + '"></span>';
-      const item = document.createElement('div');
-      item.style.cssText = 'display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:12px;color:#ccc;transition:background 0.15s';
-      item.innerHTML = dot + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(title) + '</span><span style="font-size:10px;color:var(--muted);flex-shrink:0">' + ts + '</span>';
-      item.onmouseenter = () => item.style.background = 'rgba(255,255,255,0.05)';
-      item.onmouseleave = () => item.style.background = '';
-      item.onclick = () => loadProjectRun(run.run_id);
-      listEl.appendChild(item);
-    });
-  } catch(e) { historyBar.style.display = 'none'; }
+    updateWorkbenchChrome();
+    return;
+  }
+  historyBar.style.display = '';
+  listEl.style.display = _projHistoryOpen ? '' : 'none';
+  listEl.innerHTML = '';
+  turns.slice().reverse().slice(0, 20).forEach(message => {
+    const title = String(message.content || '').trim().split('\n')[0].substring(0, 80) || 'Untitled';
+    const ts = _relTime(message.created_at || '');
+    const item = document.createElement('div');
+    item.style.cssText = 'display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:12px;color:#ccc;transition:background 0.15s';
+    item.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;display:inline-block;flex-shrink:0;background:var(--teal)"></span>'
+      + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(title) + '</span>'
+      + '<span style="font-size:10px;color:var(--muted);flex-shrink:0">' + esc(ts) + '</span>';
+    item.onmouseenter = () => item.style.background = 'rgba(255,255,255,0.05)';
+    item.onmouseleave = () => item.style.background = '';
+    item.onclick = () => scrollToChatMessage(message.message_id || '');
+    listEl.appendChild(item);
+  });
+  updateWorkbenchChrome();
 }
 
 function _relTime(iso) {
@@ -2596,43 +3692,59 @@ function _relTime(iso) {
   } catch(_) { return ''; }
 }
 
-async function loadProjectRun(runId) {
+function renderProjectChatMessages(messages) {
   const box = document.getElementById('chatMessages');
-  box.innerHTML = '<div class="msg-row system"><div class="msg-bubble"><span class="spinner"></span> Loading...</div></div>';
+  _projectChatMessages = Array.isArray(messages) ? messages.slice() : [];
+  _projectRunCount = _projectChatMessages.filter(message => message.role === 'user').length;
+  if (!_projectChatMessages.length) {
+    box.innerHTML = '<div class="msg-row system"><div class="msg-bubble">This project chat is persisted. Ask about the codebase, running services, debugging, or next changes.</div></div>';
+    renderProjectChatHistoryRail();
+    return;
+  }
+  box.innerHTML = '';
+  _projectChatMessages.forEach(message => {
+    const row = document.createElement('div');
+    const role = message.role || 'system';
+    row.className = 'msg-row ' + role;
+    if (message.message_id) row.dataset.messageId = message.message_id;
+    row.innerHTML = '<div class="msg-bubble"></div>';
+    const bubble = row.querySelector('.msg-bubble');
+    setChatBubbleContent(bubble, message.content || '', message.content_format || '', role);
+    if (message.created_at && role !== 'system') {
+      const meta = document.createElement('div');
+      meta.className = 'msg-ctx';
+      meta.innerHTML = '<span>' + esc(_relTime(message.created_at) || new Date(message.created_at).toLocaleString()) + '</span>';
+      bubble.appendChild(meta);
+    }
+    box.appendChild(row);
+  });
+  box.scrollTop = box.scrollHeight;
+  renderProjectChatHistoryRail();
+}
+
+async function loadProjectChatHistory() {
+  const box = document.getElementById('chatMessages');
+  const historyBar = document.getElementById('projChatHistory');
+  if (!_activeProjectId) {
+    _projectChatMessages = [];
+    _projectRunCount = 0;
+    historyBar.style.display = 'none';
+    box.innerHTML = '<div class="msg-row system"><div class="msg-bubble">Open a project, then ask me anything about it — review code, explain files, find bugs, add features.</div></div>';
+    updateWorkbenchChrome();
+    return;
+  }
+  box.innerHTML = '<div class="msg-row system"><div class="msg-bubble"><span class="spinner"></span> Loading saved project chat...</div></div>';
   try {
-    const r = await fetch(API + '/api/runs/' + encodeURIComponent(runId));
-    if (!r.ok) { box.innerHTML = '<div class="msg-row system"><div class="msg-bubble" style="color:var(--crimson)">Failed to load run.</div></div>'; return; }
+    const r = await fetch(API + '/api/projects/' + encodeURIComponent(_activeProjectId) + '/chat/history');
     const d = await r.json();
-    box.innerHTML = '';
-    const rawQuery = d.user_query || d.query || '';
-    const cleanQuery = rawQuery.replace(/^\[Project:[^\]]*\]\s*/i, '').trim();
-    const output = d.final_output || d.output || d.draft_response || '';
-    const status = (d.status || 'completed').toLowerCase();
-    if (cleanQuery) {
-      const urow = document.createElement('div');
-      urow.className = 'msg-row user';
-      urow.innerHTML = '<div class="msg-bubble"><div style="white-space:pre-wrap">' + esc(cleanQuery) + '</div></div>';
-      box.appendChild(urow);
-    }
-    if (output) {
-      const arow = document.createElement('div');
-      arow.className = 'msg-row agent';
-      arow.innerHTML = '<div class="msg-bubble">' + esc(output).replace(/\n/g, '<br>') + '</div>';
-      box.appendChild(arow);
-    }
-    const meta = document.createElement('div');
-    const statusColor = status === 'completed' ? 'var(--teal)' : status === 'failed' ? 'var(--crimson)' : 'var(--muted)';
-    meta.style.cssText = 'padding:6px 14px;font-size:10px;color:var(--muted);display:flex;gap:8px;align-items:center';
-    meta.innerHTML = '<span style="color:' + statusColor + ';font-weight:600">' + esc(status) + '</span>'
-      + (d.started_at ? '<span>' + new Date(d.started_at).toLocaleString() + '</span>' : '')
-      + '<span style="font-family:monospace;opacity:0.5">' + esc(runId) + '</span>';
-    box.appendChild(meta);
-    box.scrollTop = box.scrollHeight;
-    if (!cleanQuery && !output) {
-      box.innerHTML = '<div class="msg-row system"><div class="msg-bubble" style="color:var(--muted)">No content for this run.</div></div>';
-    }
+    if (!r.ok || d.error) throw new Error(d.error || 'Failed to load project chat history');
+    renderProjectChatMessages(d.messages || []);
   } catch(e) {
+    _projectChatMessages = [];
+    _projectRunCount = 0;
+    historyBar.style.display = 'none';
     box.innerHTML = '<div class="msg-row system"><div class="msg-bubble" style="color:var(--crimson)">Error: ' + esc(String(e)) + '</div></div>';
+    updateWorkbenchChrome();
   }
 }
 
@@ -2655,7 +3767,7 @@ function renderTree(nodes, depth) {
       const childHtml = renderTree(n.children || [], depth + 1);
       const id = 'tree-' + btoa(n.path).replace(/[^a-zA-Z0-9]/g,'').slice(-10);
       return `<div class="tree-node">
-        <div class="tree-row" style="padding-left:${12 + indent}px" onclick="toggleDir('${id}', this)">
+        <div class="tree-row" data-node-type="dir" data-tree-id="${id}" style="padding-left:${12 + indent}px">
           <span class="icon" id="icon-${id}">&#x25B8;</span>
           <span style="font-size:13px">&#x1F4C2;</span>
           <span class="fname">${esc(n.name)}</span>
@@ -2664,7 +3776,7 @@ function renderTree(nodes, depth) {
       </div>`;
     } else {
       const fileIcon = getFileIcon(n.name);
-      return `<div class="tree-row" style="padding-left:${12 + indent}px" onclick="openFile('${esc(n.path)}','${esc(n.name)}')">
+      return `<div class="tree-row" data-node-type="file" data-path="${esc(n.path)}" data-name="${esc(n.name)}" style="padding-left:${12 + indent}px">
         <span class="icon">&nbsp;</span>
         <span style="font-size:12px">${fileIcon}</span>
         <span class="fname">${esc(n.name)}</span>
@@ -2674,16 +3786,31 @@ function renderTree(nodes, depth) {
   }).join('');
 }
 
-function toggleDir(id, row) {
+function handleFileTreeClick(event) {
+  const row = event.target.closest('.tree-row');
+  if (!row) return;
+  if (row.dataset.nodeType === 'dir') {
+    toggleDir(row.dataset.treeId || '');
+    return;
+  }
+  if (row.dataset.nodeType === 'file') {
+    openFile(row.dataset.path || '', row.dataset.name || '', row);
+  }
+}
+
+function toggleDir(id) {
+  if (!id) return;
   const el = document.getElementById(id);
   const icon = document.getElementById('icon-' + id);
+  if (!el || !icon) return;
   const open = el.style.display !== 'none';
   el.style.display = open ? 'none' : 'block';
   icon.textContent = open ? '\u25B8' : '\u25BE';
 }
 
-async function openFile(path, name) {
-  document.querySelectorAll('.tree-row').forEach(r => r.classList.remove('selected'));
+async function openFile(path, name, rowEl = null) {
+  document.querySelectorAll('.file-tree .tree-row').forEach(r => r.classList.remove('selected'));
+  if (rowEl) rowEl.classList.add('selected');
   switchTab('file');
   document.getElementById('fileViewerPath').textContent = path;
   document.getElementById('fileViewerContent').textContent = 'Loading...';
@@ -2714,11 +3841,130 @@ function fmtSize(bytes) {
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
-function appendMsg(role, text) {
+function escapeHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function isLikelyMarkdown(text) {
+  return /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|>\s|\d+\.\s|```)|\[[^\]]+\]\((https?:\/\/|\/)[^)]+\)|`[^`]+`|\*\*[^*]+\*\*|(^|\n)\|.+\|/m.test(String(text || ''));
+}
+
+function renderInlineMarkdown(text) {
+  let html = escapeHtml(text);
+  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+|\/[^)\s]*)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  html = html.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+  html = html.replace(/(^|[^_])_([^_\n]+)_(?!_)/g, '$1<em>$2</em>');
+  html = html.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  return html;
+}
+
+function renderMarkdown(text) {
+  const source = String(text || '').replace(/\r\n?/g, '\n');
+  const codeBlocks = [];
+  let working = source.replace(/```([\w.+-]+)?\n([\s\S]*?)```/g, (_, lang, code) => {
+    const index = codeBlocks.length;
+    const langAttr = lang ? ` data-lang="${escapeHtml(lang)}"` : '';
+    codeBlocks.push(`<pre><code${langAttr}>${escapeHtml(String(code || '').replace(/\n$/, ''))}</code></pre>`);
+    return `@@CODEBLOCK${index}@@`;
+  });
+  const lines = working.split('\n');
+  const out = [];
+  let paragraph = [];
+  let inUl = false;
+  let inOl = false;
+
+  function flushParagraph() {
+    if (!paragraph.length) return;
+    out.push('<p>' + paragraph.map(renderInlineMarkdown).join('<br>') + '</p>');
+    paragraph = [];
+  }
+
+  function closeLists() {
+    if (inUl) { out.push('</ul>'); inUl = false; }
+    if (inOl) { out.push('</ol>'); inOl = false; }
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine || '';
+    const trimmed = line.trim();
+    const codeMatch = trimmed.match(/^@@CODEBLOCK(\d+)@@$/);
+    if (!trimmed) {
+      flushParagraph();
+      closeLists();
+      continue;
+    }
+    if (codeMatch) {
+      flushParagraph();
+      closeLists();
+      out.push(codeBlocks[Number(codeMatch[1])] || '');
+      continue;
+    }
+    const headingMatch = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      flushParagraph();
+      closeLists();
+      const level = headingMatch[1].length;
+      out.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+      continue;
+    }
+    const quoteMatch = line.match(/^\s{0,3}>\s?(.*)$/);
+    if (quoteMatch) {
+      flushParagraph();
+      closeLists();
+      out.push('<blockquote>' + renderInlineMarkdown(quoteMatch[1]) + '</blockquote>');
+      continue;
+    }
+    const ulMatch = line.match(/^\s{0,3}[-*+]\s+(.*)$/);
+    if (ulMatch) {
+      flushParagraph();
+      if (inOl) { out.push('</ol>'); inOl = false; }
+      if (!inUl) { out.push('<ul>'); inUl = true; }
+      out.push('<li>' + renderInlineMarkdown(ulMatch[1]) + '</li>');
+      continue;
+    }
+    const olMatch = line.match(/^\s{0,3}(\d+)\.\s+(.*)$/);
+    if (olMatch) {
+      flushParagraph();
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      if (!inOl) { out.push('<ol>'); inOl = true; }
+      out.push('<li>' + renderInlineMarkdown(olMatch[2]) + '</li>');
+      continue;
+    }
+    if (/^\s{0,3}---+\s*$/.test(line)) {
+      flushParagraph();
+      closeLists();
+      out.push('<hr>');
+      continue;
+    }
+    paragraph.push(line);
+  }
+  flushParagraph();
+  closeLists();
+  return out.join('');
+}
+
+function renderChatContent(text, contentFormat = '') {
+  const body = String(text || '');
+  const wantsMarkdown = contentFormat === 'markdown' || (!contentFormat && isLikelyMarkdown(body));
+  if (!wantsMarkdown) return `<div class="plain-text">${escapeHtml(body)}</div>`;
+  return `<div class="markdown-body">${renderMarkdown(body)}</div>`;
+}
+
+function setChatBubbleContent(bubble, text, contentFormat = '', role = 'agent') {
+  if (!bubble) return;
+  const format = role === 'system' ? 'text' : contentFormat;
+  bubble.innerHTML = renderChatContent(text, format);
+}
+
+function appendMsg(role, text, contentFormat = '') {
   const box = document.getElementById('chatMessages');
   const div = document.createElement('div');
   div.className = 'msg-row ' + role;
-  div.innerHTML = '<div class="msg-bubble">' + esc(text).replace(/\n/g,'<br>') + '</div>';
+  div.innerHTML = '<div class="msg-bubble"></div>';
+  setChatBubbleContent(div.querySelector('.msg-bubble'), text, contentFormat, role);
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
   return div;
@@ -2727,7 +3973,8 @@ function appendSysMsg(text) {
   const box = document.getElementById('chatMessages');
   const div = document.createElement('div');
   div.className = 'msg-row system';
-  div.innerHTML = '<div class="msg-bubble">' + esc(text) + '</div>';
+  div.innerHTML = '<div class="msg-bubble"></div>';
+  setChatBubbleContent(div.querySelector('.msg-bubble'), text, 'text', 'system');
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
 }
@@ -2813,13 +4060,18 @@ async function sendChat() {
   inp.value = '';
   inp.style.height = 'auto';
   btn.disabled = true;
-  appendMsg('user', text);
+  appendMsg('user', text, isLikelyMarkdown(text) ? 'markdown' : 'text');
   const agentDiv = appendMsg('agent', '');
   const bubble = agentDiv.querySelector('.msg-bubble');
   bubble.innerHTML = '<span class="spinner"></span>';
   const scroller = document.getElementById('chatMessages');
   try {
-    const payload = { text, project_root: _activeProjectPath, project_name: _activeProjectName || '' };
+    const payload = {
+      text,
+      project_id: _activeProjectId,
+      project_root: _activeProjectPath,
+      project_name: _activeProjectName || '',
+    };
     if (_projSelectedModel) payload.model = _projSelectedModel;
     if (_projSelectedProvider) payload.provider = _projSelectedProvider;
     const resp = await fetch(API + '/api/project/ask', {
@@ -2829,7 +4081,7 @@ async function sendChat() {
     });
     if (!resp.ok || !resp.body) {
       const txt = await resp.text();
-      bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 Server error: ' + esc(txt.slice(0, 200)) + '</span>';
+      bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 Server error: ' + escapeHtml(txt.slice(0, 200)) + '</span>';
       btn.disabled = false; return;
     }
     const reader = resp.body.getReader();
@@ -2859,18 +4111,18 @@ async function sendChat() {
           const d = JSON.parse(evData);
           if (evName === 'log') {
             if (!answered) {
-              bubble.innerHTML = '<span style="color:var(--muted);font-size:11px">' + esc(d.msg || 'Processing...') + '</span>';
+              bubble.innerHTML = '<div class="plain-text" style="color:var(--muted);font-size:11px">' + escapeHtml(d.msg || 'Processing...') + '</div>';
               scroller.scrollTop = 999999;
             }
           } else if (evName === 'result') {
             answered = true;
             const answer = d.answer || '(No response)';
-            bubble.innerHTML = esc(answer).replace(/\n/g, '<br>');
+            setChatBubbleContent(bubble, answer, isLikelyMarkdown(answer) ? 'markdown' : 'text', 'agent');
             if (d.context_tokens && d.model_context_limit) {
               const ctxMeta = document.createElement('div');
               ctxMeta.className = 'msg-ctx';
               const pct = Math.round(d.context_pct || 0);
-              ctxMeta.innerHTML = '<span>\uD83D\uDCAC ' + esc(d.model || '') + '</span>'
+              ctxMeta.innerHTML = '<span>\uD83D\uDCAC ' + escapeHtml(d.model || '') + '</span>'
                 + '<span style="opacity:0.6">\u2022</span>'
                 + '<span>' + _fmtTokens(d.context_tokens) + ' / ' + _fmtTokens(d.model_context_limit) + ' ctx (' + pct + '%)'
                 + (d.kendr_md_generated ? ' \u2728 kendr.md created' : d.kendr_md_loaded ? ' \uD83D\uDCCB kendr.md' : '') + '</span>';
@@ -2879,15 +4131,16 @@ async function sendChat() {
             }
             scroller.scrollTop = 999999;
           } else if (evName === 'error') {
-            bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 ' + esc(d.error || 'Unknown error') + '</span>';
+            bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 ' + escapeHtml(d.error || 'Unknown error') + '</span>';
           }
         } catch(_) {}
       }
     }
     if (!answered) bubble.innerHTML = '<em style="color:var(--muted)">No response received.</em>';
+    if (_activeProjectId) await loadProjectChatHistory();
     btn.disabled = false;
   } catch(e) {
-    bubble.innerHTML = '<span style="color:var(--crimson)">Error: ' + esc(String(e)) + '</span>';
+    bubble.innerHTML = '<span style="color:var(--crimson)">Error: ' + escapeHtml(String(e)) + '</span>';
     btn.disabled = false;
   }
 }
@@ -2924,6 +4177,223 @@ async function runTermCmd() {
   if (output.textContent.length > 30000) output.textContent = output.textContent.slice(-20000);
 }
 
+// ── Services ─────────────────────────────────────────────────────────────────
+function serviceStateClass(status) {
+  if (status === 'running') return 'running';
+  if (status === 'degraded') return 'degraded';
+  return 'stopped';
+}
+
+function serviceStateText(service) {
+  return service.status || (service.running ? 'running' : 'stopped');
+}
+
+async function loadProjectServices() {
+  const listEl = document.getElementById('servicesList');
+  if (!_activeProjectId) {
+    _servicesCache = [];
+    listEl.innerHTML = 'Open a project to manage its services.';
+    updateWorkbenchChrome();
+    return;
+  }
+  listEl.innerHTML = '<div class="service-empty"><span class="spinner"></span> Loading tracked services...</div>';
+  try {
+    const r = await fetch(API + '/api/projects/' + _activeProjectId + '/services');
+    const payload = await r.json();
+    const services = payload.services || [];
+    _servicesCache = services;
+    if (!services.length) {
+      listEl.innerHTML = '<div class="service-empty">No tracked services yet. Start one above so Kendr can monitor it, include it in project context, and surface it in <code>kendr gateway status</code>.</div>';
+      if (!_activeServiceLogId) {
+        document.getElementById('serviceLogMeta').textContent = 'Select a service to inspect its recent logs.';
+        document.getElementById('serviceLogOutput').textContent = 'No log selected.';
+      }
+      updateWorkbenchChrome();
+      return;
+    }
+    listEl.innerHTML = services.map(service => {
+      const state = serviceStateText(service);
+      const stateClass = serviceStateClass(state);
+      const port = service.port ? ('port ' + service.port) : 'no port';
+      const pid = service.pid ? ('pid ' + service.pid) : 'pid -';
+      const kind = service.kind || 'service';
+      const health = service.health_ok ? 'healthy' : (service.health_url ? 'health unknown' : 'no healthcheck');
+      const command = esc(service.command || '(no command stored)');
+      const logPath = esc(service.log_path || '-');
+      const url = service.url ? `<a href="${esc(service.url)}" target="_blank" rel="noreferrer" style="color:var(--teal);text-decoration:none">${esc(service.url)}</a>` : '<span style="color:var(--muted)">no URL</span>';
+      const startBtn = service.running
+        ? `<button class="btn btn-outline" onclick="restartProjectService('${esc(service.id)}')">&#x21BB; Restart</button>`
+        : `<button class="btn btn-primary" onclick="startTrackedProjectService('${esc(service.id)}')">&#x25B6; Start</button>`;
+      const stopBtn = service.running
+        ? `<button class="btn btn-danger" onclick="stopProjectService('${esc(service.id)}')">&#x23F9; Stop</button>`
+        : `<button class="btn btn-outline" onclick="stopProjectService('${esc(service.id)}')">Mark Stopped</button>`;
+      return `
+      <div class="service-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <div>
+            <div style="font-size:14px;font-weight:700">${esc(service.name || service.id)}</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:4px">id: <code>${esc(service.id)}</code></div>
+          </div>
+          <div class="service-pill ${stateClass}">${esc(state)}</div>
+        </div>
+        <div class="service-meta">
+          <div class="service-pill">${esc(kind)}</div>
+          <div class="service-pill">${esc(port)}</div>
+          <div class="service-pill">${esc(pid)}</div>
+          <div class="service-pill">${esc(health)}</div>
+        </div>
+        <div class="service-command">${command}</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:10px">cwd: ${esc(service.cwd || _activeProjectPath || '-')}</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">url: ${url}</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">log: <code>${logPath}</code></div>
+        <div class="git-actions" style="margin-top:12px">
+          ${startBtn}
+          ${stopBtn}
+          <button class="btn btn-outline" onclick="loadProjectServiceLog('${esc(service.id)}')">&#x1F4DC; View Logs</button>
+        </div>
+      </div>`;
+    }).join('');
+    if (_activeServiceLogId) {
+      const exists = services.some(service => service.id === _activeServiceLogId);
+      if (exists) loadProjectServiceLog(_activeServiceLogId);
+    }
+  } catch(e) {
+    _servicesCache = [];
+    listEl.innerHTML = '<div class="service-empty" style="color:var(--crimson)">Error: ' + esc(String(e)) + '</div>';
+  }
+  updateWorkbenchChrome();
+}
+
+async function createProjectService() {
+  const msg = document.getElementById('svcMsg');
+  if (!_activeProjectId) { msg.style.color = 'var(--crimson)'; msg.textContent = 'Open a project first.'; return; }
+  const name = document.getElementById('svcName').value.trim();
+  const command = document.getElementById('svcCommand').value.trim();
+  const kind = document.getElementById('svcKind').value.trim();
+  const portVal = document.getElementById('svcPort').value.trim();
+  const health_url = document.getElementById('svcHealthUrl').value.trim();
+  let cwd = document.getElementById('svcCwd').value.trim();
+  if (!name || !command) {
+    msg.style.color = 'var(--crimson)';
+    msg.textContent = 'Service name and command are required.';
+    return;
+  }
+  if (cwd && _activeProjectPath && !cwd.startsWith('/') && !cwd.match(/^[A-Za-z]:\\/)) {
+    cwd = (_activeProjectPath.replace(/[\\\/]+$/, '')) + '/' + cwd.replace(/^\.?\//, '');
+  }
+  msg.style.color = 'var(--muted)';
+  msg.textContent = 'Starting service...';
+  try {
+    const payload = { name, command, kind, cwd, health_url };
+    if (portVal) payload.port = Number(portVal);
+    const r = await fetch(API + '/api/projects/' + _activeProjectId + '/services/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || 'Failed to start service');
+    msg.style.color = 'var(--teal)';
+    msg.textContent = 'Service started: ' + (d.name || d.id);
+    _activeServiceLogId = d.id || '';
+    document.getElementById('svcCommand').value = '';
+    await loadProjectServices();
+    if (_activeServiceLogId) await loadProjectServiceLog(_activeServiceLogId);
+  } catch(e) {
+    msg.style.color = 'var(--crimson)';
+    msg.textContent = 'Error: ' + e;
+  }
+}
+
+async function startTrackedProjectService(serviceId) {
+  const msg = document.getElementById('svcMsg');
+  msg.style.color = 'var(--muted)';
+  msg.textContent = 'Starting tracked service...';
+  try {
+    const r = await fetch(API + '/api/projects/' + _activeProjectId + '/services/' + encodeURIComponent(serviceId) + '/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || 'Failed to start service');
+    msg.style.color = 'var(--teal)';
+    msg.textContent = 'Service started: ' + (d.name || d.id || serviceId);
+    _activeServiceLogId = d.id || serviceId;
+    await loadProjectServices();
+    await loadProjectServiceLog(_activeServiceLogId);
+  } catch(e) {
+    msg.style.color = 'var(--crimson)';
+    msg.textContent = 'Error: ' + e;
+  }
+}
+
+async function stopProjectService(serviceId) {
+  const msg = document.getElementById('svcMsg');
+  msg.style.color = 'var(--muted)';
+  msg.textContent = 'Stopping service...';
+  try {
+    const r = await fetch(API + '/api/projects/' + _activeProjectId + '/services/' + encodeURIComponent(serviceId) + '/stop', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || 'Failed to stop service');
+    msg.style.color = 'var(--teal)';
+    msg.textContent = 'Service stopped: ' + (d.name || d.id || serviceId);
+    _activeServiceLogId = d.id || serviceId;
+    await loadProjectServices();
+    await loadProjectServiceLog(_activeServiceLogId);
+  } catch(e) {
+    msg.style.color = 'var(--crimson)';
+    msg.textContent = 'Error: ' + e;
+  }
+}
+
+async function restartProjectService(serviceId) {
+  const msg = document.getElementById('svcMsg');
+  msg.style.color = 'var(--muted)';
+  msg.textContent = 'Restarting service...';
+  try {
+    const r = await fetch(API + '/api/projects/' + _activeProjectId + '/services/' + encodeURIComponent(serviceId) + '/restart', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || 'Failed to restart service');
+    msg.style.color = 'var(--teal)';
+    msg.textContent = 'Service restarted: ' + (d.name || d.id || serviceId);
+    _activeServiceLogId = d.id || serviceId;
+    await loadProjectServices();
+    await loadProjectServiceLog(_activeServiceLogId);
+  } catch(e) {
+    msg.style.color = 'var(--crimson)';
+    msg.textContent = 'Error: ' + e;
+  }
+}
+
+async function loadProjectServiceLog(serviceId) {
+  if (!_activeProjectId || !serviceId) return;
+  _activeServiceLogId = serviceId;
+  const meta = document.getElementById('serviceLogMeta');
+  const out = document.getElementById('serviceLogOutput');
+  meta.textContent = 'Loading log tail for ' + serviceId + '...';
+  out.textContent = '';
+  try {
+    const r = await fetch(API + '/api/projects/' + _activeProjectId + '/services/' + encodeURIComponent(serviceId) + '/log');
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || 'Failed to load log');
+    meta.textContent = (d.log_path || serviceId) + (d.truncated ? ' (tail)' : '');
+    out.textContent = d.content || '(log file is empty)';
+    out.scrollTop = out.scrollHeight;
+  } catch(e) {
+    meta.textContent = 'Log load failed';
+    out.textContent = 'Error: ' + e;
+  }
+}
+
 // ── Git ───────────────────────────────────────────────────────────────────────
 async function loadGitStatus() {
   if (!_activeProjectId) return;
@@ -2932,8 +4402,10 @@ async function loadGitStatus() {
   try {
     const r = await fetch(API + '/api/projects/' + _activeProjectId + '/git/status');
     const s = await r.json();
+    _gitStatusCache = s;
     if (!s.is_git) {
       panel.innerHTML = '<div class="git-section"><div style="color:var(--muted)">&#x26A0; Not a git repository.</div><button class="btn btn-outline" style="margin-top:10px" onclick="gitRun(\'git init\')">Initialize git repo</button></div>';
+      updateWorkbenchChrome();
       return;
     }
     const changed = (s.changed || []).map(f => `<span class="file-badge changed">M ${esc(f)}</span>`).join('');
@@ -2976,7 +4448,8 @@ async function loadGitStatus() {
         <button class="btn btn-purple" onclick="switchTab(\'terminal\')">&#x1F4BB; Open Terminal</button>
       </div>
     </div>`;
-  } catch(e) { panel.innerHTML = '<div style="color:var(--crimson)">Error: ' + e + '</div>'; }
+  } catch(e) { panel.innerHTML = '<div style="color:var(--crimson)">Error: ' + e + '</div>'; _gitStatusCache = null; }
+  updateWorkbenchChrome();
 }
 
 async function gitCommitPush() {
@@ -3067,6 +4540,18 @@ function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 (async () => {
+  try {
+    const savedMode = localStorage.getItem('kendr.project_ui_mode');
+    if (savedMode === 'code' || savedMode === 'agent') {
+      setWorkspaceMode(savedMode, { keepTab: true });
+    } else {
+      updateWorkbenchChrome();
+    }
+  } catch(_) {
+    updateWorkbenchChrome();
+  }
+  const fileTree = document.getElementById('fileTree');
+  if (fileTree) fileTree.addEventListener('click', handleFileTreeClick);
   await loadProjects();
   loadProjModels();
   // Try to open the active project
@@ -3075,6 +4560,7 @@ function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'
     const p = await r.json();
     if (p && p.id) await openProject(p.id, p.path, p.name);
   } catch(e) {}
+  updateWorkbenchChrome();
 })();
 </script>
 </body>
@@ -5306,7 +6792,12 @@ load();
 
 class KendrUIHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass
+        try:
+            rendered = fmt % args
+        except Exception:
+            rendered = fmt
+        client = self.client_address[0] if getattr(self, "client_address", None) else "-"
+        _log.info("[request] %s %s", client, rendered)
 
     _CORS_SAFE_PREFIXES = ("/api/stream", "/stream")
 
@@ -5639,39 +7130,7 @@ strong { color: var(--text); }
             if not run_id or not name or "\\" in name or name.startswith(".") or ".." in name:
                 self._json(400, {"error": "invalid_request"})
                 return
-            file_path = ""
-            # Primary search: look inside the run's output_dir from DB
-            try:
-                run_row = _db_get_run(run_id)
-                output_dir = run_row.get("run_output_dir", "") if run_row else ""
-                if output_dir:
-                    candidate = os.path.join(output_dir, name)
-                    if os.path.isfile(candidate):
-                        file_path = candidate
-            except Exception:
-                pass
-            # Secondary search: scan artifact_files list stored in pending run result
-            if not file_path:
-                with _pending_lock:
-                    run_state = _pending_runs.get(run_id, {})
-                result_data = run_state.get("result", {})
-                for af in result_data.get("artifact_files", []):
-                    if af.get("name") == name:
-                        cand = af.get("path", "")
-                        if cand and os.path.isfile(cand):
-                            file_path = cand
-                            break
-                # Fallback: search common output subdirectories
-                if not file_path:
-                    for key in (
-                        "long_document_compiled_path",
-                        "long_document_compiled_pdf_path",
-                        "long_document_compiled_docx_path",
-                    ):
-                        cand = str(result_data.get(key) or "").strip()
-                        if cand and os.path.basename(cand) == name and os.path.isfile(cand):
-                            file_path = cand
-                            break
+            file_path = _resolve_run_artifact_path(run_id, name)
             if not file_path:
                 self._json(404, {"error": "file_not_found", "name": name})
                 return
@@ -5686,6 +7145,39 @@ strong { color: var(--text); }
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+            return
+        if path == "/api/artifacts/view":
+            params = parse_qs(parsed.query or "")
+            run_id = (params.get("run_id") or [""])[0]
+            name = (params.get("name") or [""])[0]
+            if not run_id or not name or "\\" in name or name.startswith(".") or ".." in name:
+                self._json(400, {"error": "invalid_request"})
+                return
+            file_path = _resolve_run_artifact_path(run_id, name)
+            if not file_path:
+                self._json(404, {"error": "file_not_found", "name": name})
+                return
+            try:
+                with open(file_path, "rb") as fh:
+                    data = fh.read()
+                import mimetypes
+                mime_type, _ = mimetypes.guess_type(file_path)
+                content_type = mime_type or "application/octet-stream"
+                safe_name = os.path.basename(file_path)
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Disposition", f'inline; filename="{safe_name}"')
+                self.send_header("X-Frame-Options", "SAMEORIGIN")
+                if content_type.startswith("text/html"):
+                    self.send_header(
+                        "Content-Security-Policy",
+                        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; frame-ancestors 'self'; base-uri 'none'",
+                    )
                 self.end_headers()
                 self.wfile.write(data)
             except Exception as exc:
@@ -5791,6 +7283,22 @@ strong { color: var(--text); }
             project_root = (params.get("root") or [""])[0]
             self._handle_project_read_file(file_path, project_root)
             return
+        if path.startswith("/api/projects/") and path.endswith("/chat/history"):
+            project_id = path[len("/api/projects/"):-len("/chat/history")]
+            self._handle_project_chat_history(project_id)
+            return
+        if path.startswith("/api/projects/") and path.endswith("/services"):
+            project_id = path[len("/api/projects/"):-len("/services")]
+            self._handle_project_services_list(project_id)
+            return
+        if path.startswith("/api/projects/") and path.endswith("/log"):
+            rest = path[len("/api/projects/"):]
+            marker = "/services/"
+            if marker in rest and rest.endswith("/log"):
+                project_id, service_rest = rest.split(marker, 1)
+                service_id = service_rest[:-len("/log")].strip("/")
+                self._handle_project_service_log(project_id, service_id)
+                return
         if path.startswith("/api/projects/") and path.endswith("/files"):
             project_id = path[len("/api/projects/"):-len("/files")]
             self._handle_project_file_tree(project_id)
@@ -5831,6 +7339,17 @@ strong { color: var(--text); }
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
+
+        content_type = str(self.headers.get("Content-Type", "") or "")
+        if content_type.startswith("multipart/form-data"):
+            if path == "/api/rag/upload":
+                self._handle_rag_upload({})
+                return
+            if path == "/api/deep-research/upload":
+                self._handle_deep_research_upload()
+                return
+            self._json(415, {"error": "multipart_not_supported", "path": path})
+            return
 
         try:
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -5907,6 +7426,27 @@ strong { color: var(--text); }
         if path == "/api/projects/shell":
             self._handle_project_shell(body)
             return
+        if path.startswith("/api/projects/") and path.endswith("/services/start"):
+            project_id = path[len("/api/projects/"):-len("/services/start")]
+            self._handle_project_service_start(project_id, body)
+            return
+        if path.startswith("/api/projects/") and "/services/" in path:
+            rest = path[len("/api/projects/"):]
+            project_id, tail = rest.split("/services/", 1)
+            if tail.endswith("/stop"):
+                service_id = tail[:-len("/stop")].strip("/")
+                self._handle_project_service_stop(project_id, service_id)
+                return
+            if tail.endswith("/restart"):
+                service_id = tail[:-len("/restart")].strip("/")
+                self._handle_project_service_restart(project_id, service_id)
+                return
+            if tail.endswith("/start"):
+                service_id = tail[:-len("/start")].strip("/")
+                body = dict(body)
+                body["service_id"] = service_id
+                self._handle_project_service_start(project_id, body)
+                return
         if path.startswith("/api/projects/") and path.endswith("/activate"):
             project_id = path[len("/api/projects/"):-len("/activate")]
             self._handle_project_activate(project_id)
@@ -5953,8 +7493,10 @@ strong { color: var(--text); }
             self._handle_rag_create_kb(body)
             return
         if path == "/api/rag/upload":
-            # multipart handled separately; body is empty here — handled in do_POST via raw read
             self._handle_rag_upload(body)
+            return
+        if path == "/api/deep-research/upload":
+            self._json(400, {"error": "Use multipart/form-data POST to /api/deep-research/upload with fields: files, chat_id"})
             return
         if path.startswith("/api/rag/kbs/"):
             rest = path[len("/api/rag/kbs/"):]
@@ -6021,7 +7563,13 @@ strong { color: var(--text); }
             payload["project_build_mode"] = True
         for key in ("project_name", "project_stack", "stack", "project_root",
                     "github_repo", "auto_approve", "skip_test_agent", "skip_devops_agent",
-                    "shell_auto_approve", "privileged_approval_note"):
+                    "shell_auto_approve", "privileged_approval_note", "deep_research_mode",
+                    "long_document_mode", "long_document_pages", "long_document_title",
+                    "research_output_formats", "research_citation_style",
+                    "research_enable_plagiarism_check", "research_web_search_enabled", "research_date_range",
+                    "research_sources", "research_max_sources", "research_checkpoint_enabled",
+                    "deep_research_source_urls", "local_drive_paths", "local_drive_recursive",
+                    "local_drive_force_long_document"):
             if body.get(key) is not None:
                 payload[key] = body[key]
         # Auto-inject active project context when caller didn't supply project_root
@@ -6480,6 +8028,10 @@ strong { color: var(--text); }
             except Exception:
                 pass
 
+        proj_id = ""
+        proj_root = ""
+        proj_name = ""
+        user_saved = False
         try:
             from kendr.llm_router import (
                 build_llm, get_active_provider, get_model_for_provider, get_context_window
@@ -6487,14 +8039,43 @@ strong { color: var(--text); }
             from langchain_core.messages import HumanMessage, SystemMessage
 
             proj = _pm_get_active() if _HAS_PROJECT_MANAGER else None
+            proj_id = str(body.get("project_id") or (proj.get("id") if proj else "") or "").strip()
             proj_root = str(body.get("project_root") or (proj.get("path") if proj else "") or "").strip()
             proj_name = str(body.get("project_name") or (proj.get("name") if proj else "") or "").strip()
+            if not proj_id and proj_root and _HAS_PROJECT_MANAGER:
+                try:
+                    matched = next(
+                        (item for item in _pm_list_projects() if str(item.get("path") or "").strip() == proj_root),
+                        None,
+                    )
+                    if matched:
+                        proj_id = str(matched.get("id") or "").strip()
+                        proj_name = proj_name or str(matched.get("name") or "").strip()
+                except Exception:
+                    pass
+
+            if proj_id:
+                try:
+                    _append_project_chat_messages(
+                        proj_id,
+                        project_path=proj_root,
+                        project_name=proj_name,
+                        messages=[{
+                            "role": "user",
+                            "content": text,
+                            "content_format": _project_chat_guess_format(text),
+                        }],
+                    )
+                    user_saved = True
+                except Exception as persist_exc:
+                    _log.debug("Project chat history save failed for %s: %s", proj_id, persist_exc)
 
             emit("log", {"msg": "\U0001f4c1 Checking project directory...", "step": "init"})
 
             kendr_md = ""
             kendr_md_generated = False
             file_tree = ""
+            service_lines = ""
             if proj_root and os.path.isdir(proj_root):
                 kpath = os.path.join(proj_root, "kendr.md")
                 if os.path.isfile(kpath):
@@ -6522,6 +8103,30 @@ strong { color: var(--text); }
                     emit("log", {"msg": "\u2705 Found " + str(len(entries)) + " items in project root", "step": "file_tree_ok"})
                 except Exception:
                     pass
+                if proj and proj.get("id"):
+                    try:
+                        services = _pm_list_services(str(proj.get("id")), include_stopped=True)
+                        if services:
+                            lines = []
+                            for service in services:
+                                lines.append(
+                                    "- "
+                                    + str(service.get("name") or service.get("id") or "service")
+                                    + " | "
+                                    + str(service.get("kind") or "service")
+                                    + " | "
+                                    + str(service.get("status") or ("running" if service.get("running") else "stopped"))
+                                    + " | port="
+                                    + str(service.get("port") or "-")
+                                    + " | url="
+                                    + str(service.get("url") or "-")
+                                    + " | cwd="
+                                    + str(service.get("cwd") or "-")
+                                )
+                            service_lines = "\n".join(lines)
+                            emit("log", {"msg": "\u2705 Loaded " + str(len(services)) + " tracked project services", "step": "services_ok"})
+                    except Exception as e:
+                        emit("log", {"msg": "\u26a0 Could not load project services: " + str(e), "step": "services_err"})
 
             emit("log", {"msg": "\U0001f9e0 Building context and calling LLM...", "step": "llm"})
 
@@ -6530,6 +8135,8 @@ strong { color: var(--text); }
                 system_ctx += "\n\nProject context (kendr.md):\n" + kendr_md
             if file_tree:
                 system_ctx += "\n\nProject root files:\n" + file_tree
+            if service_lines:
+                system_ctx += "\n\nTracked project services:\n" + service_lines
             system_ctx += (
                 "\n\nAnswer the user's question concisely and accurately. "
                 "If asked about what the project is or does, summarise from the kendr.md context above. "
@@ -6548,6 +8155,21 @@ strong { color: var(--text); }
             response = llm.invoke(messages)
             answer = response.content if hasattr(response, "content") else str(response)
 
+            if proj_id:
+                try:
+                    _append_project_chat_messages(
+                        proj_id,
+                        project_path=proj_root,
+                        project_name=proj_name,
+                        messages=[{
+                            "role": "agent",
+                            "content": answer,
+                            "content_format": _project_chat_guess_format(answer),
+                        }],
+                    )
+                except Exception as persist_exc:
+                    _log.debug("Project chat history save failed for %s: %s", proj_id, persist_exc)
+
             emit("result", {
                 "answer": answer,
                 "model": model,
@@ -6560,6 +8182,28 @@ strong { color: var(--text); }
             })
             emit("done", {})
         except Exception as exc:
+            if proj_id:
+                try:
+                    pending_messages = []
+                    if not user_saved:
+                        pending_messages.append({
+                            "role": "user",
+                            "content": text,
+                            "content_format": _project_chat_guess_format(text),
+                        })
+                    pending_messages.append({
+                        "role": "agent",
+                        "content": "Error: " + str(exc),
+                        "content_format": "text",
+                    })
+                    _append_project_chat_messages(
+                        proj_id,
+                        project_path=proj_root,
+                        project_name=proj_name,
+                        messages=pending_messages,
+                    )
+                except Exception as persist_exc:
+                    _log.debug("Project chat history error save failed for %s: %s", proj_id, persist_exc)
             emit("error", {"error": str(exc)})
             emit("done", {})
 
@@ -6769,6 +8413,92 @@ strong { color: var(--text); }
         try:
             result = _pm_shell(command, cwd, timeout=30)
             self._json(200, result)
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
+
+    def _handle_project_chat_history(self, project_id: str) -> None:
+        project_id = str(project_id or "").strip()
+        if not project_id:
+            self._json(400, {"error": "project_id is required"})
+            return
+        try:
+            history = _load_project_chat_history(project_id)
+            project = _pm_get_project(project_id) if _HAS_PROJECT_MANAGER else None
+            if project:
+                history["project_path"] = history.get("project_path") or str(project.get("path") or "")
+                history["project_name"] = history.get("project_name") or str(project.get("name") or "")
+            user_turns = len([msg for msg in history.get("messages", []) if msg.get("role") == "user"])
+            self._json(200, {
+                **history,
+                "message_count": len(history.get("messages", [])),
+                "turn_count": user_turns,
+            })
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
+
+    def _handle_project_services_list(self, project_id: str) -> None:
+        if not _HAS_PROJECT_MANAGER:
+            self._json(503, {"error": "Project manager not available"})
+            return
+        try:
+            services = _pm_list_services(project_id, include_stopped=True)
+            self._json(200, {"project_id": project_id, "services": services})
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
+
+    def _handle_project_service_start(self, project_id: str, body: dict) -> None:
+        if not _HAS_PROJECT_MANAGER:
+            self._json(503, {"error": "Project manager not available"})
+            return
+        name = str(body.get("name", "")).strip()
+        command = str(body.get("command", "")).strip()
+        service_id = str(body.get("service_id", "")).strip()
+        if not name and not service_id:
+            self._json(400, {"error": "name or service_id is required"})
+            return
+        try:
+            result = _pm_start_service(
+                project_id,
+                name=name,
+                command=command,
+                kind=str(body.get("kind", "")).strip(),
+                cwd=str(body.get("cwd", "")).strip(),
+                port=body.get("port"),
+                health_url=str(body.get("health_url", "")).strip(),
+                service_id=service_id,
+            )
+            self._json(200, result)
+        except Exception as exc:
+            self._json(400, {"error": str(exc)})
+
+    def _handle_project_service_stop(self, project_id: str, service_id: str) -> None:
+        if not _HAS_PROJECT_MANAGER:
+            self._json(503, {"error": "Project manager not available"})
+            return
+        try:
+            result = _pm_stop_service(project_id, service_id)
+            self._json(200, result)
+        except Exception as exc:
+            self._json(400, {"error": str(exc)})
+
+    def _handle_project_service_restart(self, project_id: str, service_id: str) -> None:
+        if not _HAS_PROJECT_MANAGER:
+            self._json(503, {"error": "Project manager not available"})
+            return
+        try:
+            result = _pm_restart_service(project_id, service_id)
+            self._json(200, result)
+        except Exception as exc:
+            self._json(400, {"error": str(exc)})
+
+    def _handle_project_service_log(self, project_id: str, service_id: str) -> None:
+        if not _HAS_PROJECT_MANAGER:
+            self._json(503, {"error": "Project manager not available"})
+            return
+        try:
+            result = _pm_read_service_log(project_id, service_id)
+            status = 200 if result.get("ok") else 404
+            self._json(status, result)
         except Exception as exc:
             self._json(500, {"error": str(exc)})
 
@@ -7107,10 +8837,99 @@ strong { color: var(--text); }
         except Exception as exc:
             self._json(500, {"error": str(exc)})
 
+    def _parse_multipart_form(self):
+        try:
+            return cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                    "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+                },
+            )
+        except Exception as exc:
+            self._json(400, {"error": "invalid_multipart", "detail": str(exc)})
+            return None
+
+    @staticmethod
+    def _multipart_items(form, name: str) -> list:
+        if not form or name not in form:
+            return []
+        items = form[name]
+        return items if isinstance(items, list) else [items]
+
+    @staticmethod
+    def _multipart_values(form, name: str) -> list[str]:
+        values = []
+        for item in KendrUIHandler._multipart_items(form, name):
+            try:
+                values.append(str(getattr(item, "value", "") or "").strip())
+            except Exception:
+                continue
+        return values
+
     def _handle_rag_upload(self, body: dict) -> None:
         if not self._rag_check():
             return
-        self._json(400, {"error": "Use multipart/form-data POST to /api/rag/upload with fields: file, kb_id"})
+        content_type = str(self.headers.get("Content-Type", "") or "")
+        if not content_type.startswith("multipart/form-data"):
+            self._json(400, {"error": "Use multipart/form-data POST to /api/rag/upload with fields: file, kb_id"})
+            return
+        form = self._parse_multipart_form()
+        if form is None:
+            return
+        kb_id = (self._multipart_values(form, "kb_id") or [""])[0]
+        file_items = self._multipart_items(form, "file")
+        if not kb_id:
+            self._json(400, {"error": "missing_kb_id"})
+            return
+        if not file_items:
+            self._json(400, {"error": "missing_file"})
+            return
+        uploaded = []
+        try:
+            for item in file_items:
+                filename = os.path.basename(str(getattr(item, "filename", "") or "").strip())
+                data = item.file.read() if getattr(item, "file", None) else b""
+                if not filename:
+                    continue
+                uploaded.append(_rag_upload_file(kb_id, filename, data))
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
+            return
+        self._json(200, {"ok": True, "uploaded": uploaded})
+
+    def _handle_deep_research_upload(self) -> None:
+        form = self._parse_multipart_form()
+        if form is None:
+            return
+        chat_id = (self._multipart_values(form, "chat_id") or [""])[0] or "webchat"
+        file_items = self._multipart_items(form, "files") or self._multipart_items(form, "file")
+        relative_paths = self._multipart_values(form, "relative_path")
+        if not file_items:
+            self._json(400, {"error": "missing_files"})
+            return
+        files = []
+        for item in file_items:
+            filename = os.path.basename(str(getattr(item, "filename", "") or "").strip())
+            if not filename:
+                continue
+            data = item.file.read() if getattr(item, "file", None) else b""
+            files.append((filename, data))
+        if not files:
+            self._json(400, {"error": "missing_files"})
+            return
+        try:
+            payload = _save_deep_research_upload_batch(
+                chat_id=chat_id,
+                files=files,
+                relative_paths=relative_paths,
+            )
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
+            return
+        self._json(200, {"ok": True, **payload})
 
     def _handle_rag_delete_kb(self, kb_id: str) -> None:
         if not self._rag_check():
@@ -7148,6 +8967,7 @@ strong { color: var(--text); }
 
 def main() -> None:
     apply_setup_env_defaults()
+    ui_log_path = _configure_ui_logging()
     try:
         cleaned = _db_cleanup_stale_runs(stale_minutes=20)
         if cleaned:
@@ -7167,6 +8987,10 @@ def main() -> None:
     print(f"  MCP:    {display_url}/mcp")
     print(f"  Projects: {display_url}/projects")
     print(f"  Gateway: {_gateway_url()} ({'online' if _gateway_ready(timeout=0.5) else 'offline — run: kendr gateway start'})")
+    if ui_log_path:
+        print(f"  Logs:   {ui_log_path}")
+        _log.info("Kendr UI log file: %s", ui_log_path)
+    _log.info("Kendr UI running at %s (bound to %s:%s)", display_url, host, port)
     server.serve_forever()
 
 

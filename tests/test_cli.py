@@ -1,9 +1,12 @@
 import io
 import json
 import os
+import time
 import unittest
 import argparse
+import tempfile
 from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 
@@ -222,6 +225,21 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("usage: kendr setup", buffer.getvalue())
 
+    def test_gateway_log_path_prefers_project_local_logs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            (project_root / ".git").mkdir()
+            nested = project_root / "apps" / "demo"
+            nested.mkdir(parents=True)
+
+            with (
+                patch.dict(cli.os.environ, {"KENDR_LOG_DIR": "", "KENDR_HOME": ""}, clear=False),
+                patch("kendr.cli.Path.cwd", return_value=nested),
+            ):
+                log_path = cli._gateway_log_path()
+
+        self.assertEqual(log_path, project_root / "logs" / "kendr" / "gateway.log")
+
     def test_status_json(self):
         with (
             patch("kendr.cli._gateway_ready", return_value=True),
@@ -303,6 +321,40 @@ class CliSmokeTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn("Gateway restarted", buffer.getvalue())
             start_gateway.assert_called_once()
+
+    def test_gateway_status_json_includes_project_services(self):
+        project_services = [
+            {
+                "id": "frontend",
+                "name": "frontend",
+                "kind": "frontend",
+                "url": "http://127.0.0.1:3000",
+                "port": 3000,
+                "pid": 3333,
+                "running": True,
+                "uptime_seconds": 12.5,
+                "project_name": "demo-app",
+            }
+        ]
+        with (
+            patch("kendr.cli._gateway_ready", return_value=True),
+            patch("kendr.cli._ui_ready", return_value=True),
+            patch("kendr.cli._listener_pids_for_port", side_effect=[[1111], [2222]]),
+            patch("kendr.cli._read_gateway_pid", return_value=1111),
+            patch("kendr.cli._pid_is_alive", return_value=True),
+            patch("kendr.cli._pid_is_gateway_owned", return_value=True),
+            patch("kendr.cli._read_gateway_start_time", return_value=time.time() - 30),
+            patch("kendr.project_manager.list_all_project_services", return_value=project_services),
+        ):
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                exit_code = main(["gateway", "status", "--json"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(payload["project_services"], project_services)
+        names = [server["name"] for server in payload["servers"]]
+        self.assertIn("demo-app / frontend (frontend)", names)
 
     def test_start_gateway_process_cleans_stale_listener_before_launch(self):
         fake_process = Mock()
@@ -481,6 +533,91 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(payload.get("coding_language"), "python")
         self.assertEqual(payload.get("research_model"), "o4-mini-deep-research")
         self.assertEqual(payload.get("research_instructions"), "Cite concrete sources.")
+
+    def test_run_forwards_local_only_deep_research_controls(self):
+        captured = {"payload": {}}
+
+        class _FakeResponse:
+            def __init__(self, body: str):
+                self._body = body.encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return self._body
+
+        def _fake_urlopen(request, timeout=0):  # noqa: ARG001
+            body = request.data.decode("utf-8") if getattr(request, "data", None) else "{}"
+            captured["payload"] = json.loads(body)
+            return _FakeResponse(json.dumps({"run_id": "run_local_only", "final_output": "ok", "last_agent": "long_document_agent"}))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_root = Path(tmpdir) / "research_inputs"
+            source_root.mkdir()
+            (source_root / "brief.txt").write_text("Local source material", encoding="utf-8")
+
+            with (
+                patch("kendr.cli._gateway_ready", return_value=True),
+                patch("kendr.cli._configured_working_dir", return_value="/tmp/work"),
+                patch("kendr.cli._resolve_working_dir", return_value="/tmp/work"),
+                patch("kendr.cli._http_json_get", return_value=[]),
+                patch(
+                    "kendr.cli._workflow_setup_snapshot",
+                    return_value={"available_agents": ["deep_research_agent", "coding_agent"], "agents": {}},
+                ),
+                patch("kendr.cli.urllib.request.urlopen", side_effect=_fake_urlopen),
+            ):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    exit_code = main(
+                        [
+                            "run",
+                            "--json",
+                            "--quiet",
+                            f"--deep-research-path={source_root}",
+                            "--no-web-search",
+                            "Create a 25 pages deep research report on this material",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        payload = captured["payload"]
+        self.assertEqual(payload.get("local_drive_paths"), [str(source_root)])
+        self.assertTrue(payload.get("deep_research_mode"))
+        self.assertTrue(payload.get("long_document_mode"))
+        self.assertTrue(payload.get("local_drive_force_long_document"))
+        self.assertEqual(payload.get("long_document_pages"), 25)
+        self.assertFalse(payload.get("research_web_search_enabled"))
+        self.assertEqual(payload.get("research_sources"), ["local"])
+
+    def test_run_rejects_local_only_mode_with_explicit_links(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_root = Path(tmpdir) / "research_inputs"
+            source_root.mkdir()
+
+            with (
+                patch("kendr.cli._configured_working_dir", return_value="/tmp/work"),
+                patch("kendr.cli._resolve_working_dir", return_value="/tmp/work"),
+            ):
+                with self.assertRaises(SystemExit) as exc:
+                    main(
+                        [
+                            "run",
+                            "--json",
+                            "--quiet",
+                            f"--deep-research-path={source_root}",
+                            "--no-web-search",
+                            "--deep-research-link",
+                            "https://example.com/report",
+                            "Create a local-only deep research report",
+                        ]
+                    )
+
+        self.assertIn("cannot be combined", str(exc.exception))
 
     def test_run_interactive_follow_up_resubmits_paused_session(self):
         captured_payloads = []

@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "run_id": "proj-k8m19295",
-  "session_id": "project_chat:default:web_chat_1:main",
-  "status": "awaiting_user_input",
-  "active_agent": "planner_agent",
-  "updated_at": "2026-04-01T06:51:04.058075+00:00",
-  "pid": 2679
-}

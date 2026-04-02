@@ -4,6 +4,7 @@ Stores a registry of known project directories and provides:
   - File tree reading
   - File content access
   - Shell command execution
+  - Long-running project service management
   - Git operations (status, pull, push, commit, clone, branch)
 """
 
@@ -12,11 +13,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
+import socket
 import subprocess
 import threading
 import time
+import calendar
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
 _log = logging.getLogger("kendr.project_manager")
 
@@ -26,8 +33,6 @@ def _normalize_path(path: str) -> str:
     return str(Path(path).expanduser().resolve())
 
 
-_DEFAULT_STORE = os.path.join(os.path.expanduser("~"), ".kendr", "projects.json")
-_PROJECTS_STORE = os.getenv("KENDR_PROJECTS_STORE", _DEFAULT_STORE)
 _store_lock = threading.Lock()
 
 _MAX_FILE_SIZE = 256 * 1024  # 256 KB
@@ -44,22 +49,87 @@ _IGNORED_EXTS = {".pyc", ".pyo", ".so", ".dylib", ".dll"}
 # Persistence helpers
 # ---------------------------------------------------------------------------
 
-def _load_store() -> dict:
+def _discover_project_root(start: Path | None = None) -> Path | None:
+    current = (start or Path.cwd()).resolve()
+    markers = (".git", "pyproject.toml", "package.json", "requirements.txt")
+    for candidate in (current, *current.parents):
+        if any((candidate / marker).exists() for marker in markers):
+            return candidate
+    return None
+
+
+def _dir_writable(path: Path) -> bool:
     try:
-        os.makedirs(os.path.dirname(_PROJECTS_STORE), exist_ok=True)
-        if os.path.isfile(_PROJECTS_STORE):
-            with open(_PROJECTS_STORE, "r", encoding="utf-8") as fh:
-                return json.load(fh)
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".kendr_write_test"
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("ok")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+def _projects_store_path() -> str:
+    explicit_store = str(os.getenv("KENDR_PROJECTS_STORE", "")).strip()
+    if explicit_store:
+        return str(Path(explicit_store).expanduser())
+
+    candidates: list[Path] = []
+    explicit_home = str(os.getenv("KENDR_HOME", "")).strip()
+    if explicit_home:
+        candidates.append(Path(explicit_home).expanduser())
+    candidates.append(Path.home() / ".kendr")
+    project_root = _discover_project_root()
+    if project_root is not None:
+        candidates.append(project_root / ".kendr")
+    candidates.append(Path.cwd() / ".kendr")
+
+    last_candidate = candidates[-1]
+    for candidate in candidates:
+        if _dir_writable(candidate):
+            return str(candidate / "projects.json")
+        last_candidate = candidate
+    return str(last_candidate / "projects.json")
+
+
+def _ensure_store_shape(store: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(store, dict):
+        store = {}
+    projects = store.get("projects")
+    if not isinstance(projects, dict):
+        projects = {}
+    store["projects"] = projects
+    if "active" not in store:
+        store["active"] = None
+    for project_id, proj in list(projects.items()):
+        if not isinstance(proj, dict):
+            projects[project_id] = {}
+            proj = projects[project_id]
+        services = proj.get("services")
+        if not isinstance(services, dict):
+            proj["services"] = {}
+    return store
+
+
+def _load_store() -> dict:
+    store_path = _projects_store_path()
+    try:
+        os.makedirs(os.path.dirname(store_path), exist_ok=True)
+        if os.path.isfile(store_path):
+            with open(store_path, "r", encoding="utf-8") as fh:
+                return _ensure_store_shape(json.load(fh))
     except Exception as exc:
         _log.warning("Could not load projects store: %s", exc)
-    return {"projects": {}, "active": None}
+    return _ensure_store_shape({"projects": {}, "active": None})
 
 
 def _save_store(store: dict) -> None:
+    store_path = _projects_store_path()
     try:
-        os.makedirs(os.path.dirname(_PROJECTS_STORE), exist_ok=True)
-        with open(_PROJECTS_STORE, "w", encoding="utf-8") as fh:
-            json.dump(store, fh, indent=2)
+        os.makedirs(os.path.dirname(store_path), exist_ok=True)
+        with open(store_path, "w", encoding="utf-8") as fh:
+            json.dump(_ensure_store_shape(store), fh, indent=2)
     except Exception as exc:
         _log.warning("Could not save projects store: %s", exc)
 
@@ -85,6 +155,9 @@ def list_projects() -> list[dict]:
                     dirty = True
             except Exception:
                 pass
+            if not isinstance(proj.get("services"), dict):
+                proj["services"] = {}
+                dirty = True
         if dirty:
             try:
                 _save_store(store)
@@ -128,9 +201,13 @@ def add_project(path: str, name: str = "") -> dict:
         "path": path,
         "git_remote": git_remote,
         "added_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "services": {},
     }
     with _store_lock:
         store = _load_store()
+        existing = store.setdefault("projects", {}).get(project_id, {})
+        if isinstance(existing.get("services"), dict) and existing["services"]:
+            entry["services"] = existing["services"]
         store.setdefault("projects", {})[project_id] = entry
         if store.get("active") is None:
             store["active"] = project_id
@@ -146,13 +223,17 @@ def get_project(project_id: str) -> dict | None:
 def remove_project(project_id: str) -> bool:
     with _store_lock:
         store = _load_store()
-        if project_id not in store.get("projects", {}):
+        entry = store.get("projects", {}).get(project_id)
+        if not entry:
             return False
+        services = list((entry.get("services") or {}).values())
         del store["projects"][project_id]
         if store.get("active") == project_id:
             remaining = list(store.get("projects", {}).keys())
             store["active"] = remaining[0] if remaining else None
         _save_store(store)
+    for service in services:
+        _stop_service_process(service)
     return True
 
 
@@ -165,18 +246,32 @@ def delete_project_and_files(project_id: str) -> dict:
         if not entry:
             return {"ok": False, "error": "Project not found"}
         project_path = entry.get("path", "")
+        services = list((entry.get("services") or {}).values())
         del store["projects"][project_id]
         if store.get("active") == project_id:
             remaining = list(store.get("projects", {}).keys())
             store["active"] = remaining[0] if remaining else None
         _save_store(store)
+    stopped_services = 0
+    for service in services:
+        stopped_services += int(_stop_service_process(service))
     if project_path and os.path.isdir(project_path):
         try:
             _shutil.rmtree(project_path)
-            return {"ok": True, "deleted_path": project_path}
+            return {"ok": True, "deleted_path": project_path, "stopped_services": stopped_services}
         except Exception as exc:
-            return {"ok": False, "error": str(exc), "deleted_path": project_path}
-    return {"ok": True, "deleted_path": None, "warning": "Directory not found on disk"}
+            return {
+                "ok": False,
+                "error": str(exc),
+                "deleted_path": project_path,
+                "stopped_services": stopped_services,
+            }
+    return {
+        "ok": True,
+        "deleted_path": None,
+        "warning": "Directory not found on disk",
+        "stopped_services": stopped_services,
+    }
 
 
 def init_project_from_scratch(name: str, parent_dir: str = "", stack: str = "") -> dict:
@@ -363,6 +458,407 @@ def run_shell(command: str, cwd: str, timeout: int = 60) -> dict:
         return {"ok": False, "stdout": "", "stderr": f"Command timed out after {timeout}s", "returncode": -1, "command": command, "cwd": cwd}
     except Exception as exc:
         return {"ok": False, "stdout": "", "stderr": str(exc), "returncode": -1, "command": command, "cwd": cwd}
+
+
+# ---------------------------------------------------------------------------
+# Project services
+# ---------------------------------------------------------------------------
+
+def _utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _service_slug(name: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in name.strip())
+    parts = [part for part in cleaned.split("-") if part]
+    return "-".join(parts) or "service"
+
+
+def _project_services(project: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    services = project.get("services")
+    if not isinstance(services, dict):
+        services = {}
+        project["services"] = services
+    return services
+
+
+def _coerce_port(value: Any) -> int | None:
+    if value in ("", None):
+        return None
+    try:
+        port = int(value)
+    except Exception:
+        return None
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def _pid_is_alive(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+    return True
+
+
+def _service_host(service: dict[str, Any]) -> str:
+    url = str(service.get("health_url") or "").strip()
+    if url:
+        parsed = urllib_parse.urlparse(url)
+        if parsed.hostname:
+            return parsed.hostname
+    return "127.0.0.1"
+
+
+def _port_is_listening(port: int | None, host: str = "127.0.0.1", timeout: float = 0.35) -> bool:
+    if not port:
+        return False
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _healthcheck_ok(url: str) -> bool:
+    if not url:
+        return False
+    request = urllib_request.Request(url, headers={"User-Agent": "kendr-project-manager"})
+    try:
+        with urllib_request.urlopen(request, timeout=0.8) as resp:
+            return 200 <= getattr(resp, "status", 200) < 500
+    except urllib_error.HTTPError as exc:
+        return 200 <= exc.code < 500
+    except Exception:
+        return False
+
+
+def _iso_to_epoch(value: str) -> float | None:
+    if not value:
+        return None
+    try:
+        return float(calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")))
+    except Exception:
+        return None
+
+
+def _service_display_url(service: dict[str, Any]) -> str:
+    health_url = str(service.get("health_url") or "").strip()
+    if health_url:
+        return health_url
+    port = _coerce_port(service.get("port"))
+    if not port:
+        return ""
+    host = _service_host(service)
+    kind = str(service.get("kind") or "").strip().lower()
+    scheme = "tcp" if kind == "database" else "http"
+    return f"{scheme}://{host}:{port}"
+
+
+def _service_log_path(project_path: str, service_id: str) -> str:
+    log_dir = Path(project_path) / "logs" / "kendr" / "services"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return str(log_dir / f"{_service_slug(service_id)}.log")
+
+
+def _service_snapshot(project: dict[str, Any], service: dict[str, Any]) -> dict[str, Any]:
+    port = _coerce_port(service.get("port"))
+    pid = int(service.get("pid") or 0) or None
+    pid_alive = _pid_is_alive(pid)
+    host = _service_host(service)
+    port_listening = _port_is_listening(port, host=host) if port else False
+    health_url = str(service.get("health_url") or "").strip()
+    health_ok = _healthcheck_ok(health_url) if health_url else False
+    running = bool(pid_alive or port_listening or health_ok)
+    status = "running" if running else "stopped"
+    if running and health_url and not health_ok:
+        status = "degraded"
+    started_at = str(service.get("started_at") or service.get("last_started_at") or "").strip()
+    start_epoch = _iso_to_epoch(started_at)
+    uptime_seconds = max(0.0, time.time() - start_epoch) if (running and start_epoch) else None
+    snapshot = dict(service)
+    snapshot.update(
+        {
+            "id": str(service.get("id") or ""),
+            "name": str(service.get("name") or ""),
+            "kind": str(service.get("kind") or "service"),
+            "cwd": str(service.get("cwd") or project.get("path") or ""),
+            "port": port,
+            "pid": pid,
+            "pid_alive": pid_alive,
+            "port_listening": port_listening,
+            "health_ok": health_ok,
+            "running": running,
+            "status": status,
+            "uptime_seconds": round(uptime_seconds, 1) if uptime_seconds is not None else None,
+            "url": _service_display_url(service),
+            "log_path": str(service.get("log_path") or ""),
+            "project_id": str(project.get("id") or ""),
+            "project_name": str(project.get("name") or ""),
+            "project_path": str(project.get("path") or ""),
+        }
+    )
+    return snapshot
+
+
+def _refresh_service_snapshots(store: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    dirty = False
+    snapshots: list[dict[str, Any]] = []
+    for project in store.get("projects", {}).values():
+        services = _project_services(project)
+        for service_id, service in services.items():
+            if not isinstance(service, dict):
+                continue
+            service.setdefault("id", service_id)
+            snapshot = _service_snapshot(project, service)
+            snapshots.append(snapshot)
+            if service.get("pid") and not snapshot["pid_alive"] and not snapshot["port_listening"] and not snapshot["health_ok"]:
+                service["pid"] = None
+                service["updated_at"] = _utc_now()
+                dirty = True
+    snapshots.sort(key=lambda item: (item.get("project_name", "").lower(), item.get("name", "").lower()))
+    return snapshots, dirty
+
+
+def list_project_services(project_id: str, include_stopped: bool = True) -> list[dict[str, Any]]:
+    with _store_lock:
+        store = _load_store()
+        project = store.get("projects", {}).get(project_id)
+        if not project:
+            return []
+        snapshots, dirty = _refresh_service_snapshots(store)
+        if dirty:
+            _save_store(store)
+    project_services = [svc for svc in snapshots if svc.get("project_id") == project_id]
+    if not include_stopped:
+        project_services = [svc for svc in project_services if svc.get("running")]
+    return project_services
+
+
+def list_all_project_services(include_stopped: bool = True) -> list[dict[str, Any]]:
+    with _store_lock:
+        store = _load_store()
+        snapshots, dirty = _refresh_service_snapshots(store)
+        if dirty:
+            _save_store(store)
+    if not include_stopped:
+        snapshots = [svc for svc in snapshots if svc.get("running")]
+    return snapshots
+
+
+def list_running_project_services() -> list[dict[str, Any]]:
+    return list_all_project_services(include_stopped=False)
+
+
+def get_project_service(project_id: str, service_id: str) -> dict[str, Any] | None:
+    services = list_project_services(project_id, include_stopped=True)
+    for service in services:
+        if service.get("id") == service_id:
+            return service
+    return None
+
+
+def _stop_service_process(service: dict[str, Any], timeout: float = 6.0) -> bool:
+    pid = int(service.get("pid") or 0) or None
+    if not pid or not _pid_is_alive(pid):
+        return False
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"], capture_output=True, check=False)
+        else:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return True
+            except Exception:
+                os.kill(pid, signal.SIGTERM)
+            deadline = time.time() + timeout
+            while time.time() < deadline and _pid_is_alive(pid):
+                time.sleep(0.2)
+            if _pid_is_alive(pid):
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except Exception:
+                    os.kill(pid, signal.SIGKILL)
+    except Exception:
+        return False
+    return not _pid_is_alive(pid)
+
+
+def start_project_service(
+    project_id: str,
+    name: str = "",
+    command: str = "",
+    *,
+    kind: str = "",
+    cwd: str = "",
+    port: int | None = None,
+    health_url: str = "",
+    service_id: str = "",
+) -> dict[str, Any]:
+    command = str(command or "").strip()
+
+    with _store_lock:
+        store = _load_store()
+        project = store.get("projects", {}).get(project_id)
+        if not project:
+            raise ValueError("Project not found")
+        services = _project_services(project)
+        resolved_service_id = _service_slug(service_id or name or command)
+        existing = dict(services.get(resolved_service_id) or {})
+        existing_pid = int(existing.get("pid") or 0) or None
+        if existing_pid and _pid_is_alive(existing_pid):
+            raise ValueError(f"Service '{existing.get('name') or resolved_service_id}' is already running")
+        project_root = str(project.get("path") or "")
+        resolved_cwd = _normalize_path(cwd or existing.get("cwd") or project_root)
+        if not os.path.isdir(resolved_cwd):
+            raise ValueError(f"Working directory does not exist: {resolved_cwd}")
+        resolved_command = command or str(existing.get("command") or "").strip()
+        if not resolved_command:
+            raise ValueError("command is required")
+        resolved_kind = str(kind or existing.get("kind") or "service").strip().lower() or "service"
+        resolved_port = _coerce_port(port if port is not None else existing.get("port"))
+        resolved_health_url = str(health_url or existing.get("health_url") or "").strip()
+        resolved_name = str(name or existing.get("name") or resolved_service_id).strip()
+        log_path = _service_log_path(project_root, resolved_service_id)
+
+    log_parent = Path(log_path).parent
+    log_parent.mkdir(parents=True, exist_ok=True)
+    launched_at = _utc_now()
+    with open(log_path, "a", encoding="utf-8") as log_fh:
+        log_fh.write(f"\n[{launched_at}] starting service {resolved_name}: {resolved_command}\n")
+        log_fh.flush()
+        proc = subprocess.Popen(
+            ["/bin/bash", "-lc", resolved_command],
+            cwd=resolved_cwd,
+            env=_build_shell_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=(os.name != "nt"),
+        )
+
+    with _store_lock:
+        store = _load_store()
+        project = store.get("projects", {}).get(project_id)
+        if not project:
+            try:
+                _stop_service_process({"pid": proc.pid})
+            except Exception:
+                pass
+            raise ValueError("Project not found")
+        services = _project_services(project)
+        created_at = str((services.get(resolved_service_id) or {}).get("created_at") or launched_at)
+        services[resolved_service_id] = {
+            "id": resolved_service_id,
+            "name": resolved_name,
+            "kind": resolved_kind,
+            "command": resolved_command,
+            "cwd": resolved_cwd,
+            "port": resolved_port,
+            "health_url": resolved_health_url,
+            "log_path": log_path,
+            "pid": proc.pid,
+            "created_at": created_at,
+            "started_at": launched_at,
+            "last_started_at": launched_at,
+            "stopped_at": None,
+            "updated_at": launched_at,
+        }
+        _save_store(store)
+    time.sleep(0.2)
+    snapshot = get_project_service(project_id, resolved_service_id)
+    if not snapshot:
+        raise ValueError("Service was started but could not be reloaded")
+    snapshot["ok"] = True
+    return snapshot
+
+
+def stop_project_service(project_id: str, service_id: str) -> dict[str, Any]:
+    with _store_lock:
+        store = _load_store()
+        project = store.get("projects", {}).get(project_id)
+        if not project:
+            raise ValueError("Project not found")
+        services = _project_services(project)
+        service = services.get(service_id)
+        if not service:
+            raise ValueError("Service not found")
+        service_copy = dict(service)
+
+    stopped = _stop_service_process(service_copy)
+    now = _utc_now()
+    with _store_lock:
+        store = _load_store()
+        project = store.get("projects", {}).get(project_id)
+        if not project:
+            raise ValueError("Project not found")
+        services = _project_services(project)
+        service = services.get(service_id)
+        if not service:
+            raise ValueError("Service not found")
+        service["pid"] = None
+        service["stopped_at"] = now
+        service["updated_at"] = now
+        _save_store(store)
+    snapshot = get_project_service(project_id, service_id)
+    if not snapshot:
+        raise ValueError("Service stopped but snapshot could not be reloaded")
+    snapshot["ok"] = True
+    snapshot["stopped"] = stopped or not snapshot.get("running")
+    return snapshot
+
+
+def restart_project_service(project_id: str, service_id: str) -> dict[str, Any]:
+    existing = get_project_service(project_id, service_id)
+    if not existing:
+        raise ValueError("Service not found")
+    stop_project_service(project_id, service_id)
+    return start_project_service(
+        project_id,
+        name=str(existing.get("name") or service_id),
+        command=str(existing.get("command") or ""),
+        kind=str(existing.get("kind") or ""),
+        cwd=str(existing.get("cwd") or ""),
+        port=_coerce_port(existing.get("port")),
+        health_url=str(existing.get("health_url") or ""),
+        service_id=service_id,
+    )
+
+
+def read_project_service_log(project_id: str, service_id: str, max_bytes: int = 16000) -> dict[str, Any]:
+    service = get_project_service(project_id, service_id)
+    if not service:
+        return {"ok": False, "error": "Service not found"}
+    log_path = str(service.get("log_path") or "").strip()
+    if not log_path:
+        return {"ok": False, "error": "Service log path not found"}
+    try:
+        with open(log_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            if size > max_bytes:
+                fh.seek(-max_bytes, os.SEEK_END)
+            else:
+                fh.seek(0)
+            raw = fh.read()
+        text = raw.decode("utf-8", errors="replace")
+        if size > max_bytes:
+            newline = text.find("\n")
+            if newline != -1:
+                text = text[newline + 1:]
+        return {"ok": True, "content": text, "log_path": log_path, "truncated": size > max_bytes}
+    except FileNotFoundError:
+        return {"ok": False, "error": "Log file not found", "log_path": log_path}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "log_path": log_path}
 
 
 # ---------------------------------------------------------------------------

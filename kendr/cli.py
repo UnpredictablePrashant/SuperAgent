@@ -18,6 +18,7 @@ import uuid
 import zipfile
 import webbrowser
 from pathlib import Path
+from typing import Any
 
 from kendr.http import (
     build_resume_state_overrides,
@@ -675,15 +676,47 @@ def _gateway_ready(timeout_seconds: float = 1.0) -> bool:
 
 def _kendr_state_home() -> Path:
     raw = os.getenv("KENDR_HOME", "").strip()
-    if raw:
-        return Path(raw).expanduser().resolve()
-    return (Path.home() / ".kendr").resolve()
+    candidate = Path(raw).expanduser().resolve() if raw else (Path.home() / ".kendr").resolve()
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
+    except OSError:
+        project_root = _discover_project_root()
+        fallback = ((project_root or Path.cwd()) / ".kendr").resolve()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+def _discover_project_root(start: Path | None = None) -> Path | None:
+    current = (start or Path.cwd()).expanduser().resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+        if (candidate / "package.json").exists():
+            return candidate
+    return None
+
+
+def _service_log_dir() -> Path:
+    override = str(os.getenv("KENDR_LOG_DIR", "") or "").strip()
+    if override:
+        target = Path(override).expanduser()
+    else:
+        project_root = _discover_project_root()
+        target = (project_root / "logs" / "kendr") if project_root else (_kendr_state_home() / "logs")
+    resolved = target.resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def _gateway_log_path() -> Path:
-    logs_dir = _kendr_state_home() / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    return logs_dir / "gateway.log"
+    return _service_log_dir() / "gateway.log"
+
+
+def _ui_log_path() -> Path:
+    return _service_log_dir() / "ui.log"
 
 
 def _gateway_pid_path() -> Path:
@@ -1203,6 +1236,9 @@ def _query_requests_long_document(query: str) -> bool:
         return True
     text = str(query or "").lower()
     markers = (
+        "deep research",
+        "deep-research",
+        "deep research report",
         "long document",
         "long-form",
         "long form",
@@ -1226,6 +1262,34 @@ def _normalize_drive_paths(raw_values: list[str] | None) -> list[str]:
             seen.add(value)
             deduped.append(value)
     return deduped
+
+
+def _normalize_url_inputs(raw_values: list[str] | None) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values or []:
+        for part in re.split(r"[\n,]", str(raw or "")):
+            value = str(part or "").strip()
+            if not value or not re.match(r"^https?://", value, flags=re.IGNORECASE):
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            deduped.append(value)
+    return deduped
+
+
+def _parse_research_formats(raw_value: str | None) -> list[str]:
+    allowed = {"pdf", "docx", "html", "md"}
+    formats: list[str] = []
+    seen: set[str] = set()
+    for item in str(raw_value or "").split(","):
+        value = item.strip().lower()
+        if not value or value not in allowed or value in seen:
+            continue
+        seen.add(value)
+        formats.append(value)
+    return formats
 
 
 def _configured_working_dir() -> str:
@@ -1289,6 +1353,8 @@ def _explicit_deep_research_request(args: argparse.Namespace, query: str) -> boo
             int(args.research_poll_interval_seconds or 0) > 0,
             int(args.research_max_tool_calls or 0) > 0,
             int(args.research_max_output_tokens or 0) > 0,
+            bool(getattr(args, "no_web_search", False)),
+            list(getattr(args, "deep_research_link", []) or []),
         ]
     ):
         return True
@@ -1386,6 +1452,18 @@ def _validate_run_workflows(
     missing_drive = [str(_resolved_cli_input_path(item)) for item in drive_paths if not _resolved_cli_input_path(item).exists()]
     if missing_drive:
         raise SystemExit("One or more --drive paths do not exist:\n- " + "\n- ".join(missing_drive))
+
+    deep_research_links = _normalize_url_inputs(list(getattr(args, "deep_research_link", []) or []))
+    if bool(getattr(args, "no_web_search", False)) and deep_research_links:
+        raise SystemExit(
+            "--no-web-search cannot be combined with --deep-research-link.\n"
+            "Disable web search only when the report should rely strictly on local files/folders."
+        )
+    if bool(getattr(args, "no_web_search", False)) and not drive_paths:
+        raise SystemExit(
+            "--no-web-search requires local sources via --drive or --deep-research-path.\n"
+            "Add one or more local files/folders before requesting a local-only deep research run."
+        )
 
     missing_superrag_paths = [
         str(_resolved_cli_input_path(item))
@@ -1701,65 +1779,127 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
         help="Override max reviewer revisions per step (0 keeps default).",
     )
     run_parser.add_argument(
+        "--deep-research",
         "--long-document",
+        dest="long_document",
         action="store_true",
-        help="Force long-form staged document workflow (chaptered research + merged output).",
+        help="Force deep research document workflow (tiered research + staged synthesis + exports).",
     )
     run_parser.add_argument(
+        "--deep-research-pages",
         "--long-document-pages",
         type=int,
+        dest="long_document_pages",
         default=0,
-        help="Target page count for long-form mode (for example 50).",
+        help="Target page count for deep research mode (for example 50).",
     )
     run_parser.add_argument(
+        "--deep-research-sections",
         "--long-document-sections",
         type=int,
+        dest="long_document_sections",
         default=0,
-        help="Optional explicit section count for long-form mode.",
+        help="Optional explicit section count for deep research mode.",
     )
     run_parser.add_argument(
+        "--deep-research-section-pages",
         "--long-document-section-pages",
         type=int,
+        dest="long_document_section_pages",
         default=0,
-        help="Approximate pages per section in long-form mode.",
+        help="Approximate pages per section in deep research mode.",
     )
     run_parser.add_argument(
+        "--deep-research-title",
         "--long-document-title",
+        dest="long_document_title",
         default="",
-        help="Optional report title override for long-form mode.",
+        help="Optional report title override for deep research mode.",
     )
     run_parser.add_argument(
+        "--deep-research-no-collect-sources",
         "--long-document-no-collect-sources",
+        dest="long_document_no_collect_sources",
         action="store_true",
-        help="Skip the pre-collection evidence bank step for long-form mode.",
+        help="Skip the pre-collection evidence bank step for deep research mode.",
     )
     run_parser.add_argument(
+        "--deep-research-no-section-search",
         "--long-document-no-section-search",
+        dest="long_document_no_section_search",
         action="store_true",
-        help="Skip per-section web search results for long-form mode.",
+        help="Skip per-section web search results for deep research mode.",
     )
     run_parser.add_argument(
+        "--deep-research-section-search-results",
         "--long-document-section-search-results",
         type=int,
+        dest="long_document_section_search_results",
         default=0,
-        help="Number of web search results to gather per section in long-form mode.",
+        help="Number of web search results to gather per section in deep research mode.",
     )
     run_parser.add_argument(
+        "--deep-research-no-visuals",
         "--long-document-no-visuals",
+        dest="long_document_no_visuals",
         action="store_true",
-        help="Skip generating extra tables/flowcharts for long-form sections.",
+        help="Skip generating extra tables/flowcharts for deep research sections.",
     )
     run_parser.add_argument(
-        "--drive",
+        "--format",
+        default="",
+        help="Comma-separated deep research output formats: pdf,docx,html,md.",
+    )
+    run_parser.add_argument(
+        "--cite",
+        default="",
+        help="Deep research citation style: apa, mla, chicago, ieee, vancouver, harvard.",
+    )
+    run_parser.add_argument(
+        "--no-plagiarism",
+        action="store_true",
+        help="Skip the deep research plagiarism/reuse check.",
+    )
+    run_parser.add_argument(
+        "--date-range",
+        default="",
+        help="Deep research date range hint (for example 1y, 5y, 2020-2025).",
+    )
+    run_parser.add_argument(
+        "--max-sources",
+        type=int,
+        default=0,
+        help="Cap the total number of sources gathered for deep research mode.",
+    )
+    run_parser.add_argument(
+        "--checkpoint",
+        action="store_true",
+        help="Enable checkpoint markers for deep research mode.",
+    )
+    run_parser.add_argument(
+        "--no-web-search",
+        action="store_true",
+        help="Disable internet/web search for deep research and use only local files/folders.",
+    )
+    run_parser.add_argument(
+        "--deep-research-link",
         action="append",
         default=[],
-        help="Local folder or file path for local-drive ingestion. Repeat for multiple paths.",
+        help="Explicit URL to extract as part of deep research. Repeat for multiple links.",
+    )
+    run_parser.add_argument(
+        "--deep-research-path",
+        "--drive",
+        dest="drive",
+        action="append",
+        default=[],
+        help="Local folder or file path for deep research ingestion. Repeat for multiple paths.",
     )
     run_parser.add_argument(
         "--drive-min-files",
         type=int,
         default=0,
-        help="Minimum file count expected for long-form reports before prompting for confirmation (0 uses auto heuristic).",
+        help="Minimum file count expected for deep research reports before prompting for confirmation (0 uses auto heuristic).",
     )
     run_parser.add_argument(
         "--drive-max-files",
@@ -2098,8 +2238,8 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
         type=int,
         default=0,
         help=(
-            "Target page count for long-form document output. "
-            "Implies --long-document mode. Example: --pages 50"
+            "Target page count for deep research report output. "
+            "Implies --deep-research mode. Example: --pages 50"
         ),
     )
     run_parser.add_argument(
@@ -2446,6 +2586,36 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
     proj_status = project_sub.add_parser("status", help="Show active project info and git status.")
     proj_status.add_argument("--project", default="", help="Project path or ID (defaults to active).")
 
+    proj_service = project_sub.add_parser("service", help="Manage long-running services for a project.")
+    proj_service_sub = proj_service.add_subparsers(dest="project_service_action", required=True)
+
+    proj_service_list = proj_service_sub.add_parser("list", help="List tracked services for a project.")
+    proj_service_list.add_argument("--project", default="", help="Project path or ID (defaults to active).")
+    proj_service_list.add_argument("--running-only", action="store_true", help="Show only running services.")
+
+    proj_service_start = proj_service_sub.add_parser("start", help="Start and track a project service.")
+    proj_service_start.add_argument("name", nargs="?", default="", help="Service display name.")
+    proj_service_start.add_argument("--command", default="", help="Command to start. Omit to reuse a stored command.")
+    proj_service_start.add_argument("--project", default="", help="Project path or ID (defaults to active).")
+    proj_service_start.add_argument("--kind", default="", help="Service type: backend, frontend, database, worker, proxy, service.")
+    proj_service_start.add_argument("--cwd", default="", help="Working directory for the service command.")
+    proj_service_start.add_argument("--port", type=int, default=0, help="Port to monitor.")
+    proj_service_start.add_argument("--health-url", default="", help="Optional healthcheck URL.")
+    proj_service_start.add_argument("--service-id", default="", help="Reuse an existing tracked service ID.")
+
+    proj_service_stop = proj_service_sub.add_parser("stop", help="Stop a tracked project service.")
+    proj_service_stop.add_argument("service_id", help="Tracked service ID.")
+    proj_service_stop.add_argument("--project", default="", help="Project path or ID (defaults to active).")
+
+    proj_service_restart = proj_service_sub.add_parser("restart", help="Restart a tracked project service.")
+    proj_service_restart.add_argument("service_id", help="Tracked service ID.")
+    proj_service_restart.add_argument("--project", default="", help="Project path or ID (defaults to active).")
+
+    proj_service_logs = proj_service_sub.add_parser("logs", help="Show the recent log output for a tracked service.")
+    proj_service_logs.add_argument("service_id", help="Tracked service ID.")
+    proj_service_logs.add_argument("--project", default="", help="Project path or ID (defaults to active).")
+    proj_service_logs.add_argument("--bytes", type=int, default=16000, help="Maximum log bytes to read.")
+
     rag_parser = subparsers.add_parser("rag", help="Manage Super-RAG knowledge bases: vector store, sources, reranker, agents.")
     command_parsers["rag"] = rag_parser
     rag_sub = rag_parser.add_subparsers(dest="rag_action", required=True)
@@ -2536,7 +2706,38 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
         "--pages",
         type=int,
         default=0,
-        help="Target page count for the generated document (implies --long-document mode).",
+        help="Target page count for the generated deep research report.",
+    )
+    research_parser.add_argument(
+        "--format",
+        default="pdf,docx,html,md",
+        help="Comma-separated output formats for deep research: pdf,docx,html,md.",
+    )
+    research_parser.add_argument(
+        "--cite",
+        default="apa",
+        help="Citation style: apa, mla, chicago, ieee, vancouver, harvard.",
+    )
+    research_parser.add_argument(
+        "--no-plagiarism",
+        action="store_true",
+        help="Skip the plagiarism/reuse check stage.",
+    )
+    research_parser.add_argument(
+        "--date-range",
+        default="",
+        help="Date range hint (for example 1y, 5y, 2020-2025).",
+    )
+    research_parser.add_argument(
+        "--max-sources",
+        type=int,
+        default=0,
+        help="Cap total sources gathered during deep research.",
+    )
+    research_parser.add_argument(
+        "--checkpoint",
+        action="store_true",
+        help="Enable checkpoint markers for long-running deep research runs.",
     )
     research_parser.add_argument(
         "--title",
@@ -2545,9 +2746,22 @@ def _build_parser(style: _CliStyle) -> tuple[argparse.ArgumentParser, dict[str, 
     )
     research_parser.add_argument(
         "--drive",
+        "--deep-research-path",
+        dest="drive",
         action="append",
         default=[],
         help="Local folder or file path to include as a research source. Repeat for multiple paths.",
+    )
+    research_parser.add_argument(
+        "--deep-research-link",
+        action="append",
+        default=[],
+        help="Explicit URL to extract and include as a deep research source. Repeat for multiple links.",
+    )
+    research_parser.add_argument(
+        "--no-web-search",
+        action="store_true",
+        help="Disable internet/web search and build the report only from local files/folders.",
     )
     research_parser.add_argument(
         "--research-model",
@@ -2976,12 +3190,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
     # Gateway
     def _check_gateway():
-        port = int(os.environ.get("KENDR_PORT", "2150"))
+        host, port = _gateway_host_port()
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=2):
-                return True, f"Gateway running on port {port}"
+            with socket.create_connection((host, port), timeout=2):
+                return True, f"Gateway running on {host}:{port}"
         except OSError:
-            return False, f"Gateway not running on port {port}"
+            return False, f"Gateway not running on {host}:{port}"
 
     # API key
     def _check_api_key():
@@ -3770,6 +3984,7 @@ def _cmd_generate(args: argparse.Namespace) -> int:
             "output_folder": resume_output_dir or "",
             "working_directory": resolved_working_dir,
             "reply": reply_text,
+            "text": reply_text,
             "channel": channel,
             "workspace_id": workspace_id,
             "sender_id": sender_id,
@@ -3905,6 +4120,8 @@ def _cmd_project(args: argparse.Namespace) -> int:
             list_projects, get_active_project, set_active_project,
             add_project, remove_project, git_status, git_pull, git_push,
             git_commit, git_commit_and_push, git_clone, run_shell,
+            list_project_services, start_project_service, stop_project_service,
+            restart_project_service, read_project_service_log,
         )
     except ImportError as exc:
         print(style.fail(f"Project manager not available: {exc}"))
@@ -3922,6 +4139,27 @@ def _cmd_project(args: argparse.Namespace) -> int:
         if os.path.isdir(path_or_id):
             return add_project(path_or_id)
         return None
+
+    def _print_services(services: list[dict]) -> None:
+        if not services:
+            print(style.muted("  Services: none tracked"))
+            return
+        print(style.heading(f"{'SERVICE':<28} {'STATE':<10} {'PORT':<6} {'PID':<7} {'TYPE':<10} {'URL'}"))
+        for service in services:
+            status = str(service.get("status") or ("running" if service.get("running") else "stopped"))
+            state_text = status[:10]
+            if status == "running":
+                state_text = style.ok(state_text)
+            elif status == "degraded":
+                state_text = style.warn(state_text)
+            else:
+                state_text = style.muted(state_text)
+            name = str(service.get("name") or service.get("id") or "")[:28]
+            port = str(service.get("port") or "-")
+            pid = str(service.get("pid") or "-")
+            kind = str(service.get("kind") or "service")[:10]
+            url = str(service.get("url") or service.get("log_path") or "")
+            print(f"{name:<28} {state_text:<10} {port:<6} {pid:<7} {kind:<10} {url}")
 
     if action == "list":
         projects = list_projects()
@@ -4003,6 +4241,10 @@ def _cmd_project(args: argparse.Namespace) -> int:
                 print(style.ok(f"  Staged: {', '.join(s['staged'][:8])}"))
             if s.get("untracked"):
                 print(style.muted(f"  Untracked: {', '.join(s['untracked'][:8])}"))
+        services = list_project_services(proj["id"], include_stopped=True)
+        if services:
+            print()
+            _print_services(services)
         return 0
 
     if action == "shell":
@@ -4059,6 +4301,75 @@ def _cmd_project(args: argparse.Namespace) -> int:
         if result.get("stderr"):
             print(result["stderr"], end="", file=sys.stderr)
         return 0 if result.get("ok") else 1
+
+    if action == "service":
+        proj_arg = getattr(args, "project", "")
+        proj = _resolve_project(proj_arg)
+        if not proj:
+            print(style.fail("No active project. Use: kendr project add <path>"))
+            return 1
+        service_action = getattr(args, "project_service_action", "")
+
+        if service_action == "list":
+            services = list_project_services(proj["id"], include_stopped=not bool(getattr(args, "running_only", False)))
+            _print_services(services)
+            return 0
+
+        if service_action == "start":
+            try:
+                service = start_project_service(
+                    proj["id"],
+                    name=args.name,
+                    command=getattr(args, "command", ""),
+                    kind=getattr(args, "kind", ""),
+                    cwd=getattr(args, "cwd", ""),
+                    port=(getattr(args, "port", 0) or None),
+                    health_url=getattr(args, "health_url", ""),
+                    service_id=getattr(args, "service_id", ""),
+                )
+            except Exception as exc:
+                print(style.fail(f"Error: {exc}"))
+                return 1
+            print(style.ok(f"Started service: {service.get('name') or service.get('id')}"))
+            print(style.muted(f"  ID:   {service.get('id')}"))
+            print(style.muted(f"  PID:  {service.get('pid') or '-'}"))
+            print(style.muted(f"  Log:  {service.get('log_path') or '-'}"))
+            if service.get("url"):
+                print(style.muted(f"  URL:  {service.get('url')}"))
+            return 0
+
+        if service_action == "stop":
+            try:
+                service = stop_project_service(proj["id"], args.service_id)
+            except Exception as exc:
+                print(style.fail(f"Error: {exc}"))
+                return 1
+            print(style.ok(f"Stopped service: {service.get('name') or service.get('id')}"))
+            print(style.muted(f"  Log:  {service.get('log_path') or '-'}"))
+            return 0
+
+        if service_action == "restart":
+            try:
+                service = restart_project_service(proj["id"], args.service_id)
+            except Exception as exc:
+                print(style.fail(f"Error: {exc}"))
+                return 1
+            print(style.ok(f"Restarted service: {service.get('name') or service.get('id')}"))
+            print(style.muted(f"  PID:  {service.get('pid') or '-'}"))
+            print(style.muted(f"  Log:  {service.get('log_path') or '-'}"))
+            return 0
+
+        if service_action == "logs":
+            log_result = read_project_service_log(proj["id"], args.service_id, max_bytes=max(int(args.bytes), 1024))
+            if not log_result.get("ok"):
+                print(style.fail(f"Error: {log_result.get('error') or 'unable to read logs'}"))
+                return 1
+            content = str(log_result.get("content") or "")
+            if content:
+                print(content, end="" if content.endswith("\n") else "\n")
+            else:
+                print(style.muted("(log file is empty)"))
+            return 0
 
     print(style.fail(f"Unknown project action: {action}"))
     return 1
@@ -4347,6 +4658,8 @@ def _cmd_research(args: argparse.Namespace) -> int:
     base_ingest_payload: dict = {
         "max_steps": args.max_steps,
         "working_directory": resolved_working_dir,
+        "deep_research_mode": True,
+        "long_document_mode": True,
     }
 
     raw_sources = str(args.sources or "").strip()
@@ -4361,25 +4674,49 @@ def _cmd_research(args: argparse.Namespace) -> int:
         base_ingest_payload["research_pipeline_completed"] = False
 
     if int(args.pages or 0) > 0:
-        base_ingest_payload["long_document_mode"] = True
         base_ingest_payload["long_document_pages"] = int(args.pages)
         base_ingest_payload["long_document_collect_sources_first"] = True
     else:
-        base_ingest_payload["long_document_mode"] = True
         base_ingest_payload["long_document_collect_sources_first"] = True
 
     if str(args.title or "").strip():
         base_ingest_payload["long_document_title"] = str(args.title).strip()
     if str(args.research_model or "").strip():
         base_ingest_payload["research_model"] = str(args.research_model).strip()
+    parsed_formats = _parse_research_formats(getattr(args, "format", ""))
+    if parsed_formats:
+        base_ingest_payload["research_output_formats"] = parsed_formats
+    if str(getattr(args, "cite", "") or "").strip():
+        base_ingest_payload["research_citation_style"] = str(args.cite).strip().lower()
+    base_ingest_payload["research_enable_plagiarism_check"] = not bool(getattr(args, "no_plagiarism", False))
+    base_ingest_payload["research_web_search_enabled"] = not bool(getattr(args, "no_web_search", False))
+    if str(getattr(args, "date_range", "") or "").strip():
+        base_ingest_payload["research_date_range"] = str(args.date_range).strip()
+    if int(getattr(args, "max_sources", 0) or 0) > 0:
+        base_ingest_payload["research_max_sources"] = int(args.max_sources)
+    if bool(getattr(args, "checkpoint", False)):
+        base_ingest_payload["research_checkpoint_enabled"] = True
+    deep_research_links = _normalize_url_inputs(list(getattr(args, "deep_research_link", []) or []))
+    if deep_research_links:
+        base_ingest_payload["deep_research_source_urls"] = deep_research_links
     if bool(args.auto_approve):
         base_ingest_payload["auto_approve"] = True
 
     drive_paths = _normalize_drive_paths(args.drive)
+    if bool(getattr(args, "no_web_search", False)) and deep_research_links:
+        raise SystemExit(
+            "--no-web-search cannot be combined with --deep-research-link.\n"
+            "Use local files/folders only for a local-only deep research run."
+        )
+    if bool(getattr(args, "no_web_search", False)) and not drive_paths:
+        raise SystemExit(
+            "--no-web-search requires at least one --drive or --deep-research-path source."
+        )
     if drive_paths:
         base_ingest_payload["local_drive_paths"] = drive_paths
         base_ingest_payload["local_drive_recursive"] = True
         base_ingest_payload["local_drive_working_directory"] = resolved_working_dir
+        base_ingest_payload["local_drive_force_long_document"] = True
         if not raw_sources:
             base_ingest_payload.setdefault("research_sources", ["local"])
 
@@ -4695,12 +5032,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "working_directory": resolved_working_dir,
     }
     if bool(args.long_document):
+        base_ingest_payload["deep_research_mode"] = True
         base_ingest_payload["long_document_mode"] = True
         if not bool(args.long_document_no_collect_sources):
             base_ingest_payload["long_document_collect_sources_first"] = True
     if int(args.long_document_pages or 0) > 0:
+        base_ingest_payload["deep_research_mode"] = True
         base_ingest_payload["long_document_pages"] = int(args.long_document_pages)
     if int(getattr(args, "pages", 0) or 0) > 0:
+        base_ingest_payload["deep_research_mode"] = True
         base_ingest_payload["long_document_mode"] = True
         base_ingest_payload["long_document_pages"] = int(args.pages)
         if not bool(getattr(args, "long_document_no_collect_sources", False)):
@@ -4730,6 +5070,24 @@ def _cmd_run(args: argparse.Namespace) -> int:
         base_ingest_payload["long_document_section_search_results"] = int(args.long_document_section_search_results)
     if bool(args.long_document_no_visuals):
         base_ingest_payload["long_document_disable_visuals"] = True
+    parsed_formats = _parse_research_formats(getattr(args, "format", ""))
+    if parsed_formats:
+        base_ingest_payload["research_output_formats"] = parsed_formats
+    if str(getattr(args, "cite", "") or "").strip():
+        base_ingest_payload["research_citation_style"] = str(args.cite).strip().lower()
+    if bool(getattr(args, "no_plagiarism", False)):
+        base_ingest_payload["research_enable_plagiarism_check"] = False
+    if bool(getattr(args, "no_web_search", False)):
+        base_ingest_payload["research_web_search_enabled"] = False
+    if str(getattr(args, "date_range", "") or "").strip():
+        base_ingest_payload["research_date_range"] = str(args.date_range).strip()
+    if int(getattr(args, "max_sources", 0) or 0) > 0:
+        base_ingest_payload["research_max_sources"] = int(args.max_sources)
+    if bool(getattr(args, "checkpoint", False)):
+        base_ingest_payload["research_checkpoint_enabled"] = True
+    deep_research_links = _normalize_url_inputs(list(getattr(args, "deep_research_link", []) or []))
+    if deep_research_links:
+        base_ingest_payload["deep_research_source_urls"] = deep_research_links
     if int(args.research_max_wait_seconds or 0) > 0:
         base_ingest_payload["research_max_wait_seconds"] = int(args.research_max_wait_seconds)
     if int(args.research_poll_interval_seconds or 0) > 0:
@@ -4766,6 +5124,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if bool(args.drive_auto_generate_extension_handlers):
             base_ingest_payload["local_drive_auto_generate_extension_handlers"] = True
         base_ingest_payload["local_drive_working_directory"] = resolved_working_dir
+        if bool(base_ingest_payload.get("deep_research_mode")) or bool(base_ingest_payload.get("long_document_mode")):
+            base_ingest_payload["local_drive_force_long_document"] = True
+        if bool(getattr(args, "no_web_search", False)):
+            base_ingest_payload.setdefault("research_sources", ["local"])
 
     if bool(args.codebase):
         codebase_root = str(args.codebase_path or resolved_working_dir).strip()
@@ -4783,10 +5145,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
             elif not base_ingest_payload.get("local_drive_max_files"):
                 base_ingest_payload["local_drive_max_files"] = 1000
 
-        inferred_pages = _extract_requested_page_count(query)
-        inferred_long_document = _query_requests_long_document(query)
-        explicit_long_document = bool(args.long_document) or int(args.long_document_pages or 0) > 0
+    inferred_pages = _extract_requested_page_count(query)
+    inferred_long_document = _query_requests_long_document(query)
+    explicit_long_document = (
+        bool(args.long_document)
+        or int(args.long_document_pages or 0) > 0
+        or int(getattr(args, "pages", 0) or 0) > 0
+    )
+    has_local_drive_inputs = bool(base_ingest_payload.get("local_drive_paths"))
+    if has_local_drive_inputs:
         if inferred_long_document and not explicit_long_document:
+            base_ingest_payload["deep_research_mode"] = True
             base_ingest_payload["long_document_mode"] = True
             if inferred_pages >= 20:
                 base_ingest_payload["long_document_pages"] = inferred_pages
@@ -4983,6 +5352,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "output_folder": output_dir or "",
             "working_directory": resolved_working_dir,
             "reply": text,
+            "text": text,
             "channel": channel,
             "workspace_id": workspace_id,
             "sender_id": sender_id,
@@ -5635,6 +6005,14 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         ui_running = _ui_ready(timeout_seconds=0.8)
         ui_pid = ui_pids[0] if ui_pids else None
 
+        project_services: list[dict[str, Any]] = []
+        try:
+            from kendr.project_manager import list_all_project_services
+
+            project_services = list_all_project_services(include_stopped=True)
+        except Exception:
+            project_services = []
+
         servers = [
             {
                 "name": "Gateway",
@@ -5653,6 +6031,25 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
                 "uptime_seconds": round(uptime, 1) if (ui_running and uptime is not None) else None,
             },
         ]
+        for service in project_services:
+            service_name = str(service.get("name") or service.get("id") or "service")
+            project_name = str(service.get("project_name") or "").strip()
+            kind = str(service.get("kind") or "").strip()
+            label = service_name
+            if project_name:
+                label = f"{project_name} / {service_name}"
+            if kind:
+                label = f"{label} ({kind})"
+            servers.append(
+                {
+                    "name": label,
+                    "url": str(service.get("url") or service.get("log_path") or ""),
+                    "port": service.get("port"),
+                    "pid": service.get("pid"),
+                    "running": bool(service.get("running")),
+                    "uptime_seconds": service.get("uptime_seconds"),
+                }
+            )
         payload = {
             "running": running,
             "health_ok": health_ok,
@@ -5666,6 +6063,7 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
             "pid": pid,
             "uptime_seconds": round(uptime, 1) if uptime is not None else None,
             "servers": servers,
+            "project_services": project_services,
         }
         if use_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -5717,7 +6115,7 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         if use_json:
             print(json.dumps({"action": "restart", "base_url": base, "port": port, "pid": pid}, indent=2, ensure_ascii=False))
             return 0
-        out.gateway_started(base)
+        out.gateway_restarted(base)
         return 0
 
     if action == "start":
@@ -5752,6 +6150,7 @@ def _cmd_ui(args: argparse.Namespace) -> int:
     _display_host = os.getenv("KENDR_UI_HOST", "0.0.0.0")
     _url_host = "localhost" if _display_host in ("0.0.0.0", "") else _display_host
     ui_url = f"http://{_url_host}:{ui_port}"
+    os.environ.setdefault("KENDR_UI_LOG_PATH", str(_ui_log_path()))
 
     if not _gateway_ready(timeout_seconds=0.8):
         print(f"[ui] Gateway not running — starting it in background...")

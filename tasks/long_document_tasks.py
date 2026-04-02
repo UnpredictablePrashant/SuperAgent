@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import html
 import json
 import math
@@ -19,21 +20,25 @@ from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.coding_tasks import _extract_output_text
 from tasks.file_memory import bootstrap_file_memory, update_planning_file
 from tasks.planning_tasks import build_plan_approval_prompt, normalize_plan_data, plan_as_markdown
-from tasks.research_infra import llm_json, llm_text, serp_search
+from tasks.research_infra import fetch_url_content, llm_json, llm_text, serp_search
 from tasks.utils import OUTPUT_DIR, log_task_update, model_selection_for_agent, write_text_file, resolve_output_path
 
 
 DEFAULT_DEEP_RESEARCH_MODEL = os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research")
+DEFAULT_RESEARCH_FORMATS = ["pdf", "docx", "html", "md"]
+SUPPORTED_CITATION_STYLES = {"apa", "mla", "chicago", "ieee", "vancouver", "harvard"}
+DEEP_RESEARCH_LABEL = "Deep Research"
 
 AGENT_METADATA = {
     "long_document_agent": {
         "description": (
-            "Builds exhaustive long-form documents through staged section research, "
-            "cross-section coherence memory, and final merge assembly."
+            "Builds deep research reports through tiered planning, source-backed evidence gathering, "
+            "cross-section correlation, plagiarism checks, and multi-format export."
         ),
-        "skills": ["long-form", "deep-research", "chaptering", "synthesis", "reporting"],
+        "skills": ["deep-research", "reporting", "chaptering", "synthesis", "citations", "plagiarism"],
         "input_keys": [
             "current_objective",
+            "deep_research_mode",
             "long_document_mode",
             "long_document_pages",
             "long_document_sections",
@@ -51,8 +56,18 @@ AGENT_METADATA = {
             "research_poll_interval_seconds",
             "research_max_wait_seconds",
             "research_heartbeat_seconds",
+            "research_output_formats",
+            "research_citation_style",
+            "research_enable_plagiarism_check",
+            "research_web_search_enabled",
+            "research_date_range",
+            "research_max_sources",
+            "research_checkpoint_enabled",
+            "deep_research_source_urls",
         ],
         "output_keys": [
+            "deep_research_analysis",
+            "deep_research_result_card",
             "long_document_title",
             "long_document_outline",
             "long_document_sections_data",
@@ -72,10 +87,10 @@ AGENT_METADATA = {
             "draft_response",
         ],
         "requirements": ["openai"],
-        "display_name": "Long Document Agent",
+        "display_name": "Deep Research Report Agent",
         "category": "documents",
         "intent_patterns": [
-            "write a complete document", "research and write", "create a report",
+            "deep research report", "write a complete document", "research and write", "create a report",
             "generate a handbook", "produce a whitepaper", "write a guide",
             "document about", "full report on", "comprehensive guide to",
         ],
@@ -115,6 +130,166 @@ def _trim_text(text: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 3)] + "..."
+
+
+def _normalize_research_formats(raw_value: Any) -> list[str]:
+    if isinstance(raw_value, str):
+        items = [part.strip().lower() for part in raw_value.split(",")]
+    elif isinstance(raw_value, list):
+        items = [str(part).strip().lower() for part in raw_value]
+    else:
+        items = []
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in items:
+        if not item or item not in {"pdf", "docx", "html", "md"} or item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized or list(DEFAULT_RESEARCH_FORMATS)
+
+
+def _normalize_citation_style(raw_value: Any) -> str:
+    style = str(raw_value or "").strip().lower()
+    if style in SUPPORTED_CITATION_STYLES:
+        return style
+    return "apa"
+
+
+def _tier_budget(tier: int) -> dict[str, Any]:
+    budgets = {
+        1: {"max_tokens": 5000, "max_sources": 3, "max_duration_minutes": 1},
+        2: {"max_tokens": 30000, "max_sources": 20, "max_duration_minutes": 5},
+        3: {"max_tokens": 150000, "max_sources": 60, "max_duration_minutes": 20},
+        4: {"max_tokens": 500000, "max_sources": 150, "max_duration_minutes": 90},
+        5: {"max_tokens": 0, "max_sources": 0, "max_duration_minutes": 0},
+    }
+    return budgets.get(_safe_int(tier, 2, 1, 5), budgets[2])
+
+
+def _default_subtopics(objective: str) -> list[str]:
+    seeds = [
+        "Market structure and baseline context",
+        "Key players and competitive dynamics",
+        "Evidence, benchmarks, and current data points",
+        "Risks, contradictions, and areas of uncertainty",
+        "Implications, outlook, and conclusion",
+    ]
+    text = str(objective or "").strip()
+    if not text:
+        return seeds[:3]
+    fragments = re.split(r"[?.!]", text)
+    topical = [frag.strip().capitalize() for frag in fragments if len(frag.strip().split()) >= 4]
+    return (topical[:4] or seeds[:4]) + ([seeds[-1]] if seeds[-1] not in topical[:4] else [])
+
+
+def _research_depth_analysis(
+    objective: str,
+    *,
+    target_pages: int,
+    requested_sources: list[str],
+    date_range: str,
+) -> dict[str, Any]:
+    text = str(objective or "").strip()
+    lowered = text.lower()
+    heuristic_tier = 2
+    reason_bits: list[str] = []
+
+    if len(text.split()) > 50:
+        heuristic_tier += 1
+        reason_bits.append("query length suggests broad scope")
+    if any(token in lowered for token in ("compare", "analyse", "analyze", "comprehensive", "thorough", "deep", "full report", "detailed", "exhaustive")):
+        heuristic_tier += 1
+        reason_bits.append("explicit deep-analysis wording")
+    if target_pages >= 100:
+        heuristic_tier += 2
+        reason_bits.append("very large page target")
+    elif target_pages >= 50:
+        heuristic_tier += 2
+        reason_bits.append("large page target")
+    elif target_pages >= 20:
+        heuristic_tier += 1
+        reason_bits.append("multi-section page target")
+    if any(token in lowered for token in ("academic", "peer-reviewed", "scholarly", "patent", "scientific", "literature review")):
+        heuristic_tier += 1
+        reason_bits.append("academic / patent scope")
+    if date_range and str(date_range).strip().lower() not in {"", "all_time", "all time"}:
+        heuristic_tier += 1
+        reason_bits.append("explicit temporal scope")
+    if any(token in lowered for token in ("quick", "brief", "summary", "tldr", "short")):
+        heuristic_tier -= 1
+        reason_bits.append("short-form wording lowers depth")
+    if len(re.findall(r"\b[A-Z][a-zA-Z0-9&.-]+\b", text)) >= 4:
+        heuristic_tier += 1
+        reason_bits.append("multiple named entities detected")
+    heuristic_tier = max(1, min(5, heuristic_tier))
+
+    estimated_pages = target_pages if target_pages > 0 else {1: 1, 2: 4, 3: 18, 4: 50, 5: 120}[heuristic_tier]
+    estimated_sources = min(200, max(3, {1: 3, 2: 15, 3: 45, 4: 110, 5: 200}[heuristic_tier] + (10 if requested_sources else 0)))
+    estimated_duration = {1: 1, 2: 5, 3: 15, 4: 45, 5: 120}[heuristic_tier]
+    subtopics = _default_subtopics(text)
+
+    fallback = {
+        "tier": heuristic_tier,
+        "reason": "; ".join(reason_bits) or "heuristic estimate",
+        "estimated_sources": estimated_sources,
+        "estimated_pages": estimated_pages,
+        "subtopics": subtopics[:6],
+        "requires_deep_research": heuristic_tier >= 3,
+        "estimated_duration_minutes": estimated_duration,
+    }
+
+    prompt = f"""
+You are a research complexity analyser.
+
+Given the query and heuristic estimate below, determine the final research tier (1-5).
+Respond with JSON only:
+{{
+  "tier": 3,
+  "reason": "string",
+  "estimated_sources": 40,
+  "estimated_pages": 15,
+  "subtopics": ["...", "..."],
+  "requires_deep_research": true,
+  "estimated_duration_minutes": 15
+}}
+
+Query:
+{text}
+
+Heuristic estimate:
+{json.dumps(fallback, ensure_ascii=False)}
+"""
+    try:
+        data = llm_json(prompt, fallback)
+    except Exception:
+        data = fallback
+
+    if not isinstance(data, dict):
+        data = fallback
+    tier = _safe_int(data.get("tier"), heuristic_tier, 1, 5)
+    estimated_pages = _safe_int(data.get("estimated_pages"), fallback["estimated_pages"], 1, 500)
+    estimated_sources = _safe_int(data.get("estimated_sources"), fallback["estimated_sources"], 1, 400)
+    estimated_duration = _safe_int(data.get("estimated_duration_minutes"), fallback["estimated_duration_minutes"], 1, 1440)
+    subtopics_value = data.get("subtopics", [])
+    if not isinstance(subtopics_value, list):
+        subtopics_value = fallback["subtopics"]
+    subtopics = [str(item).strip() for item in subtopics_value if str(item).strip()][:8] or fallback["subtopics"]
+    budget = _tier_budget(tier)
+    if budget["max_sources"]:
+        estimated_sources = min(estimated_sources, int(budget["max_sources"]))
+    return {
+        "tier": tier,
+        "reason": str(data.get("reason", "")).strip() or fallback["reason"],
+        "estimated_sources": estimated_sources,
+        "estimated_pages": estimated_pages,
+        "subtopics": subtopics,
+        "requires_deep_research": bool(data.get("requires_deep_research", tier >= 3)),
+        "estimated_duration_minutes": estimated_duration,
+        "budget": budget,
+        "requested_sources": requested_sources,
+        "date_range": date_range or "all_time",
+    }
 
 
 def _coherence_base_context(state: dict, objective: str) -> str:
@@ -166,6 +341,9 @@ def _resolve_existing_output_path(path_value: str) -> str:
 
 def _source_label(url: str) -> str:
     parsed = urlparse(url)
+    if parsed.scheme == "file":
+        file_name = Path(parsed.path or "").name
+        return f"file:{file_name or 'local-source'}"
     host = parsed.netloc or "source"
     path = (parsed.path or "/").strip("/")
     if not path:
@@ -194,6 +372,165 @@ def _collect_local_drive_evidence(state: dict, *, max_items: int = 25) -> list[d
             }
         )
     return entries
+
+
+def _file_source_url(path_value: str) -> str:
+    try:
+        return Path(str(path_value or "")).resolve().as_uri()
+    except Exception:
+        return f"file://{str(path_value or '').strip()}"
+
+
+def _sources_from_local_entries(entries: list[dict]) -> list[dict]:
+    sources = []
+    for index, entry in enumerate(entries or [], start=1):
+        path_value = str(entry.get("path", "")).strip()
+        if not path_value:
+            continue
+        label = str(entry.get("file_name", "")).strip() or Path(path_value).name or f"Local file {index}"
+        sources.append({"id": f"L{index}", "url": _file_source_url(path_value), "label": label})
+    return sources
+
+
+def _normalize_research_urls(raw_value: Any) -> list[str]:
+    if isinstance(raw_value, str):
+        raw_items = re.split(r"[\n,]", raw_value)
+    elif isinstance(raw_value, list):
+        raw_items = raw_value
+    else:
+        raw_items = []
+    urls: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        candidate = _normalize_url(str(item or "").strip())
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        urls.append(candidate)
+    return urls
+
+
+def _sources_from_url_entries(entries: list[dict]) -> list[dict]:
+    sources = []
+    for index, entry in enumerate(entries or [], start=1):
+        url = str(entry.get("url", "")).strip()
+        if not url:
+            continue
+        label = str(entry.get("label", "")).strip() or _source_label(url)
+        sources.append({"id": f"U{index}", "url": url, "label": label})
+    return sources
+
+
+def _collect_user_url_evidence(objective: str, state: dict, *, max_items: int = 12) -> list[dict]:
+    urls = _normalize_research_urls(state.get("deep_research_source_urls", []))
+    if not urls:
+        return []
+    entries = []
+    for url in urls[:max_items]:
+        try:
+            page = fetch_url_content(url, timeout=20)
+            page_text = _trim_text(str(page.get("text", "")).strip(), 8000)
+            if page_text:
+                summary = llm_text(
+                    f"""
+You are summarizing a user-provided URL for a deep research report.
+
+Primary objective:
+{objective}
+
+URL:
+{url}
+
+Extracted content:
+{page_text}
+
+Write a concise evidence summary covering:
+- what this page is about
+- concrete facts, numbers, dates, and named entities
+- relevance to the objective
+- any credibility or freshness concerns
+"""
+                ).strip()
+            else:
+                summary = "No readable text was extracted from this URL."
+            entries.append(
+                {
+                    "source_type": "provided_url",
+                    "url": url,
+                    "label": _source_label(url),
+                    "content_type": str(page.get("content_type", "")).strip(),
+                    "char_count": len(str(page.get("text", "")).strip()),
+                    "summary": summary,
+                    "excerpt": _trim_text(page_text, 2500),
+                    "error": "",
+                }
+            )
+        except Exception as exc:
+            entries.append(
+                {
+                    "source_type": "provided_url",
+                    "url": url,
+                    "label": _source_label(url),
+                    "content_type": "",
+                    "char_count": 0,
+                    "summary": "",
+                    "excerpt": "",
+                    "error": str(exc),
+                }
+            )
+    return entries
+
+
+def _build_local_only_research_notes(
+    *,
+    objective: str,
+    focus: str,
+    local_entries: list[dict],
+    url_entries: list[dict],
+    continuity_notes: list[str] | None = None,
+) -> str:
+    corpus = {
+        "objective": objective,
+        "focus": focus,
+        "continuity_notes": list(continuity_notes or [])[-8:],
+        "local_files": [
+            {
+                "file_name": item.get("file_name", ""),
+                "path": item.get("path", ""),
+                "type": item.get("type", ""),
+                "summary": item.get("summary", ""),
+                "error": item.get("error", ""),
+            }
+            for item in (local_entries or [])[:25]
+        ],
+        "provided_urls": [
+            {
+                "url": item.get("url", ""),
+                "label": item.get("label", ""),
+                "summary": item.get("summary", ""),
+                "error": item.get("error", ""),
+                "excerpt": item.get("excerpt", ""),
+            }
+            for item in (url_entries or [])[:12]
+        ],
+    }
+    return llm_text(
+        f"""
+You are synthesizing a deep research corpus without open web search.
+
+Use only the supplied local files and explicitly provided URL extracts.
+Do not invent external facts or imply that web search was performed.
+
+Corpus:
+{json.dumps(corpus, indent=2, ensure_ascii=False)[:24000]}
+
+Write a structured evidence memo that includes:
+- the strongest supported findings
+- important numbers, dates, entities, and claims
+- contradictions, gaps, or low-confidence areas
+- which files or URLs are most relevant to this focus
+"""
+    ).strip()
 
 
 def _collect_google_search_evidence(query: str, *, num: int = 10) -> dict:
@@ -265,15 +602,16 @@ def _format_evidence_bank_markdown(
     *,
     objective: str,
     local_entries: list[dict],
+    url_entries: list[dict],
     search_results: dict,
-    web_research_text: str,
-    web_sources: list[dict],
+    research_notes_text: str,
+    source_ledger: list[dict],
     insufficiency_note: str,
 ) -> str:
     lines = ["# Evidence Bank", "", "## Objective", objective.strip(), ""]
     if insufficiency_note:
         lines.extend(["## Data Sufficiency Note", insufficiency_note.strip(), ""])
-    lines.append("## Local Drive Sources")
+    lines.append("## Local File Sources")
     if local_entries:
         for entry in local_entries:
             label = entry.get("file_name") or entry.get("path") or "unknown"
@@ -290,6 +628,25 @@ def _format_evidence_bank_markdown(
                 lines.append(f"  - Summary: {entry['summary']}")
     else:
         lines.append("- No local-drive sources were found.")
+    lines.append("")
+
+    lines.append("## User-Provided URL Sources")
+    if url_entries:
+        for entry in url_entries:
+            label = entry.get("label") or entry.get("url") or "URL"
+            lines.append(f"- URL: {label}")
+            if entry.get("url"):
+                lines.append(f"  - Link: {entry['url']}")
+            if entry.get("content_type"):
+                lines.append(f"  - Content type: {entry['content_type']}")
+            if entry.get("char_count"):
+                lines.append(f"  - Characters: {entry['char_count']}")
+            if entry.get("error"):
+                lines.append(f"  - Extraction error: {entry['error']}")
+            if entry.get("summary"):
+                lines.append(f"  - Summary: {entry['summary']}")
+    else:
+        lines.append("- No explicit URL sources were provided.")
     lines.append("")
 
     lines.append("## Web Search Results (Google via SerpAPI)")
@@ -314,15 +671,15 @@ def _format_evidence_bank_markdown(
             lines.append("- No search results were collected.")
     lines.append("")
 
-    lines.append("## Web Research Notes")
-    lines.append(web_research_text.strip() or "No web research notes generated.")
+    lines.append("## Research Notes")
+    lines.append(research_notes_text.strip() or "No research notes generated.")
     lines.append("")
-    lines.append("## Web Research Source Ledger")
-    if web_sources:
-        for item in web_sources:
+    lines.append("## Source Ledger")
+    if source_ledger:
+        for item in source_ledger:
             lines.append(f"- [{item['id']}] {item['label']} - {item['url']}")
     else:
-        lines.append("- No web sources extracted.")
+        lines.append("- No sources were extracted.")
     lines.append("")
     return "\n".join(lines).strip() + "\n"
 
@@ -379,12 +736,12 @@ def _run_long_document_addendum(
     words_target = _safe_int(state.get("long_document_addendum_words"), 1200, 400, 5000)
 
     log_task_update(
-        "Long Document",
+        DEEP_RESEARCH_LABEL,
         f"Generating addendum (attempt {attempts + 1}) targeting ~{words_target} words.",
     )
 
     prompt = f"""
-You are drafting a focused addendum to a long-form financial advisory report.
+You are drafting a focused addendum to a deep research financial advisory report.
 Use the reviewer feedback and evidence bank to add missing analysis without rewriting the full report.
 
 Primary objective:
@@ -408,7 +765,7 @@ Write an addendum of about {words_target} words that:
     if not addendum_text:
         addendum_text = "Addendum could not be generated from the available evidence."
     log_task_update(
-        "Long Document",
+        DEEP_RESEARCH_LABEL,
         f"Addendum draft complete: {len(addendum_text.split())} words, {len(addendum_text)} chars.",
     )
 
@@ -444,7 +801,7 @@ Write an addendum of about {words_target} words that:
         f"- Addendum file: {OUTPUT_DIR}/{addendum_filename}\n"
     )
     state["draft_response"] = summary
-    log_task_update("Long Document", "Addendum appended to compiled report.", summary)
+    log_task_update(DEEP_RESEARCH_LABEL, "Addendum appended to compiled report.", summary)
     return publish_agent_output(
         state,
         "long_document_agent",
@@ -778,7 +1135,8 @@ def _visual_index_markdown(visual_index: dict) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def _build_outline(objective: str, *, title: str, section_count: int, section_pages: int) -> dict:
+def _build_outline(objective: str, *, title: str, section_count: int, section_pages: int, subtopics: list[str] | None = None) -> dict:
+    subtopic_list = [str(item).strip() for item in (subtopics or []) if str(item).strip()]
     fallback = {
         "title": title,
         "sections": [
@@ -793,7 +1151,7 @@ def _build_outline(objective: str, *, title: str, section_count: int, section_pa
         ],
     }
     prompt = f"""
-You are planning a long-form research monograph.
+You are planning a deep research report.
 
 Create a coherent section-by-section outline for this objective:
 {objective}
@@ -802,8 +1160,11 @@ Constraints:
 - report title: {title}
 - sections needed: {section_count}
 - target pages per section: about {section_pages}
+- preferred subtopics: {subtopic_list or ['Use the objective to derive subtopics']}
 - each section must contribute to one coherent final narrative
 - avoid overlap; ensure logical progression
+- include a methodology / data sources section near the beginning
+- place the conclusion last
 
 Return ONLY valid JSON with schema:
 {{
@@ -843,6 +1204,33 @@ Return ONLY valid JSON with schema:
         )
     if not normalized_sections:
         return fallback
+    methodology_title = "Methodology and Data Sources"
+    conclusion_title = "Conclusion and Implications"
+    titles = [str(item.get("title", "")).strip().lower() for item in normalized_sections]
+    if methodology_title.lower() not in titles:
+        normalized_sections.insert(
+            min(1, len(normalized_sections)),
+            {
+                "id": len(normalized_sections) + 1,
+                "title": methodology_title,
+                "objective": "Explain the research method, source mix, date range, and evidence quality controls.",
+                "key_questions": [],
+                "target_pages": section_pages,
+            },
+        )
+    titles = [str(item.get("title", "")).strip().lower() for item in normalized_sections]
+    if conclusion_title.lower() not in titles:
+        normalized_sections.append(
+            {
+                "id": len(normalized_sections) + 1,
+                "title": conclusion_title,
+                "objective": "Synthesize the key findings, limitations, and next-step implications.",
+                "key_questions": [],
+                "target_pages": section_pages,
+            }
+        )
+    for index, item in enumerate(normalized_sections, start=1):
+        item["id"] = index
     while len(normalized_sections) < section_count:
         next_index = len(normalized_sections) + 1
         normalized_sections.append(
@@ -869,6 +1257,343 @@ def _outline_markdown(outline: dict, *, fallback_title: str) -> str:
             f"- {section.get('id')}. {section.get('title')}: {section.get('objective')} "
             f"| target_pages={section.get('target_pages')} | questions={question_text}"
         )
+    return "\n".join(lines).strip() + "\n"
+
+
+def _deep_research_analysis_markdown(
+    analysis: dict,
+    *,
+    formats: list[str],
+    citation_style: str,
+    plagiarism_enabled: bool,
+    web_search_enabled: bool,
+    local_source_count: int,
+    provided_url_count: int,
+) -> str:
+    budget = analysis.get("budget", {}) if isinstance(analysis, dict) else {}
+    lines = [
+        "# Deep Research Analysis",
+        "",
+        f"- Tier: {analysis.get('tier', '?')}",
+        f"- Estimated pages: {analysis.get('estimated_pages', '?')}",
+        f"- Estimated sources: {analysis.get('estimated_sources', '?')}",
+        f"- Estimated duration: {analysis.get('estimated_duration_minutes', '?')} minutes",
+        f"- Citation style: {citation_style.upper()}",
+        f"- Output formats: {', '.join(fmt.upper() for fmt in formats)}",
+        f"- Plagiarism check: {'enabled' if plagiarism_enabled else 'disabled'}",
+        f"- Web search: {'enabled' if web_search_enabled else 'disabled'}",
+        f"- Local file sources detected: {local_source_count}",
+        f"- User-provided URLs: {provided_url_count}",
+        f"- Date range: {analysis.get('date_range', 'all_time')}",
+        "",
+        "## Detected Subtopics",
+    ]
+    for idx, topic in enumerate(analysis.get("subtopics", []) if isinstance(analysis.get("subtopics", []), list) else [], start=1):
+        lines.append(f"- {idx}. {topic}")
+    if budget:
+        lines.extend(
+            [
+                "",
+                "## Session Budget",
+                f"- Max tokens: {budget.get('max_tokens', 0) or 'unlimited'}",
+                f"- Max sources: {budget.get('max_sources', 0) or 'unlimited'}",
+                f"- Max duration: {budget.get('max_duration_minutes', 0) or 'multi-hour'} minutes",
+            ]
+        )
+    if str(analysis.get("reason", "")).strip():
+        lines.extend(["", "## Why this tier", f"- {str(analysis.get('reason', '')).strip()}"])
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_deep_research_confirmation_prompt(analysis_md: str, *, version: int) -> str:
+    return build_plan_approval_prompt(
+        analysis_md,
+        scope_title=f"deep research confirmation v{version}",
+        storage_note="Review the tier, subtopics, and output settings before the expensive research phases begin.",
+    )
+
+
+def _section_text_blocks(text: str) -> list[str]:
+    blocks = []
+    for part in re.split(r"\n\s*\n", str(text or "").strip()):
+        cleaned = part.strip()
+        if cleaned:
+            blocks.append(cleaned)
+    return blocks
+
+
+def _build_correlation_package(objective: str, section_packages: list[dict]) -> dict:
+    section_titles = [str(item.get("title", f"Section {idx}")).strip() or f"Section {idx}" for idx, item in enumerate(section_packages, start=1)]
+    fallback = {
+        "section_order": section_titles,
+        "cross_cutting_themes": [],
+        "contradictions": [],
+        "briefing": "Use the outline order, avoid overlap, and explicitly cross-reference related sections where evidence intersects.",
+    }
+    prompt = f"""
+You are the subtopic correlation engine for a deep research report.
+
+Objective:
+{objective}
+
+Section research packages:
+{json.dumps([
+    {
+        "title": item.get("title", ""),
+        "objective": item.get("objective", ""),
+        "key_questions": item.get("key_questions", []),
+        "research_preview": _trim_text(item.get("research_text", ""), 1800),
+        "source_count": len(item.get("sources", []) if isinstance(item.get("sources", []), list) else []),
+    }
+    for item in section_packages
+], indent=2, ensure_ascii=False)}
+
+Return JSON only:
+{{
+  "section_order": ["title 1", "title 2"],
+  "cross_cutting_themes": ["theme 1", "theme 2"],
+  "contradictions": ["contradiction 1"],
+  "briefing": "500-1000 word editorial briefing for the writer"
+}}
+"""
+    try:
+        data = llm_json(prompt, fallback)
+    except Exception:
+        data = fallback
+    if not isinstance(data, dict):
+        data = fallback
+    raw_order = data.get("section_order", [])
+    if not isinstance(raw_order, list):
+        raw_order = section_titles
+    order: list[str] = []
+    seen: set[str] = set()
+    title_lookup = {title.lower(): title for title in section_titles}
+    for item in raw_order:
+        key = str(item).strip().lower()
+        resolved = title_lookup.get(key)
+        if not resolved or resolved in seen:
+            continue
+        seen.add(resolved)
+        order.append(resolved)
+    for title in section_titles:
+        if title not in seen:
+            order.append(title)
+    themes = [str(item).strip() for item in data.get("cross_cutting_themes", []) if str(item).strip()] if isinstance(data.get("cross_cutting_themes", []), list) else []
+    contradictions = [str(item).strip() for item in data.get("contradictions", []) if str(item).strip()] if isinstance(data.get("contradictions", []), list) else []
+    briefing = str(data.get("briefing", "")).strip() or fallback["briefing"]
+    nodes = [{"id": item.get("title", ""), "label": item.get("title", ""), "source_count": len(item.get("sources", []))} for item in section_packages]
+    edges = []
+    for left, right in zip(order, order[1:]):
+        edges.append({"from": left, "to": right, "type": "depends_on", "weight": 0.6})
+    if contradictions and len(order) >= 2:
+        edges.append({"from": order[0], "to": order[-1], "type": "contradicts", "weight": 0.4, "note": contradictions[0]})
+    return {
+        "section_order": order,
+        "cross_cutting_themes": themes,
+        "contradictions": contradictions,
+        "briefing": briefing,
+        "knowledge_graph": {"nodes": nodes, "edges": edges},
+    }
+
+
+def _ensure_section_citations(section_text: str, section_sources: list[dict]) -> str:
+    source_ids = [str(item.get("id", "")).strip() for item in section_sources if str(item.get("id", "")).strip()]
+    if not source_ids:
+        return section_text.strip()
+    default_source = source_ids[0]
+    lines = []
+    citation_re = re.compile(r"\[[A-Z]\d+\]")
+    for raw in str(section_text or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("```") or stripped.startswith("|") or stripped.startswith("- ") or stripped.startswith("* ") or re.match(r"^\d+\.\s", stripped):
+            lines.append(line)
+            continue
+        if citation_re.search(stripped):
+            lines.append(line)
+            continue
+        lines.append(f"{line} [{default_source}]")
+    return "\n".join(lines).strip()
+
+
+def _tokenize_words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", str(text or "").lower())
+
+
+def _cosine_similarity(left: str, right: str) -> float:
+    left_tokens = _tokenize_words(left)
+    right_tokens = _tokenize_words(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    left_counts: dict[str, int] = {}
+    right_counts: dict[str, int] = {}
+    for token in left_tokens:
+        left_counts[token] = left_counts.get(token, 0) + 1
+    for token in right_tokens:
+        right_counts[token] = right_counts.get(token, 0) + 1
+    numerator = sum(left_counts[token] * right_counts.get(token, 0) for token in left_counts)
+    left_norm = math.sqrt(sum(value * value for value in left_counts.values()))
+    right_norm = math.sqrt(sum(value * value for value in right_counts.values()))
+    if not left_norm or not right_norm:
+        return 0.0
+    return numerator / (left_norm * right_norm)
+
+
+def _ngram_overlap(left: str, right: str, *, n: int = 3) -> float:
+    def _ngrams(value: str) -> set[tuple[str, ...]]:
+        tokens = _tokenize_words(value)
+        if len(tokens) < n:
+            return set()
+        return {tuple(tokens[idx : idx + n]) for idx in range(0, len(tokens) - n + 1)}
+
+    left_ngrams = _ngrams(left)
+    right_ngrams = _ngrams(right)
+    if not left_ngrams or not right_ngrams:
+        return 0.0
+    return len(left_ngrams & right_ngrams) / max(1, len(left_ngrams))
+
+
+def _estimate_ai_content_score(text: str) -> float:
+    tokens = _tokenize_words(text)
+    if not tokens:
+        return 0.0
+    unique_ratio = len(set(tokens)) / max(1, len(tokens))
+    sentence_starts = re.findall(r"(?:^|[.!?]\s+)([A-Z][a-z]+)", str(text or ""))
+    repeated_start_ratio = 0.0
+    if sentence_starts:
+        counts: dict[str, int] = {}
+        for item in sentence_starts:
+            counts[item] = counts.get(item, 0) + 1
+        repeated = sum(value for value in counts.values() if value > 1)
+        repeated_start_ratio = repeated / max(1, len(sentence_starts))
+    citation_density = len(re.findall(r"\[[A-Z]\d+\]", str(text or ""))) / max(1, len(_section_text_blocks(text)))
+    score = 55.0 * max(0.0, 0.45 - unique_ratio) + 25.0 * repeated_start_ratio + 8.0 * max(0.0, 1.0 - citation_density)
+    return round(max(0.0, min(100.0, score)), 1)
+
+
+def _build_plagiarism_report(section_outputs: list[dict], source_texts: list[dict]) -> dict:
+    source_blocks: list[dict[str, str]] = []
+    for item in source_texts:
+        label = str(item.get("label", "")).strip() or "source"
+        url = str(item.get("url", "")).strip()
+        for block in _section_text_blocks(item.get("text", "")):
+            if len(block.split()) < 12:
+                continue
+            source_blocks.append({"label": label, "url": url, "text": block})
+
+    sections_payload = []
+    total_paragraphs = 0
+    flagged_paragraphs_total = 0
+    ai_scores: list[float] = []
+    for section in section_outputs:
+        flagged = []
+        paragraphs = [block for block in _section_text_blocks(section.get("section_text", "")) if len(block.split()) >= 12]
+        total_paragraphs += len(paragraphs)
+        section_ai = _estimate_ai_content_score(section.get("section_text", ""))
+        ai_scores.append(section_ai)
+        for paragraph in paragraphs:
+            best_match = None
+            best_similarity = 0.0
+            best_overlap = 0.0
+            for source in source_blocks[:250]:
+                cosine = _cosine_similarity(paragraph, source["text"])
+                overlap = _ngram_overlap(paragraph, source["text"])
+                if cosine > best_similarity or overlap > best_overlap:
+                    best_similarity = max(best_similarity, cosine)
+                    best_overlap = max(best_overlap, overlap)
+                    best_match = source
+            if best_match and (best_similarity >= 0.85 or best_overlap >= 0.65):
+                flagged.append(
+                    {
+                        "text_excerpt": _trim_text(paragraph, 240),
+                        "similarity": round(max(best_similarity, best_overlap), 3),
+                        "source_url": best_match.get("url", ""),
+                        "type": "near-verbatim" if best_similarity >= 0.85 else "mosaic",
+                        "recommendation": "rephrase or add citation",
+                    }
+                )
+        flagged_paragraphs_total += len(flagged)
+        section_score = round((len(flagged) / max(1, len(paragraphs))) * 100.0, 1) if paragraphs else 0.0
+        sections_payload.append(
+            {
+                "section_title": section.get("title", ""),
+                "plagiarism_score": section_score,
+                "ai_score": section_ai,
+                "flagged_paragraphs": flagged[:8],
+            }
+        )
+    overall = round((flagged_paragraphs_total / max(1, total_paragraphs)) * 100.0, 1) if total_paragraphs else 0.0
+    ai_content = round(sum(ai_scores) / max(1, len(ai_scores)), 1) if ai_scores else 0.0
+    status = "PASS" if overall < 10 else "WARN" if overall <= 20 else "FAIL"
+    return {
+        "overall_score": overall,
+        "ai_content_score": ai_content,
+        "status": status,
+        "sections": sections_payload,
+    }
+
+
+def _format_citation(entry: dict, *, style: str, index: int) -> str:
+    label = str(entry.get("label", "Untitled source")).strip() or "Untitled source"
+    url = str(entry.get("url", "")).strip()
+    access_date = dt.datetime.utcnow().strftime("%Y-%m-%d")
+    site = _source_label(url) if url else label
+    year_match = re.search(r"(20\d{2}|19\d{2})", label)
+    year = year_match.group(1) if year_match else dt.datetime.utcnow().strftime("%Y")
+    if style == "mla":
+        return f'"{label}." {site}, {year}, {url}. Accessed {access_date}.'.strip()
+    if style == "chicago":
+        return f'{site}. "{label}." Accessed {access_date}. {url}.'.strip()
+    if style == "ieee":
+        return f'[{index}] "{label}," {site}, {year}. [Online]. Available: {url}.'.strip()
+    if style == "vancouver":
+        return f"{index}. {label}. {site}. {year}. Available from: {url}".strip()
+    if style == "harvard":
+        return f"{site} ({year}) {label}. Available at: {url} (Accessed: {access_date}).".strip()
+    return f"{site}. ({year}). {label}. Retrieved {access_date}, from {url}".strip()
+
+
+def _bibliography_markdown(entries: list[dict], *, style: str) -> str:
+    lines = [f"## Bibliography ({style.upper()})", ""]
+    if not entries:
+        lines.append("- No sources were available for bibliography generation.")
+        return "\n".join(lines).strip() + "\n"
+    for index, entry in enumerate(entries, start=1):
+        citation = _format_citation(entry, style=style, index=index)
+        if style in {"ieee", "vancouver"}:
+            lines.append(f"- {citation}")
+        else:
+            lines.append(f"- [R{index}] {citation}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _plagiarism_report_markdown(report: dict) -> str:
+    lines = ["## Appendix B - Plagiarism Report", ""]
+    lines.append(f"- Overall plagiarism score: {report.get('overall_score', 0)}%")
+    lines.append(f"- AI content score: {report.get('ai_content_score', 0)}%")
+    lines.append(f"- Status: {report.get('status', 'PASS')}")
+    sections = report.get("sections", []) if isinstance(report, dict) else []
+    if not sections:
+        lines.append("- No section-level findings.")
+        return "\n".join(lines).strip() + "\n"
+    for section in sections:
+        lines.extend(
+            [
+                "",
+                f"### {section.get('section_title', 'Section')}",
+                f"- Plagiarism score: {section.get('plagiarism_score', 0)}%",
+                f"- AI score: {section.get('ai_score', 0)}%",
+            ]
+        )
+        flagged = section.get("flagged_paragraphs", []) if isinstance(section, dict) else []
+        if not flagged:
+            lines.append("- No flagged paragraphs.")
+            continue
+        for item in flagged[:5]:
+            lines.append(
+                f"- {item.get('type', 'flagged')}: {item.get('text_excerpt', '')} "
+                f"(similarity={item.get('similarity', 0)}, source={item.get('source_url', '')})"
+            )
     return "\n".join(lines).strip() + "\n"
 
 
@@ -924,12 +1649,12 @@ def _long_document_subplan(outline: dict, *, objective: str, target_pages: int, 
     raw_steps.append(
         {
             "id": "final-merge",
-            "title": "Merge sections and produce final artifacts",
+            "title": "Merge sections and produce deep research artifacts",
             "agent": "long_document_agent",
-            "task": "Merge all approved sections into one compiled markdown document with executive summary, references, and artifact indexes.",
+            "task": "Merge all approved sections into one compiled deep research report with executive summary, references, appendices, and export artifacts.",
             "depends_on": [step["id"] for step in raw_steps if str(step.get("id", "")).endswith("-draft")] or [step["id"] for step in raw_steps],
             "parallel_group": "",
-            "success_criteria": "Compiled long-form document, references, and manifest are written to disk.",
+            "success_criteria": "Compiled deep research report, references, plagiarism appendix, and manifest are written to disk.",
             "rationale": "Finish the document only after the section plan has been executed.",
             "llm_model": draft_selection.get("model", ""),
             "model_source": draft_selection.get("source", ""),
@@ -941,7 +1666,7 @@ def _long_document_subplan(outline: dict, *, objective: str, target_pages: int, 
             "needs_clarification": False,
             "clarification_questions": [],
             "summary": (
-                f"Deliver a {target_pages}-page long-form document through approved section-by-section research, "
+                f"Deliver a {target_pages}-page deep research report through approved section-by-section research, "
                 "drafting, and final merge."
             ),
             "steps": raw_steps,
@@ -997,7 +1722,7 @@ def _run_research_pass(
         if heartbeat_every > 0 and (elapsed_seconds - last_heartbeat) >= heartbeat_every:
             last_heartbeat = elapsed_seconds
             if heartbeat_label:
-                log_task_update("Long Document", f"{heartbeat_label} ({elapsed_seconds}s elapsed).")
+                log_task_update(DEEP_RESEARCH_LABEL, f"{heartbeat_label} ({elapsed_seconds}s elapsed).")
         response = client.responses.retrieve(response_id)
         status = str(getattr(response, "status", "unknown"))
 
@@ -1021,14 +1746,17 @@ def _format_section_prompt(
     words_target: int,
     continuity_notes: list[str],
     coherence_context_md: str,
+    correlation_briefing: str,
     source_ledger_md: str,
     research_text: str,
     evidence_bank_md: str = "",
+    citation_style: str = "apa",
+    date_range: str = "all_time",
 ) -> str:
     continuity = "\n".join(f"- {item}" for item in continuity_notes[-8:]) or "- No prior continuity notes."
     key_questions = "\n".join(f"- {item}" for item in section.get("key_questions", [])) or "- None provided."
     return f"""
-You are writing Section {section_index} of {section_count} in a long-form research document.
+You are writing Section {section_index} of {section_count} in a deep research report.
 
 Global objective:
 {global_objective}
@@ -1058,10 +1786,19 @@ Write a section draft of about {words_target} words.
 Requirements:
 - Keep conceptual continuity with prior sections.
 - Keep factual claims tied to evidence gathered in the research notes below.
+- Use the editorial correlation briefing to avoid overlap and to cross-reference related sections.
 - Include a short "Section Takeaways" list at the end.
 - Use source tags like "[S1]" inline for factual claims that come from the source ledger.
 - Do not cite source ids that are not present in the source ledger.
 - Do not add a references section; references will be consolidated and renumbered at the end of the document.
+- Maintain a formal research tone and write for a deep-research report.
+- Cite every factual paragraph.
+- Use cross-reference phrasing like "As discussed in Section X..." where genuinely helpful.
+- Citation style target for bibliography: {citation_style.upper()}.
+- Date range emphasis: {date_range}.
+
+Correlation briefing:
+{correlation_briefing}
 
 Research notes:
 {research_text}
@@ -1212,18 +1949,24 @@ def _markdown_to_html(markdown_text: str) -> str:
 
     style = (
         "<style>"
-        "body{font-family:Georgia,'Times New Roman',serif;line-height:1.55;margin:40px;color:#111;}"
-        "h1{font-size:28px;border-bottom:1px solid #ddd;padding-bottom:6px;}"
-        "h2{font-size:22px;margin-top:28px;}"
-        "h3{font-size:18px;margin-top:22px;}"
-        "table{border-collapse:collapse;width:100%;margin:12px 0;}"
-        "th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;}"
-        "pre{background:#f6f6f6;padding:10px;border-radius:4px;overflow:auto;}"
+        ":root{color-scheme:light dark;--bg:#ffffff;--text:#111827;--muted:#475569;--line:#dbe4ee;--panel:#f8fafc;}"
+        "@media (prefers-color-scheme:dark){:root{--bg:#0f172a;--text:#e2e8f0;--muted:#94a3b8;--line:#334155;--panel:#111827;}}"
+        "body{font-family:Georgia,'Times New Roman',serif;line-height:1.6;margin:40px auto;max-width:920px;padding:0 18px;background:var(--bg);color:var(--text);}"
+        "h1{font-size:30px;border-bottom:1px solid var(--line);padding-bottom:8px;}"
+        "h2{font-size:22px;margin-top:32px;}"
+        "h3{font-size:17px;margin-top:22px;}"
+        "p{margin:10px 0;}"
+        "table{border-collapse:collapse;width:100%;margin:14px 0;background:var(--panel);}"
+        "th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top;}"
+        "th{background:#0f172a;color:#f8fafc;}"
+        "tr:nth-child(even) td{background:rgba(148,163,184,0.08);}"
+        "pre{background:var(--panel);padding:12px;border-radius:6px;overflow:auto;border:1px solid var(--line);}"
         "code{font-family:'Courier New',monospace;font-size:0.95em;}"
+        "ul,ol{padding-left:22px;}"
         "</style>"
     )
     return (
-        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Long Document</title>"
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Deep Research Report</title>"
         f"{style}</head><body>\n"
         + "\n".join(html_lines)
         + "\n</body></html>"
@@ -1274,7 +2017,7 @@ def _ensure_python_package(package: str, import_name: str | None = None) -> bool
     except Exception:
         pass
 
-    log_task_update("Long Document", f"Attempting to install missing dependency: {package}.")
+    log_task_update(DEEP_RESEARCH_LABEL, f"Attempting to install missing dependency: {package}.")
     try:
         subprocess.run(
             [
@@ -1291,14 +2034,14 @@ def _ensure_python_package(package: str, import_name: str | None = None) -> bool
             text=True,
         )
     except Exception as exc:
-        log_task_update("Long Document", f"Dependency install failed for {package}: {exc}")
+        log_task_update(DEEP_RESEARCH_LABEL, f"Dependency install failed for {package}: {exc}")
         return False
 
     try:
         __import__(module_name)
         return True
     except Exception as exc:
-        log_task_update("Long Document", f"Dependency import failed for {package} after install: {exc}")
+        log_task_update(DEEP_RESEARCH_LABEL, f"Dependency import failed for {package} after install: {exc}")
         return False
 
 
@@ -1389,42 +2132,57 @@ def _render_pdf_bytes(text: str) -> bytes:
     return bytes(buffer)
 
 
-def _export_long_document_formats(compiled_markdown: str, compiled_filename: str) -> dict[str, str]:
+def _export_long_document_formats(
+    compiled_markdown: str,
+    compiled_filename: str,
+    *,
+    requested_formats: list[str] | None = None,
+) -> dict[str, str]:
     compiled_path = Path(resolve_output_path(compiled_filename))
     base_path = compiled_path.with_suffix("")
     html_path = base_path.with_suffix(".html")
     docx_path = base_path.with_suffix(".docx")
     pdf_path = base_path.with_suffix(".pdf")
+    formats = set(_normalize_research_formats(requested_formats or DEFAULT_RESEARCH_FORMATS))
 
     html_text = _markdown_to_html(compiled_markdown)
-    html_path.write_text(html_text, encoding="utf-8")
+    if "html" in formats or "pdf" in formats:
+        html_path.write_text(html_text, encoding="utf-8")
+    else:
+        html_path = Path("")
 
-    try:
-        _markdown_to_docx(compiled_markdown, str(docx_path))
-    except Exception as exc:
-        log_task_update("Long Document", f"DOCX export skipped: {exc}")
+    if "docx" in formats:
+        try:
+            _markdown_to_docx(compiled_markdown, str(docx_path))
+        except Exception as exc:
+            log_task_update(DEEP_RESEARCH_LABEL, f"DOCX export skipped: {exc}")
+            docx_path = Path("")
+    else:
         docx_path = Path("")
 
     pdf_written = False
-    try:
-        if _ensure_python_package("weasyprint"):
-            from weasyprint import HTML  # type: ignore
+    if "pdf" in formats:
+        try:
+            if _ensure_python_package("weasyprint"):
+                from weasyprint import HTML  # type: ignore
 
-            HTML(string=html_text).write_pdf(str(pdf_path))
-            pdf_written = True
-        else:
-            raise RuntimeError("weasyprint not available")
-    except Exception as exc:
-        log_task_update("Long Document", f"HTML-to-PDF export unavailable, falling back to text PDF: {exc}")
+                HTML(string=html_text).write_pdf(str(pdf_path))
+                pdf_written = True
+            else:
+                raise RuntimeError("weasyprint not available")
+        except Exception as exc:
+            log_task_update(DEEP_RESEARCH_LABEL, f"HTML-to-PDF export unavailable, falling back to text PDF: {exc}")
 
-    if not pdf_written:
-        plain_text = _markdown_to_plain_text(compiled_markdown)
-        pdf_path.write_bytes(_render_pdf_bytes(plain_text))
+        if not pdf_written:
+            plain_text = _markdown_to_plain_text(compiled_markdown)
+            pdf_path.write_bytes(_render_pdf_bytes(plain_text))
+    else:
+        pdf_path = Path("")
 
     return {
-        "html": str(html_path),
+        "html": str(html_path) if str(html_path) else "",
         "docx": str(docx_path) if str(docx_path) else "",
-        "pdf": str(pdf_path),
+        "pdf": str(pdf_path) if str(pdf_path) else "",
     }
 
 
@@ -1434,23 +2192,67 @@ def _build_compiled_markdown(
     section_outputs: list[dict],
     executive_summary: str,
     consolidated_references: list[dict],
+    *,
+    citation_style: str,
+    methodology_text: str,
+    plagiarism_report: dict,
+    source_entries: list[dict],
+    research_log_lines: list[str],
+    generated_at: str,
+    model_name: str,
+    deep_research_tier: int,
 ) -> str:
-    lines = [f"# {title}", "", "## Executive Summary", executive_summary.strip(), "", "## Table of Contents"]
+    escaped_title = title.replace('"', '\\"')
+    lines = [
+        "---",
+        f'title: "{escaped_title}"',
+        f"generated_at: {generated_at}",
+        f"citation_style: {citation_style}",
+        f"deep_research_tier: {deep_research_tier}",
+        f"model: {model_name}",
+        "---",
+        "",
+        f"# {title}",
+        "",
+        f"_Generated by Kendr Deep Research on {generated_at} using {model_name}_",
+        "",
+        "## Executive Summary",
+        executive_summary.strip(),
+        "",
+        "## Table of Contents",
+    ]
     for item in section_outputs:
         lines.append(f"- {item['index']}. {item['title']}")
     lines.append("")
+    lines.extend(
+        [
+            "## Methodology",
+            methodology_text.strip(),
+            "",
+        ]
+    )
     for item in section_outputs:
         lines.append(f"## {item['index']}. {item['title']}")
         lines.append("")
         lines.append(item["section_text"].strip())
         lines.append("")
-    lines.append("## Consolidated References")
-    lines.append("")
-    if consolidated_references:
-        for item in consolidated_references:
-            lines.append(f"- [{item['id']}] {item['label']} - {item['url']}")
+    bibliography_md = _bibliography_markdown(consolidated_references, style=citation_style).strip()
+    lines.extend([bibliography_md, ""])
+    lines.extend(["## Appendix A - Source List", ""])
+    if source_entries:
+        for item in source_entries:
+            lines.append(f"- [{item.get('id', '')}] {item.get('label', '')} - {item.get('url', '')}")
     else:
-        lines.append("- No consolidated references were extracted.")
+        lines.append("- No source list was available.")
+    lines.append("")
+    lines.append(_plagiarism_report_markdown(plagiarism_report).strip())
+    lines.append("")
+    lines.extend(["## Appendix C - Research Log", ""])
+    if research_log_lines:
+        for line in research_log_lines:
+            lines.append(f"- {line}")
+    else:
+        lines.append("- No research log lines were captured.")
     lines.append("")
     return "\n".join(lines).strip() + "\n"
 
@@ -1478,7 +2280,7 @@ def long_document_agent(state):
     section_pages = _safe_int(state.get("long_document_section_pages"), 5, 2, 20)
     section_count_default = max(3, math.ceil(target_pages / max(1, section_pages)))
     section_count = _safe_int(state.get("long_document_sections"), section_count_default, 1, 40)
-    title = _normalize_title(state.get("long_document_title", ""), f"Long-Form Research Report ({target_pages} pages)")
+    title = _normalize_title(state.get("long_document_title", ""), f"Deep Research Report ({target_pages} pages)")
 
     research_model = str(state.get("research_model", DEFAULT_DEEP_RESEARCH_MODEL)).strip() or DEFAULT_DEEP_RESEARCH_MODEL
     max_tool_calls = _safe_int(state.get("research_max_tool_calls"), 8, 1, 64)
@@ -1491,8 +2293,18 @@ def long_document_agent(state):
     disable_visuals = bool(state.get("long_document_disable_visuals", False))
     include_section_references = bool(state.get("long_document_section_references", False))
     section_search_flag = state.get("long_document_section_search")
-    use_section_search = True if section_search_flag is None else bool(section_search_flag)
+    web_search_enabled = bool(state.get("research_web_search_enabled", True))
+    use_section_search = web_search_enabled if section_search_flag is None else bool(section_search_flag) and web_search_enabled
     section_search_results_count = _safe_int(state.get("long_document_section_search_results"), 6, 1, 20)
+    deep_research_mode = bool(state.get("deep_research_mode", False))
+    citation_style = _normalize_citation_style(state.get("research_citation_style", "apa"))
+    output_formats = _normalize_research_formats(state.get("research_output_formats", DEFAULT_RESEARCH_FORMATS))
+    plagiarism_enabled = bool(state.get("research_enable_plagiarism_check", True))
+    date_range = str(state.get("research_date_range", "all_time") or "all_time").strip() or "all_time"
+    requested_sources = [str(item).strip().lower() for item in state.get("research_sources", []) if str(item).strip()] if isinstance(state.get("research_sources", []), list) else []
+    source_family_display = requested_sources or (["web"] if web_search_enabled else ["local"])
+    max_sources = _safe_int(state.get("research_max_sources"), 0, 0, 400)
+    checkpoint_enabled = bool(state.get("research_checkpoint_enabled", False))
 
     research_instructions = str(
         state.get(
@@ -1505,18 +2317,29 @@ def long_document_agent(state):
     ).strip()
 
     log_task_update(
-        "Long Document",
+        DEEP_RESEARCH_LABEL,
         (
-            f"Long-document pass #{call_number} started. target_pages={target_pages}, "
-            f"sections={section_count}, section_pages~{section_pages}, model={research_model}"
+            f"Deep research pass #{call_number} started. target_pages={target_pages}, "
+            f"sections={section_count}, section_pages~{section_pages}, model={research_model}, "
+            f"formats={','.join(output_formats)}, citation_style={citation_style}"
         ),
         objective,
     )
 
-    client = OpenAI(api_key=api_key)
-    collect_sources_first = bool(state.get("long_document_collect_sources_first", True))
+    state["deep_research_mode"] = deep_research_mode
+    state["long_document_mode"] = True
+    state["research_output_formats"] = output_formats
+    state["research_citation_style"] = citation_style
+    state["research_enable_plagiarism_check"] = plagiarism_enabled
+    state["research_web_search_enabled"] = web_search_enabled
+    state["research_date_range"] = date_range
+    state["research_checkpoint_enabled"] = checkpoint_enabled
+    if max_sources > 0:
+        state["research_max_sources"] = max_sources
+    state["deep_research_source_urls"] = _normalize_research_urls(state.get("deep_research_source_urls", []))
 
-    artifact_dir = f"long_document_runs/long_document_run_{call_number}"
+    collect_sources_first = bool(state.get("long_document_collect_sources_first", True))
+    artifact_dir = f"deep_research_runs/deep_research_run_{call_number}"
 
     if bool(state.get("long_document_addendum_requested", False)):
         return _run_long_document_addendum(
@@ -1526,86 +2349,74 @@ def long_document_agent(state):
             artifact_dir=artifact_dir,
         )
 
-    evidence_bank_md = ""
-    evidence_sources: list[dict] = []
-    evidence_excerpt = ""
-    if collect_sources_first:
-        if not state.get("long_document_sources_collected", False):
-            log_task_update("Long Document", "Collecting evidence bank before section planning.")
-            local_entries = _collect_local_drive_evidence(state)
-            insufficiency_note = ""
-            if state.get("local_drive_insufficient"):
-                insufficiency_note = (
-                    f"Only {state.get('local_drive_selected_file_count', 0)} local files were found. "
-                    "Proceeding with web research to fill gaps."
-                )
-            search_results = _collect_google_search_evidence(objective, num=int(state.get("long_document_search_results", 10) or 10))
-            if isinstance(search_results, dict) and str(search_results.get("error", "")).strip():
-                log_task_update("Long Document", f"Web search evidence collection error: {search_results.get('error')}")
-            evidence_instructions = str(
-                state.get(
-                    "long_document_evidence_instructions",
-                    (
-                        "Collect a comprehensive evidence bank with source-backed facts and benchmarks. "
-                        "Prefer primary sources, provide concrete numbers, and include URLs for every major claim. "
-                        "Focus on company facts, market size/growth, competitors, funding benchmarks, "
-                        "and relevant investor profile signals."
-                    ),
-                )
-            ).strip()
-            evidence_query_lines = [
-                f"Objective: {objective}",
-                "Local drive rollup summary:",
-                _trim_text(state.get('local_drive_rollup_summary', ''), 2000),
-                "Local drive file list:",
-                *[f"- {Path(entry.get('path') or entry.get('file_name') or '').name}" for entry in local_entries[:12]],
-                "Task: Build a source-backed evidence bank with URLs and cite them explicitly.",
-            ]
-            evidence_pass = _run_research_pass(
-                client,
-                query="\n".join([line for line in evidence_query_lines if line.strip()]),
-                model=research_model,
-                instructions=evidence_instructions,
-                max_tool_calls=max_tool_calls,
-                max_output_tokens=max_output_tokens_int,
-                poll_interval_seconds=poll_interval_seconds,
-                max_wait_seconds=max_wait_seconds,
-                heartbeat_interval_seconds=heartbeat_seconds,
-                heartbeat_label="Evidence bank research in progress",
-            )
-            web_research_text = str(evidence_pass.get("output_text", "")).strip()
-            evidence_sources = _extract_source_entries(evidence_pass, max_sources=60)
-            evidence_bank_md = _format_evidence_bank_markdown(
-                objective=objective,
-                local_entries=local_entries,
-                search_results=search_results,
-                web_research_text=web_research_text,
-                web_sources=evidence_sources,
-                insufficiency_note=insufficiency_note,
-            )
-            evidence_payload = {
-                "objective": objective,
-                "local_drive_entries": local_entries,
-                "search_results": search_results.get("results", []) if isinstance(search_results, dict) else [],
-                "search_error": search_results.get("error") if isinstance(search_results, dict) else "",
-                "web_research": evidence_pass,
-                "web_sources": evidence_sources,
-                "insufficiency_note": insufficiency_note,
-            }
-            evidence_md_filename = _artifact_file(artifact_dir, "evidence_bank.md")
-            evidence_json_filename = _artifact_file(artifact_dir, "evidence_bank.json")
-            write_text_file(evidence_md_filename, evidence_bank_md)
-            write_text_file(evidence_json_filename, json.dumps(evidence_payload, indent=2, ensure_ascii=False))
-            state["long_document_sources_collected"] = True
-            state["long_document_evidence_bank_path"] = f"{OUTPUT_DIR}/{evidence_md_filename}"
-            state["long_document_evidence_bank_json_path"] = f"{OUTPUT_DIR}/{evidence_json_filename}"
-            evidence_excerpt = _trim_text(evidence_bank_md, 18000)
-            state["long_document_evidence_bank_excerpt"] = evidence_excerpt
-            state["long_document_evidence_sources"] = evidence_sources
-        else:
-            evidence_bank_md = _read_text_file(state.get("long_document_evidence_bank_path", ""), "")
-            evidence_excerpt = state.get("long_document_evidence_bank_excerpt", "") or _trim_text(evidence_bank_md, 18000)
-            evidence_sources = state.get("long_document_evidence_sources", []) or []
+    analysis = state.get("deep_research_analysis", {})
+    if not isinstance(analysis, dict) or not analysis:
+        analysis = _research_depth_analysis(
+            objective,
+            target_pages=target_pages,
+            requested_sources=requested_sources,
+            date_range=date_range,
+        )
+        state["deep_research_analysis"] = analysis
+        state["deep_research_tier"] = int(analysis.get("tier", 0) or 0)
+
+    if (
+        deep_research_mode
+        and bool(analysis.get("requires_deep_research", False))
+        and not bool(state.get("deep_research_confirmed", False))
+        and not bool(state.get("auto_approve", False))
+    ):
+        analysis_md = _deep_research_analysis_markdown(
+            analysis,
+            formats=output_formats,
+            citation_style=citation_style,
+            plagiarism_enabled=plagiarism_enabled,
+            web_search_enabled=web_search_enabled,
+            local_source_count=len(_collect_local_drive_evidence(state)),
+            provided_url_count=len(_normalize_research_urls(state.get("deep_research_source_urls", []))) if web_search_enabled else 0,
+        )
+        version = int(state.get("deep_research_confirmation_version", 0) or 0) + 1
+        prompt = _build_deep_research_confirmation_prompt(analysis_md, version=version)
+        state["deep_research_confirmation_version"] = version
+        state["pending_user_input_kind"] = "deep_research_confirmation"
+        state["approval_pending_scope"] = "deep_research_confirmation"
+        state["pending_user_question"] = prompt
+        state["draft_response"] = prompt
+        state["deep_research_result_card"] = {
+            "kind": "analysis",
+            "title": title,
+            "tier": analysis.get("tier", 0),
+            "estimated_pages": analysis.get("estimated_pages", target_pages),
+            "estimated_sources": analysis.get("estimated_sources", 0),
+            "estimated_duration_minutes": analysis.get("estimated_duration_minutes", 0),
+            "subtopics": analysis.get("subtopics", []),
+            "formats": output_formats,
+            "citation_style": citation_style,
+            "plagiarism_enabled": plagiarism_enabled,
+            "web_search_enabled": web_search_enabled,
+            "local_sources": len(_collect_local_drive_evidence(state)),
+            "provided_urls": len(_normalize_research_urls(state.get("deep_research_source_urls", []))) if web_search_enabled else 0,
+            "date_range": date_range,
+        }
+        update_planning_file(
+            state,
+            status="awaiting_deep_research_confirmation",
+            objective=objective,
+            plan_text=state.get("plan", ""),
+            clarifications=state.get("plan_clarification_questions", []),
+            execution_note="Deep research analysis completed; awaiting confirmation before expensive research starts.",
+        )
+        log_task_update(DEEP_RESEARCH_LABEL, "Prepared the deep research analysis card for approval.", analysis_md)
+        return publish_agent_output(
+            state,
+            "long_document_agent",
+            analysis_md,
+            f"deep_research_analysis_{version}",
+            recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
+        )
+
+    if deep_research_mode:
+        state["deep_research_confirmed"] = True
 
     approved_outline = state.get("long_document_outline", {})
     if not isinstance(approved_outline, dict):
@@ -1618,36 +2429,33 @@ def long_document_agent(state):
 
     if needs_outline_approval:
         outline_objective = objective
-        if evidence_excerpt:
-            outline_objective = (
-                f"{objective}\n\nEvidence bank highlights (pre-collected sources):\n"
-                f"{_trim_text(evidence_excerpt, 4000)}"
-            )
         feedback = str(state.get("long_document_plan_feedback", "") or "").strip()
         if feedback:
             outline_objective = (
                 f"{objective}\n\nUser requested these section-plan changes:\n{feedback}"
             )
-            if evidence_excerpt:
-                outline_objective = (
-                    f"{outline_objective}\n\nEvidence bank highlights:\n{_trim_text(evidence_excerpt, 4000)}"
-                )
-        outline = _build_outline(outline_objective, title=title, section_count=section_count, section_pages=section_pages)
+        outline = _build_outline(
+            outline_objective,
+            title=title,
+            section_count=section_count,
+            section_pages=section_pages,
+            subtopics=analysis.get("subtopics", []),
+        )
         outline_md = _outline_markdown(outline, fallback_title=title)
         subplan_data = _long_document_subplan(outline, objective=objective, target_pages=target_pages, research_model=research_model)
         subplan_md = outline_md.rstrip() + "\n\n" + plan_as_markdown(subplan_data)
         subplan_version = int(state.get("long_document_plan_version", 0) or 0) + 1
 
-        write_text_file(_artifact_file(artifact_dir, "long_document_outline.json"), json.dumps(outline, indent=2, ensure_ascii=False))
-        write_text_file(_artifact_file(artifact_dir, "long_document_outline.md"), outline_md)
-        write_text_file(_artifact_file(artifact_dir, "long_document_subplan.json"), json.dumps(subplan_data, indent=2, ensure_ascii=False))
-        write_text_file(_artifact_file(artifact_dir, "long_document_subplan.md"), subplan_md + "\n")
+        write_text_file(_artifact_file(artifact_dir, "deep_research_outline.json"), json.dumps(outline, indent=2, ensure_ascii=False))
+        write_text_file(_artifact_file(artifact_dir, "deep_research_outline.md"), outline_md)
+        write_text_file(_artifact_file(artifact_dir, "deep_research_subplan.json"), json.dumps(subplan_data, indent=2, ensure_ascii=False))
+        write_text_file(_artifact_file(artifact_dir, "deep_research_subplan.md"), subplan_md + "\n")
 
-        outline_storage_path = resolve_output_path(_artifact_file(artifact_dir, "long_document_outline.md"))
-        subplan_storage_path = resolve_output_path(_artifact_file(artifact_dir, "long_document_subplan.md"))
+        outline_storage_path = resolve_output_path(_artifact_file(artifact_dir, "deep_research_outline.md"))
+        subplan_storage_path = resolve_output_path(_artifact_file(artifact_dir, "deep_research_subplan.md"))
         approval_prompt = build_plan_approval_prompt(
             subplan_md,
-            scope_title=f"long-document section plan v{subplan_version}",
+            scope_title=f"deep research section plan v{subplan_version}",
             storage_note=f"Stored in {outline_storage_path} and {subplan_storage_path}.",
         )
 
@@ -1664,6 +2472,15 @@ def long_document_agent(state):
         state["_skip_review_once"] = True
         state["_hold_planned_step_completion_once"] = True
         state["long_document_replan_requested"] = False
+        state["deep_research_result_card"] = {
+            "kind": "plan",
+            "title": title,
+            "tier": analysis.get("tier", 0),
+            "subtopics": analysis.get("subtopics", []),
+            "section_count": len(outline.get("sections", [])),
+            "formats": output_formats,
+            "web_search_enabled": web_search_enabled,
+        }
 
         update_planning_file(
             state,
@@ -1671,47 +2488,160 @@ def long_document_agent(state):
             objective=objective,
             plan_text=state.get("plan", ""),
             clarifications=state.get("plan_clarification_questions", []),
-            execution_note=f"Long-document subplan v{subplan_version} generated and queued for approval.",
+            execution_note=f"Deep research subplan v{subplan_version} generated and queued for approval.",
         )
-        log_task_update("Long Document", "Prepared a section-by-section subplan for approval.", subplan_md)
+        log_task_update(DEEP_RESEARCH_LABEL, "Prepared a section-by-section deep research plan for approval.", subplan_md)
         return publish_agent_output(
             state,
             "long_document_agent",
             subplan_md,
-            f"long_document_subplan_{subplan_version}",
+            f"deep_research_subplan_{subplan_version}",
             recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
         )
 
+    client = OpenAI(api_key=api_key)
+    evidence_bank_md = ""
+    evidence_sources: list[dict] = []
+    evidence_excerpt = ""
+    local_entries: list[dict] = _collect_local_drive_evidence(state)
+    url_entries: list[dict] = _collect_user_url_evidence(objective, state) if web_search_enabled else []
+    explicit_source_entries = _merge_sources(
+        _sources_from_local_entries(local_entries),
+        _sources_from_url_entries(url_entries),
+        max_sources=max_sources or 120,
+    )
+    if collect_sources_first:
+        if not state.get("long_document_sources_collected", False):
+            log_task_update(DEEP_RESEARCH_LABEL, "Collecting the cross-report evidence bank.")
+            if web_search_enabled:
+                search_results = _collect_google_search_evidence(objective, num=int(state.get("long_document_search_results", 10) or 10))
+                evidence_instructions = str(
+                    state.get(
+                        "long_document_evidence_instructions",
+                        (
+                            "Collect a comprehensive evidence bank with source-backed facts, contradictions, and benchmarks. "
+                            "Prefer primary sources, provide concrete numbers, and include URLs for every major claim."
+                        ),
+                    )
+                ).strip()
+                evidence_query_lines = [
+                    f"Objective: {objective}",
+                    f"Date range preference: {date_range}",
+                    f"Requested source families: {source_family_display}",
+                    "Local drive rollup summary:",
+                    _trim_text(state.get("local_drive_rollup_summary", ""), 2000),
+                    "Task: Build a source-backed evidence bank with URLs, disagreements, numbers, and explicit citations.",
+                ]
+                evidence_pass = _run_research_pass(
+                    client,
+                    query="\n".join(line for line in evidence_query_lines if str(line).strip()),
+                    model=research_model,
+                    instructions=evidence_instructions,
+                    max_tool_calls=max_tool_calls,
+                    max_output_tokens=max_output_tokens_int,
+                    poll_interval_seconds=poll_interval_seconds,
+                    max_wait_seconds=max_wait_seconds,
+                    heartbeat_interval_seconds=heartbeat_seconds,
+                    heartbeat_label="Evidence bank research in progress",
+                )
+                evidence_sources = _merge_sources(
+                    explicit_source_entries,
+                    _extract_source_entries(evidence_pass, max_sources=max_sources or 60),
+                    max_sources=max_sources or 120,
+                )
+                evidence_notes_text = str(evidence_pass.get("output_text", "")).strip()
+            else:
+                search_results = {"results": [], "error": "Web search disabled by user."}
+                evidence_pass = {
+                    "response_id": "local_only",
+                    "status": "local_only",
+                    "elapsed_seconds": 0,
+                    "output_text": "",
+                    "raw": {"reason": "web_search_disabled"},
+                }
+                evidence_sources = list(explicit_source_entries)
+                evidence_notes_text = _build_local_only_research_notes(
+                    objective=objective,
+                    focus="overall report evidence bank",
+                    local_entries=local_entries,
+                    url_entries=url_entries,
+                )
+            evidence_bank_md = _format_evidence_bank_markdown(
+                objective=objective,
+                local_entries=local_entries,
+                url_entries=url_entries,
+                search_results=search_results,
+                research_notes_text=evidence_notes_text,
+                source_ledger=evidence_sources,
+                insufficiency_note="" if web_search_enabled else "Web search was disabled. Only local files were used to build this report.",
+            )
+            evidence_payload = {
+                "objective": objective,
+                "local_drive_entries": local_entries,
+                "provided_url_entries": url_entries,
+                "search_results": search_results.get("results", []) if isinstance(search_results, dict) else [],
+                "web_research": evidence_pass,
+                "source_ledger": evidence_sources,
+                "analysis": analysis,
+            }
+            evidence_md_filename = _artifact_file(artifact_dir, "evidence_bank.md")
+            evidence_json_filename = _artifact_file(artifact_dir, "evidence_bank.json")
+            write_text_file(evidence_md_filename, evidence_bank_md)
+            write_text_file(evidence_json_filename, json.dumps(evidence_payload, indent=2, ensure_ascii=False))
+            if url_entries:
+                write_text_file(_artifact_file(artifact_dir, "provided_url_sources.json"), json.dumps(url_entries, indent=2, ensure_ascii=False))
+            state["long_document_sources_collected"] = True
+            state["long_document_evidence_bank_path"] = f"{OUTPUT_DIR}/{evidence_md_filename}"
+            state["long_document_evidence_bank_json_path"] = f"{OUTPUT_DIR}/{evidence_json_filename}"
+            evidence_excerpt = _trim_text(evidence_bank_md, 18000)
+            state["long_document_evidence_bank_excerpt"] = evidence_excerpt
+            state["long_document_evidence_sources"] = evidence_sources
+        else:
+            evidence_bank_md = _read_text_file(state.get("long_document_evidence_bank_path", ""), "")
+            evidence_excerpt = state.get("long_document_evidence_bank_excerpt", "") or _trim_text(evidence_bank_md, 18000)
+            evidence_sources = state.get("long_document_evidence_sources", []) or []
+
     outline = approved_outline
     outline_md = _outline_markdown(outline, fallback_title=title)
-    write_text_file(_artifact_file(artifact_dir, "long_document_outline.json"), json.dumps(outline, indent=2, ensure_ascii=False))
-    write_text_file(_artifact_file(artifact_dir, "long_document_outline.md"), outline_md)
+    write_text_file(_artifact_file(artifact_dir, "deep_research_outline.json"), json.dumps(outline, indent=2, ensure_ascii=False))
+    write_text_file(_artifact_file(artifact_dir, "deep_research_outline.md"), outline_md)
     update_planning_file(
         state,
         status="executing",
         objective=objective,
         plan_text=state.get("plan", ""),
         clarifications=state.get("plan_clarification_questions", []),
-        execution_note="Long-document subplan approved. Executing sections one by one.",
+        execution_note="Deep research plan approved. Executing research, correlation, writing, and verification phases.",
     )
+
+    research_log_lines = [
+        f"Tier {analysis.get('tier', 0)} analysis confirmed.",
+        f"Target pages: {target_pages}",
+        f"Output formats: {', '.join(output_formats)}",
+        f"Citation style: {citation_style.upper()}",
+        f"Plagiarism check: {'enabled' if plagiarism_enabled else 'disabled'}",
+        f"Date range: {date_range}",
+    ]
 
     continuity_notes: list[str] = []
     section_outputs: list[dict] = []
+    section_packages: list[dict] = []
     coherence_context_md = _coherence_base_context(state, objective)
-    write_text_file(_artifact_file(artifact_dir, "long_document_coherence_base.md"), coherence_context_md)
+    write_text_file(_artifact_file(artifact_dir, "deep_research_coherence_base.md"), coherence_context_md)
 
-    for index, section in enumerate(outline.get("sections", []), start=1):
+    sections = outline.get("sections", []) if isinstance(outline.get("sections", []), list) else []
+    total_sections = len(sections)
+    for index, section in enumerate(sections, start=1):
         section_title = str(section.get("title", f"Section {index}")).strip() or f"Section {index}"
         section_objective = str(section.get("objective", objective)).strip() or objective
         section_questions = section.get("key_questions", [])
         if not isinstance(section_questions, list):
             section_questions = []
         target_section_pages = _safe_int(section.get("target_pages"), section_pages, 1, 30)
-        words_target = max(500, target_section_pages * words_per_page)
 
         log_task_update(
-            "Long Document",
-            f"Researching section {index}/{len(outline.get('sections', []))}: {section_title}",
+            DEEP_RESEARCH_LABEL,
+            f"Phase 1/4 - researching section {index}/{total_sections}: {section_title}",
         )
 
         section_search_results: dict[str, Any] = {}
@@ -1722,58 +2652,82 @@ def long_document_agent(state):
             section_search_results = _collect_google_search_evidence(search_query, num=section_search_results_count)
             if isinstance(section_search_results, dict) and str(section_search_results.get("error", "")).strip():
                 log_task_update(
-                    "Long Document",
+                    DEEP_RESEARCH_LABEL,
                     f"Section {index} web search error: {section_search_results.get('error')}",
                 )
             section_search_sources = _sources_from_search_results(section_search_results.get("results", []))
             section_search_text = _search_results_markdown(section_search_results.get("results", []))
 
         if collect_sources_first and evidence_excerpt:
+            local_section_notes = _build_local_only_research_notes(
+                objective=objective,
+                focus=f"section {index}: {section_title} — {section_objective}",
+                local_entries=local_entries,
+                url_entries=url_entries,
+                continuity_notes=continuity_notes,
+            ) if explicit_source_entries else ""
             research_pass = {
-                "response_id": "evidence_bank",
-                "status": "evidence_bank",
+                "response_id": "evidence_bank" if web_search_enabled else f"local_only_section_{index}",
+                "status": "evidence_bank" if web_search_enabled else "local_only",
                 "elapsed_seconds": 0,
-                "output_text": evidence_excerpt,
+                "output_text": local_section_notes or evidence_excerpt,
                 "raw": {"evidence_bank_path": state.get("long_document_evidence_bank_path", "")},
             }
-            research_output = evidence_excerpt
+            research_output = local_section_notes or evidence_excerpt
             if section_search_text:
                 research_output = f"{section_search_text}\n\n{research_output}"
             section_sources = list(evidence_sources)
             section_sources = _merge_sources(section_sources, section_search_sources)
             source_ledger_md = _source_ledger_markdown(section_sources)
         else:
-            query_lines = [
-                f"Global objective: {objective}",
-                f"Section {index} title: {section_title}",
-                f"Section objective: {section_objective}",
-                "Key questions:",
-                *[f"- {item}" for item in section_questions[:12]],
-                "Continuity notes from previous sections:",
-                *[f"- {item}" for item in continuity_notes[-10:]],
-                "Markdown coherence anchors:",
-                _trim_text(coherence_context_md, 4000),
-            ]
-            research_pass = _run_research_pass(
-                client,
-                query="\n".join(query_lines),
-                model=research_model,
-                instructions=research_instructions,
-                max_tool_calls=max_tool_calls,
-                max_output_tokens=max_output_tokens_int,
-                poll_interval_seconds=poll_interval_seconds,
-                max_wait_seconds=max_wait_seconds,
-                heartbeat_interval_seconds=heartbeat_seconds,
-                heartbeat_label=f"Section {index} research in progress",
-            )
-
-            if str(research_pass.get("status", "")).strip() not in {"completed", ""}:
-                log_task_update(
-                    "Long Document",
-                    f"Section {index} research status: {research_pass.get('status')}",
+            local_section_notes = _build_local_only_research_notes(
+                objective=objective,
+                focus=f"section {index}: {section_title} — {section_objective}",
+                local_entries=local_entries,
+                url_entries=url_entries,
+                continuity_notes=continuity_notes,
+            ) if explicit_source_entries else ""
+            if web_search_enabled:
+                query_lines = [
+                    f"Global objective: {objective}",
+                    f"Section {index} title: {section_title}",
+                    f"Section objective: {section_objective}",
+                    "Key questions:",
+                    *[f"- {item}" for item in section_questions[:12]],
+                    "Continuity notes from previous sections:",
+                    *[f"- {item}" for item in continuity_notes[-10:]],
+                    "Markdown coherence anchors:",
+                    _trim_text(coherence_context_md, 4000),
+                ]
+                research_pass = _run_research_pass(
+                    client,
+                    query="\n".join(query_lines),
+                    model=research_model,
+                    instructions=research_instructions,
+                    max_tool_calls=max_tool_calls,
+                    max_output_tokens=max_output_tokens_int,
+                    poll_interval_seconds=poll_interval_seconds,
+                    max_wait_seconds=max_wait_seconds,
+                    heartbeat_interval_seconds=heartbeat_seconds,
+                    heartbeat_label=f"Section {index} research in progress",
                 )
 
-            research_output = str(research_pass.get("output_text", "")).strip()
+                if str(research_pass.get("status", "")).strip() not in {"completed", ""}:
+                    log_task_update(
+                        DEEP_RESEARCH_LABEL,
+                        f"Section {index} research status: {research_pass.get('status')}",
+                    )
+
+                research_output = str(research_pass.get("output_text", "")).strip()
+            else:
+                research_pass = {
+                    "response_id": f"local_only_section_{index}",
+                    "status": "local_only",
+                    "elapsed_seconds": 0,
+                    "output_text": local_section_notes,
+                    "raw": {"reason": "web_search_disabled"},
+                }
+                research_output = local_section_notes
             if section_search_text:
                 research_output = f"{section_search_text}\n\n{research_output}".strip()
             if not research_output:
@@ -1782,9 +2736,11 @@ def long_document_agent(state):
                 else:
                     research_output = "Research output was empty. Use only explicitly supported claims and call out uncertainty."
 
-            section_sources = _extract_source_entries(research_pass)
+            section_sources = _merge_sources(explicit_source_entries, _extract_source_entries(research_pass))
             section_sources = _merge_sources(section_sources, section_search_sources)
             source_ledger_md = _source_ledger_markdown(section_sources)
+        if max_sources > 0:
+            section_sources = section_sources[:max_sources]
 
         write_text_file(
             _artifact_file(artifact_dir, f"section_{index:02d}/research.json"),
@@ -1792,65 +2748,91 @@ def long_document_agent(state):
         )
         write_text_file(_artifact_file(artifact_dir, f"section_{index:02d}/sources.json"), json.dumps(section_sources, indent=2, ensure_ascii=False))
         write_text_file(_artifact_file(artifact_dir, f"section_{index:02d}/sources.md"), _references_markdown(section_sources))
+        section_packages.append(
+            {
+                "index": index,
+                "title": section_title,
+                "objective": section_objective,
+                "key_questions": section_questions,
+                "target_pages": target_section_pages,
+                "research_pass": research_pass,
+                "research_text": research_output,
+                "sources": section_sources,
+                "source_ledger_md": source_ledger_md,
+            }
+        )
+        research_log_lines.append(f"Researched section {index}: {section_title} ({len(section_sources)} sources)")
 
+    if checkpoint_enabled:
+        write_text_file(
+            _artifact_file(artifact_dir, "checkpoint_after_research.json"),
+            json.dumps({"phase": "research", "sections": section_packages, "analysis": analysis}, indent=2, ensure_ascii=False),
+        )
+
+    log_task_update(DEEP_RESEARCH_LABEL, "Phase 2/4 - correlating subtopics and section dependencies.")
+    correlation = _build_correlation_package(objective, section_packages)
+    write_text_file(_artifact_file(artifact_dir, "correlation_briefing.md"), str(correlation.get("briefing", "")).strip() + "\n")
+    write_text_file(_artifact_file(artifact_dir, "knowledge_graph.json"), json.dumps(correlation.get("knowledge_graph", {}), indent=2, ensure_ascii=False))
+    research_log_lines.append(
+        f"Correlation complete: {len(correlation.get('cross_cutting_themes', []))} themes, "
+        f"{len(correlation.get('contradictions', []))} contradictions."
+    )
+
+    packages_by_title = {str(item.get("title", "")).strip(): item for item in section_packages}
+    ordered_packages = [packages_by_title[title_key] for title_key in correlation.get("section_order", []) if title_key in packages_by_title]
+    if len(ordered_packages) != len(section_packages):
+        ordered_packages = section_packages
+
+    for write_index, package in enumerate(ordered_packages, start=1):
+        section_title = str(package.get("title", f"Section {write_index}")).strip() or f"Section {write_index}"
+        words_target = max(500, int(package.get("target_pages", section_pages) or section_pages) * words_per_page)
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"Phase 3/4 - drafting section {write_index}/{len(ordered_packages)}: {section_title}",
+        )
         section_prompt = _format_section_prompt(
             global_objective=objective,
-            section=section,
-            section_index=index,
-            section_count=len(outline.get("sections", [])),
+            section=package,
+            section_index=write_index,
+            section_count=len(ordered_packages),
             words_target=words_target,
             continuity_notes=continuity_notes,
             coherence_context_md=coherence_context_md,
-            source_ledger_md=source_ledger_md,
-            research_text=research_output,
+            correlation_briefing=str(correlation.get("briefing", "")).strip(),
+            source_ledger_md=package.get("source_ledger_md", ""),
+            research_text=package.get("research_text", ""),
             evidence_bank_md=evidence_excerpt,
-        )
-        log_task_update(
-            "Long Document",
-            f"Drafting section {index}/{len(outline.get('sections', []))}: {section_title}",
+            citation_style=citation_style,
+            date_range=date_range,
         )
         section_text = llm_text(section_prompt).strip()
         if not section_text:
-            section_text = f"{section_title}\n\nNo section text was generated."
-        section_word_count = len(section_text.split())
-        log_task_update(
-            "Long Document",
-            f"Draft complete for section {index}: {section_word_count} words, {len(section_text)} chars.",
-        )
+            section_text = f"## {section_title}\n\nNo section text was generated."
+        section_text = _ensure_section_citations(section_text, package.get("sources", []))
         existing_tables = _extract_markdown_tables(section_text)
         existing_flowcharts = _extract_mermaid_blocks(section_text)
         generated_visuals: dict[str, Any] = {"tables": [], "flowcharts": [], "notes": ""}
         if disable_visuals:
-            log_task_update("Long Document", f"Skipping visual generation for section {index} (disabled).")
+            log_task_update(DEEP_RESEARCH_LABEL, f"Skipping visual generation for section {write_index} (disabled).")
         elif not (existing_tables and existing_flowcharts):
-            log_task_update("Long Document", f"Generating visuals for section {index}.")
-            generated_visuals = _generate_visual_assets(section_title, section_text, research_output)
-        else:
-            log_task_update("Long Document", f"Using visuals already embedded in section {index}.")
+            generated_visuals = _generate_visual_assets(section_title, section_text, package.get("research_text", ""))
         visual_assets = _normalize_visual_assets(existing_tables, existing_flowcharts, generated_visuals)
         section_text = _append_generated_visuals(section_text, visual_assets)
         if include_section_references:
-            section_text = _append_verified_references(section_text, section_sources)
+            section_text = _append_verified_references(section_text, package.get("sources", []))
         else:
             section_text = _strip_section_references(section_text)
-        log_task_update(
-            "Long Document",
-            f"Section {index} visuals: {len(visual_assets.get('tables', []))} tables, {len(visual_assets.get('flowcharts', []))} flowcharts.",
-        )
 
-        section_md_filename = _artifact_file(artifact_dir, f"section_{index:02d}/section.md")
-        visual_assets_json_filename = _artifact_file(artifact_dir, f"section_{index:02d}/visual_assets.json")
-        visual_assets_md_filename = _artifact_file(artifact_dir, f"section_{index:02d}/visual_assets.md")
-        log_task_update(
-            "Long Document",
-            f"Writing section {index} artifacts under {OUTPUT_DIR}/{_artifact_file(artifact_dir, f'section_{index:02d}')}",
-        )
+        section_dir = _artifact_file(artifact_dir, f"section_{write_index:02d}")
+        section_md_filename = _artifact_file(artifact_dir, f"section_{write_index:02d}/section.md")
+        visual_assets_json_filename = _artifact_file(artifact_dir, f"section_{write_index:02d}/visual_assets.json")
+        visual_assets_md_filename = _artifact_file(artifact_dir, f"section_{write_index:02d}/visual_assets.md")
         write_text_file(section_md_filename, section_text)
         write_text_file(visual_assets_json_filename, json.dumps(visual_assets, indent=2, ensure_ascii=False))
         write_text_file(visual_assets_md_filename, _render_visual_assets_md(visual_assets) + "\n")
         flowchart_files: list[str] = []
         for chart_index, chart in enumerate(visual_assets.get("flowcharts", []), start=1):
-            flowchart_filename = _artifact_file(artifact_dir, f"section_{index:02d}/flowchart_{chart_index:02d}.mmd")
+            flowchart_filename = _artifact_file(artifact_dir, f"section_{write_index:02d}/flowchart_{chart_index:02d}.mmd")
             flowchart_text = str(chart.get("mermaid", "")).strip()
             if not flowchart_text:
                 continue
@@ -1859,61 +2841,53 @@ def long_document_agent(state):
 
         note = _section_continuity_note(section_title, section_text)
         continuity_notes.append(f"{section_title}:\n{note}")
-        write_text_file(_artifact_file(artifact_dir, f"section_{index:02d}/continuity.txt"), note)
-        log_task_update(
-            "Long Document",
-            f"Continuity note saved for section {index}.",
-        )
+        write_text_file(_artifact_file(artifact_dir, f"section_{write_index:02d}/continuity.txt"), note)
         bridge_md = (
-            f"# Section {index} Coherence Bridge\n\n"
+            f"# Section {write_index} Coherence Bridge\n\n"
             f"## Section\n{section_title}\n\n"
             "## Carry-Forward Notes\n"
             f"{note.strip()}\n"
         )
-        write_text_file(_artifact_file(artifact_dir, f"section_{index:02d}/bridge.md"), bridge_md)
-        coherence_context_md = (
-            coherence_context_md
-            + "\n\n"
-            + f"[Section {index} Bridge]\n"
-            + _trim_text(bridge_md, 2000)
-        )
-        write_text_file(_artifact_file(artifact_dir, "long_document_coherence_live.md"), coherence_context_md)
-        log_task_update(
-            "Long Document",
-            f"Section {index} coherence bridge updated.",
-        )
+        write_text_file(_artifact_file(artifact_dir, f"section_{write_index:02d}/bridge.md"), bridge_md)
+        coherence_context_md = coherence_context_md + "\n\n" + f"[Section {write_index} Bridge]\n" + _trim_text(bridge_md, 2000)
+        write_text_file(_artifact_file(artifact_dir, "deep_research_coherence_live.md"), coherence_context_md)
 
         section_outputs.append(
             {
-                "index": index,
+                "index": write_index,
                 "title": section_title,
-                "objective": section_objective,
-                "research_status": str(research_pass.get("status", "")),
-                "research_response_id": str(research_pass.get("response_id", "")),
-                "research_elapsed_seconds": int(research_pass.get("elapsed_seconds", 0) or 0),
-                "research_text_preview": research_output[:2000],
+                "objective": package.get("objective", objective),
+                "research_status": str((package.get("research_pass") or {}).get("status", "")),
+                "research_response_id": str((package.get("research_pass") or {}).get("response_id", "")),
+                "research_elapsed_seconds": int((package.get("research_pass") or {}).get("elapsed_seconds", 0) or 0),
+                "research_text_preview": str(package.get("research_text", ""))[:2000],
                 "section_text": section_text,
                 "continuity_note": note,
-                "references": section_sources,
+                "references": package.get("sources", []),
                 "visual_assets": visual_assets,
                 "visual_assets_file": f"{OUTPUT_DIR}/{visual_assets_json_filename}",
                 "visual_assets_markdown_file": f"{OUTPUT_DIR}/{visual_assets_md_filename}",
                 "flowchart_files": flowchart_files,
             }
         )
-
+        research_log_lines.append(f"Drafted section {write_index}: {section_title}")
+        state["draft_response"] = (
+            f"Deep research in progress: drafted section {write_index}/{len(ordered_packages)} "
+            f"({section_title}). Sources this section: {len(package.get('sources', []))}."
+        )
         progress_payload = {
             "title": title,
             "objective": objective,
             "target_pages": target_pages,
-            "completed_sections": index,
-            "total_sections": len(outline.get("sections", [])),
+            "completed_sections": write_index,
+            "total_sections": len(ordered_packages),
+            "tier": analysis.get("tier", 0),
+            "phase": "writing",
             "sections": [
                 {
                     "index": item["index"],
                     "title": item["title"],
                     "research_status": item["research_status"],
-                    "research_response_id": item["research_response_id"],
                     "references_count": len(item.get("references", [])),
                     "table_count": len((item.get("visual_assets") or {}).get("tables", [])),
                     "flowchart_count": len((item.get("visual_assets") or {}).get("flowcharts", [])),
@@ -1921,19 +2895,16 @@ def long_document_agent(state):
                 for item in section_outputs
             ],
         }
-        write_text_file(_artifact_file(artifact_dir, "long_document_progress.json"), json.dumps(progress_payload, indent=2, ensure_ascii=False))
-        log_task_update(
-            "Long Document",
-            f"Progress updated: {index}/{len(outline.get('sections', []))} sections completed.",
-        )
-        state["draft_response"] = (
-            f"Long document in progress: completed section {index}/{len(outline.get('sections', []))} "
-            f"({section_title}). References extracted this section: {len(section_sources)}. "
-            f"Visuals: {len(visual_assets.get('tables', []))} tables, {len(visual_assets.get('flowcharts', []))} flowcharts."
+        write_text_file(_artifact_file(artifact_dir, "deep_research_progress.json"), json.dumps(progress_payload, indent=2, ensure_ascii=False))
+
+    if checkpoint_enabled:
+        write_text_file(
+            _artifact_file(artifact_dir, "checkpoint_after_writing.json"),
+            json.dumps({"phase": "writing", "sections": section_outputs}, indent=2, ensure_ascii=False),
         )
 
     summary_prompt = f"""
-Create a concise executive summary for this long-form report.
+Create a concise executive summary for this deep research report.
 Objective:
 {objective}
 
@@ -1952,15 +2923,50 @@ Section continuity notes:
                 item.get("references", []),
                 consolidated_references,
             )
-    references_md_filename = _artifact_file(artifact_dir, "long_document_references.md")
-    references_json_filename = _artifact_file(artifact_dir, "long_document_references.json")
-    write_text_file(references_md_filename, _references_markdown(consolidated_references, heading="## Consolidated References", limit=200) + "\n")
+    references_md_filename = _artifact_file(artifact_dir, "deep_research_references.md")
+    references_json_filename = _artifact_file(artifact_dir, "deep_research_references.json")
+    write_text_file(references_md_filename, _bibliography_markdown(consolidated_references, style=citation_style))
     write_text_file(references_json_filename, json.dumps(consolidated_references, indent=2, ensure_ascii=False))
     visual_index = _build_visual_index(section_outputs)
-    visual_index_json_filename = _artifact_file(artifact_dir, "long_document_visual_index.json")
-    visual_index_md_filename = _artifact_file(artifact_dir, "long_document_visual_index.md")
+    visual_index_json_filename = _artifact_file(artifact_dir, "deep_research_visual_index.json")
+    visual_index_md_filename = _artifact_file(artifact_dir, "deep_research_visual_index.md")
     write_text_file(visual_index_json_filename, json.dumps(visual_index, indent=2, ensure_ascii=False))
     write_text_file(visual_index_md_filename, _visual_index_markdown(visual_index))
+
+    methodology_lines = [
+        f"- Research tier: {analysis.get('tier', 0)}",
+        f"- Requested page target: {target_pages}",
+        f"- Citation style: {citation_style.upper()}",
+        f"- Web search: {'enabled' if web_search_enabled else 'disabled'}",
+        f"- Date range: {date_range}",
+        f"- Source families requested: {', '.join(source_family_display)}",
+        f"- Local file sources: {len(local_entries)}",
+        f"- Explicit URL sources: {len(url_entries)}",
+        f"- Evidence bank pre-collection: {'enabled' if collect_sources_first else 'disabled'}",
+        f"- Section search support: {'enabled' if use_section_search else 'disabled'}",
+        f"- Cross-cutting themes identified: {len(correlation.get('cross_cutting_themes', []))}",
+        f"- Contradictions identified: {len(correlation.get('contradictions', []))}",
+    ]
+    methodology_text = "\n".join(methodology_lines)
+
+    plagiarism_sources = [{"label": "Evidence bank", "url": "", "text": evidence_bank_md}]
+    for package in section_packages:
+        plagiarism_sources.append(
+            {
+                "label": str(package.get("title", "")).strip() or "Section research",
+                "url": "",
+                "text": str(package.get("research_text", "")).strip(),
+            }
+        )
+    plagiarism_report = (
+        _build_plagiarism_report(section_outputs, plagiarism_sources)
+        if plagiarism_enabled
+        else {"overall_score": 0.0, "ai_content_score": 0.0, "status": "PASS", "sections": []}
+    )
+    plagiarism_json_filename = _artifact_file(artifact_dir, "plagiarism_report.json")
+    plagiarism_md_filename = _artifact_file(artifact_dir, "plagiarism_report.md")
+    write_text_file(plagiarism_json_filename, json.dumps(plagiarism_report, indent=2, ensure_ascii=False))
+    write_text_file(plagiarism_md_filename, _plagiarism_report_markdown(plagiarism_report))
 
     compiled_markdown = _build_compiled_markdown(
         title,
@@ -1968,32 +2974,45 @@ Section continuity notes:
         section_outputs,
         executive_summary,
         consolidated_references,
+        citation_style=citation_style,
+        methodology_text=methodology_text,
+        plagiarism_report=plagiarism_report,
+        source_entries=consolidated_references,
+        research_log_lines=research_log_lines,
+        generated_at=dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        model_name=research_model,
+        deep_research_tier=int(analysis.get("tier", 0) or 0),
     )
-    compiled_filename = _artifact_file(artifact_dir, "long_document_compiled.md")
+    compiled_filename = _artifact_file(artifact_dir, "deep_research_report.md")
     write_text_file(compiled_filename, compiled_markdown)
     export_paths: dict[str, str] = {}
     try:
-        export_paths = _export_long_document_formats(compiled_markdown, compiled_filename)
+        export_paths = _export_long_document_formats(compiled_markdown, compiled_filename, requested_formats=output_formats)
     except Exception as exc:
-        log_task_update("Long Document", f"Format export failed: {exc}")
-    manifest_filename = _artifact_file(artifact_dir, "long_document_manifest.json")
+        log_task_update(DEEP_RESEARCH_LABEL, f"Format export failed: {exc}")
+    manifest_filename = _artifact_file(artifact_dir, "deep_research_manifest.json")
     write_text_file(
         manifest_filename,
         json.dumps(
             {
                 "title": title,
                 "objective": objective,
+                "tier": analysis.get("tier", 0),
                 "target_pages": target_pages,
                 "section_count": len(section_outputs),
                 "compiled_markdown_file": f"{OUTPUT_DIR}/{compiled_filename}",
-                "outline_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_outline.json')}",
-                "outline_markdown_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_outline.md')}",
-                "coherence_base_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_coherence_base.md')}",
-                "coherence_live_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_coherence_live.md')}",
+                "outline_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_outline.json')}",
+                "outline_markdown_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_outline.md')}",
+                "coherence_base_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_base.md')}",
+                "coherence_live_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_live.md')}",
+                "correlation_briefing_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'correlation_briefing.md')}",
+                "knowledge_graph_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'knowledge_graph.json')}",
                 "references_markdown_file": f"{OUTPUT_DIR}/{references_md_filename}",
                 "references_json_file": f"{OUTPUT_DIR}/{references_json_filename}",
                 "visual_index_markdown_file": f"{OUTPUT_DIR}/{visual_index_md_filename}",
                 "visual_index_json_file": f"{OUTPUT_DIR}/{visual_index_json_filename}",
+                "plagiarism_report_json": f"{OUTPUT_DIR}/{plagiarism_json_filename}",
+                "plagiarism_report_markdown": f"{OUTPUT_DIR}/{plagiarism_md_filename}",
                 "compiled_html_file": export_paths.get("html", ""),
                 "compiled_docx_file": export_paths.get("docx", ""),
                 "compiled_pdf_file": export_paths.get("pdf", ""),
@@ -2007,18 +3026,29 @@ Section continuity notes:
 
     total_tables = sum(len((item.get("visual_assets") or {}).get("tables", [])) for item in section_outputs)
     total_flowcharts = sum(len((item.get("visual_assets") or {}).get("flowcharts", [])) for item in section_outputs)
+    total_words = sum(len(str(item.get("section_text", "")).split()) for item in section_outputs) + len(str(executive_summary).split())
+    total_sources = len(consolidated_references)
 
     final_summary = (
-        f"Long-form document pipeline completed.\n"
+        f"Deep research pipeline completed.\n"
         f"- Title: {title}\n"
+        f"- Tier: {analysis.get('tier', 0)}\n"
         f"- Target pages: {target_pages}\n"
         f"- Sections produced: {len(section_outputs)}\n"
+        f"- Words: {total_words}\n"
+        f"- Sources: {total_sources}\n"
+        f"- Web search: {'enabled' if web_search_enabled else 'disabled'}\n"
+        f"- Local file sources: {len(local_entries)}\n"
+        f"- Explicit URL sources: {len(url_entries)}\n"
+        f"- Citations: {len(consolidated_references)}\n"
+        f"- Plagiarism: {plagiarism_report.get('overall_score', 0)}% ({plagiarism_report.get('status', 'PASS')})\n"
         f"- Compiled markdown: {OUTPUT_DIR}/{compiled_filename}\n"
         f"- Compiled HTML: {export_paths.get('html', 'n/a') or 'n/a'}\n"
         f"- Compiled DOCX: {export_paths.get('docx', 'n/a') or 'n/a'}\n"
         f"- Compiled PDF: {export_paths.get('pdf', 'n/a') or 'n/a'}\n"
         f"- References: {OUTPUT_DIR}/{references_md_filename}\n"
         f"- Visual index: {OUTPUT_DIR}/{visual_index_md_filename}\n"
+        f"- Plagiarism report: {OUTPUT_DIR}/{plagiarism_json_filename}\n"
         f"- Evidence bank: {state.get('long_document_evidence_bank_path', 'n/a')}\n"
         f"- Visual assets generated: {total_tables} tables, {total_flowcharts} flowcharts\n"
         f"- Manifest: {OUTPUT_DIR}/{manifest_filename}\n"
@@ -2027,6 +3057,9 @@ Section continuity notes:
     )
 
     state["long_document_mode"] = True
+    state["deep_research_mode"] = deep_research_mode
+    state["deep_research_confirmed"] = deep_research_mode or bool(state.get("deep_research_confirmed", False))
+    state["deep_research_tier"] = int(analysis.get("tier", 0) or 0)
     state["long_document_title"] = title
     state["long_document_outline"] = outline
     state["long_document_sections_data"] = [
@@ -2053,23 +3086,48 @@ Section continuity notes:
     state["long_document_compiled_docx_path"] = export_paths.get("docx", "")
     state["long_document_compiled_pdf_path"] = export_paths.get("pdf", "")
     state["long_document_manifest_path"] = f"{OUTPUT_DIR}/{manifest_filename}"
-    state["long_document_outline_md_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_outline.md')}"
-    state["long_document_coherence_base_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_coherence_base.md')}"
-    state["long_document_coherence_live_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'long_document_coherence_live.md')}"
+    state["long_document_outline_md_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_outline.md')}"
+    state["long_document_coherence_base_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_base.md')}"
+    state["long_document_coherence_live_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_live.md')}"
     state["long_document_references_path"] = f"{OUTPUT_DIR}/{references_md_filename}"
     state["long_document_references_json_path"] = f"{OUTPUT_DIR}/{references_json_filename}"
     state["long_document_references"] = consolidated_references
     state["long_document_visual_index_path"] = f"{OUTPUT_DIR}/{visual_index_md_filename}"
     state["long_document_visual_index_json_path"] = f"{OUTPUT_DIR}/{visual_index_json_filename}"
     state["long_document_summary"] = executive_summary
+    state["deep_research_analysis"] = analysis
+    state["deep_research_result_card"] = {
+        "kind": "result",
+        "title": title,
+        "tier": analysis.get("tier", 0),
+        "pages": target_pages,
+        "words": total_words,
+        "sources": total_sources,
+        "citations": len(consolidated_references),
+        "plagiarism_score": plagiarism_report.get("overall_score", 0),
+        "plagiarism_status": plagiarism_report.get("status", "PASS"),
+        "ai_content_score": plagiarism_report.get("ai_content_score", 0),
+        "duration_minutes": int(sum(int((item.get("research_elapsed_seconds") or 0)) for item in section_outputs) / 60),
+        "web_search_enabled": web_search_enabled,
+        "local_sources": len(local_entries),
+        "provided_urls": len(url_entries),
+        "formats": output_formats,
+        "report_path": f"{OUTPUT_DIR}/{compiled_filename}",
+        "html_path": export_paths.get("html", ""),
+        "docx_path": export_paths.get("docx", ""),
+        "pdf_path": export_paths.get("pdf", ""),
+        "knowledge_graph_path": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'knowledge_graph.json')}",
+        "plagiarism_report_path": f"{OUTPUT_DIR}/{plagiarism_json_filename}",
+        "raw_json_path": f"{OUTPUT_DIR}/{manifest_filename}",
+    }
     state["draft_response"] = final_summary
 
-    log_task_update("Long Document", f"Completed long-form document pass #{call_number}.", final_summary)
+    log_task_update(DEEP_RESEARCH_LABEL, f"Completed deep research pass #{call_number}.", final_summary)
     state = publish_agent_output(
         state,
         "long_document_agent",
         final_summary,
-        f"long_document_result_{call_number}",
+        f"deep_research_result_{call_number}",
         recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
     )
     return state

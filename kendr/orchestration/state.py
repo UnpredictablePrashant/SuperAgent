@@ -105,6 +105,19 @@ class RuntimeState(TypedDict, total=False):
     long_document_compiled_html_path: str
     long_document_compiled_docx_path: str
     long_document_compiled_pdf_path: str
+    deep_research_mode: bool
+    deep_research_tier: int
+    deep_research_confirmed: bool
+    deep_research_analysis: dict[str, Any]
+    deep_research_result_card: dict[str, Any]
+    deep_research_source_urls: list[str]
+    research_output_formats: list[str]
+    research_citation_style: str
+    research_enable_plagiarism_check: bool
+    research_web_search_enabled: bool
+    research_date_range: str
+    research_max_sources: int
+    research_checkpoint_enabled: bool
     research_heartbeat_seconds: int
     research_sources: list[str]
     research_pipeline_enabled: bool

@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "run_id": "proj-11eymkkx",
-  "session_id": "webchat:default:project_ui:main",
-  "status": "awaiting_user_input",
-  "active_agent": "planner_agent",
-  "updated_at": "2026-04-01T10:42:48.086218+00:00",
-  "pid": 24455
-}

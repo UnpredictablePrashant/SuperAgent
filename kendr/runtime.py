@@ -270,7 +270,16 @@ class AgentRuntime:
             "looks good",
             "lgtm",
         )
+        quick_summary_markers = (
+            "quick summary",
+            "summary only",
+            "brief summary",
+            "just summarize",
+            "quick answer",
+        )
         cleaned = lowered.strip(" \n\t.!?")
+        if any(marker in lowered for marker in quick_summary_markers):
+            return {"action": "quick_summary", "feedback": raw}
         if cleaned in {"no", "n"} or any(marker in lowered for marker in revise_markers):
             return {"action": "revise", "feedback": raw}
         if cleaned in {"approve", "approved", "yes", "y"} or any(cleaned.startswith(marker) for marker in approve_markers):
@@ -282,7 +291,7 @@ class AgentRuntime:
             "channel-ingest-normalization": "Normalize the incoming channel payload for orchestration.",
             "session-routing": "Resolve or create the session context for this run.",
             "local-drive-ingestion": "Scan the configured drive files and extract the most relevant evidence.",
-            "drive-informed-long-document": "Draft the long-form report from the ingested drive evidence.",
+            "drive-informed-long-document": "Draft the deep research report from the ingested drive evidence.",
             "planning": "Build the execution plan for this request.",
             "step-review": "Review the latest agent output and decide whether it should continue.",
             "correction": "Revise the previous step based on reviewer feedback.",
@@ -291,7 +300,7 @@ class AgentRuntime:
             "project-audit-dispatch": "Run the structured codebase audit workflow.",
             "superrag-dispatch": "Build or query the superRAG knowledge session.",
             "deep-research-dispatch": "Run the deep research workflow and collect cited findings.",
-            "long-document-dispatch": "Generate the long-form document section by section.",
+            "long-document-dispatch": "Generate the deep research report section by section.",
             "master-coding-delegation": f"Continue the delegated coding workflow with {agent_name or 'the assigned agent'}.",
             "project-blueprint": "Designing the complete technical architecture for the project.",
         }
@@ -301,7 +310,7 @@ class AgentRuntime:
             "channel_gateway_agent": "Normalizing the incoming request payload.",
             "session_router_agent": "Resolving the session context.",
             "local_drive_agent": "Scanning drive files and extracting relevant evidence.",
-            "long_document_agent": "Generating long-form report sections and merging the draft.",
+            "long_document_agent": "Generating deep research report sections and merging the draft.",
             "planner_agent": "Planning the execution steps.",
             "reviewer_agent": "Reviewing the latest step output.",
             "deep_research_agent": "Running deep research and collecting cited sources.",
@@ -788,6 +797,8 @@ class AgentRuntime:
         return json.loads(self._strip_code_fences(raw_output))
 
     def _is_deep_research_request(self, state: dict) -> bool:
+        if bool(state.get("deep_research_mode", False)):
+            return True
         text = " ".join(
             [
                 state.get("user_query", ""),
@@ -1191,6 +1202,8 @@ class AgentRuntime:
         return False
 
     def _is_long_document_request(self, state: dict) -> bool:
+        if bool(state.get("deep_research_mode", False)):
+            return True
         if bool(state.get("long_document_mode", False)):
             return True
 
@@ -1208,6 +1221,9 @@ class AgentRuntime:
             return False
 
         direct_markers = (
+            "deep research",
+            "deep-research",
+            "deep research report",
             "long document",
             "long-form document",
             "book chapter",
@@ -2018,26 +2034,10 @@ class AgentRuntime:
             and self._is_research_request(state)
         ):
             research_query = str(state.get("current_objective") or state.get("user_query", "")).strip()
-            if self._is_deep_research_request(state) and self._is_agent_available(state, "deep_research_agent"):
-                reason = (
-                    "The request is a deep research task. Bypassing the planner and routing directly "
-                    "to deep_research_agent for OpenAI web-grounded deep research."
-                )
-                state["orchestrator_reason"] = reason
-                state["next_agent"] = "deep_research_agent"
-                state = append_task(
-                    state,
-                    make_task(
-                        sender="orchestrator_agent",
-                        recipient="deep_research_agent",
-                        intent="deep-research-dispatch",
-                        content=research_query,
-                        state_updates={"research_query": research_query},
-                    ),
-                )
-                log_task_update("Orchestrator", reason)
-                return state
-            elif self._is_agent_available(state, "research_pipeline_agent"):
+            if (
+                not self._is_deep_research_request(state)
+                and self._is_agent_available(state, "research_pipeline_agent")
+            ):
                 reason = (
                     "The request is a research / information task. Bypassing the planner and routing "
                     "to research_pipeline_agent for multi-source web evidence collection."
@@ -2109,7 +2109,7 @@ class AgentRuntime:
             return state
 
         if bool(state.get("long_document_plan_waiting_for_approval", False)):
-            approval_message = state.get("pending_user_question") or "Review and approve the long-document section plan before execution."
+            approval_message = state.get("pending_user_question") or "Review and approve the deep research section plan before execution."
             state["next_agent"] = "__finish__"
             state["final_output"] = approval_message
             state = append_message(state, make_message("orchestrator_agent", "user", "subplan-approval", approval_message))
@@ -2152,7 +2152,7 @@ class AgentRuntime:
             and int(state.get("local_drive_calls", 0) or 0) > 0
         ):
             reason = (
-                "Local-drive ingestion is complete and a long-form output was requested. "
+                "Local-drive ingestion is complete and a deep research report was requested. "
                 "Route to long_document_agent for staged long-running synthesis."
             )
             objective = str(state.get("current_objective") or state.get("user_query", "")).strip()
@@ -2594,7 +2594,7 @@ class AgentRuntime:
             and not self._is_long_document_request(state)
             and self._is_deep_research_request(state)
         ):
-            reason = "The request is a deep research task. Route to deep_research_agent for OpenAI web-grounded deep research."
+            reason = "The request is a deep research task. Route to deep_research_agent for deep research execution."
             research_query = state.get("current_objective") or state.get("user_query", "")
             state["orchestrator_reason"] = reason
             state["next_agent"] = "deep_research_agent"
@@ -2624,7 +2624,7 @@ class AgentRuntime:
             and self._is_long_document_request(state)
         ):
             reason = (
-                "The request is a very long/exhaustive document objective. "
+                "The request is a deep research report objective. "
                 "Route to long_document_agent for staged section research and final merge."
             )
             long_doc_objective = state.get("current_objective") or state.get("user_query", "")
@@ -2937,6 +2937,37 @@ Return ONLY valid JSON in this exact schema:
                 )
                 return
 
+        if scope == "deep_research_confirmation":
+            if response["action"] == "approve":
+                initial_state["pending_user_input_kind"] = ""
+                initial_state["approval_pending_scope"] = ""
+                initial_state["pending_user_question"] = ""
+                initial_state["deep_research_confirmed"] = True
+                initial_state["deep_research_mode"] = True
+                return
+            if response["action"] == "quick_summary":
+                initial_state["pending_user_input_kind"] = ""
+                initial_state["approval_pending_scope"] = ""
+                initial_state["pending_user_question"] = ""
+                initial_state["deep_research_confirmed"] = True
+                initial_state["deep_research_mode"] = False
+                initial_state["long_document_mode"] = False
+                initial_state["research_pipeline_enabled"] = True
+                initial_state["research_pipeline_completed"] = False
+                initial_state["research_query"] = previous_objective or user_query
+                return
+            if response["action"] == "revise":
+                initial_state["pending_user_input_kind"] = ""
+                initial_state["approval_pending_scope"] = ""
+                initial_state["pending_user_question"] = ""
+                initial_state["deep_research_confirmed"] = False
+                initial_state["deep_research_analysis"] = {}
+                if previous_objective:
+                    initial_state["current_objective"] = (
+                        f"{previous_objective}\n\nDeep research scope adjustments from the user:\n{response['feedback']}"
+                    )
+                return
+
         if response["action"] == "approve":
             initial_state["pending_user_input_kind"] = ""
             initial_state["approval_pending_scope"] = ""
@@ -2992,13 +3023,17 @@ Return ONLY valid JSON in this exact schema:
             return
 
         explicit_instruction = "Reply `approve` to continue, or describe the changes you want."
+        if scope == "deep_research_confirmation":
+            explicit_instruction = "Reply `approve` to start deep research, `quick summary` to avoid the full run, or describe the scope changes you want."
         initial_state["pending_user_input_kind"] = pending_kind
         initial_state["approval_pending_scope"] = scope
         if prompt:
             initial_state["pending_user_question"] = prompt if explicit_instruction in prompt else f"{prompt}\n\n{explicit_instruction}"
         else:
             initial_state["pending_user_question"] = explicit_instruction
-        if scope == "project_blueprint":
+        if scope == "deep_research_confirmation":
+            initial_state["plan_ready"] = False
+        elif scope == "project_blueprint":
             initial_state["blueprint_waiting_for_approval"] = True
             initial_state["plan_ready"] = False
         elif scope == "root_plan":
@@ -3213,6 +3248,19 @@ Return ONLY valid JSON in this exact schema:
             "long_document_addendum_max_attempts": 1,
             "long_document_addendum_path": "",
             "long_document_addendum_completed": False,
+            "deep_research_mode": False,
+            "deep_research_tier": 0,
+            "deep_research_confirmed": False,
+            "deep_research_analysis": {},
+            "deep_research_result_card": {},
+            "deep_research_source_urls": [],
+            "research_output_formats": ["pdf", "docx", "html", "md"],
+            "research_citation_style": "apa",
+            "research_enable_plagiarism_check": True,
+            "research_web_search_enabled": True,
+            "research_date_range": "all_time",
+            "research_max_sources": 0,
+            "research_checkpoint_enabled": False,
             "resume_requested": False,
             "resume_ready": False,
             "resume_blocked": False,
@@ -3300,6 +3348,19 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["long_document_plan_markdown"] = str(prior_channel_state.get("long_document_plan_markdown", "") or "")
                 initial_state["long_document_plan_data"] = prior_channel_state.get("long_document_plan_data", {})
                 initial_state["long_document_plan_version"] = int(prior_channel_state.get("long_document_plan_version", 0) or 0)
+                initial_state["deep_research_mode"] = bool(prior_channel_state.get("deep_research_mode", False))
+                initial_state["deep_research_tier"] = int(prior_channel_state.get("deep_research_tier", 0) or 0)
+                initial_state["deep_research_confirmed"] = bool(prior_channel_state.get("deep_research_confirmed", False))
+                initial_state["deep_research_analysis"] = prior_channel_state.get("deep_research_analysis", {})
+                initial_state["deep_research_result_card"] = prior_channel_state.get("deep_research_result_card", {})
+                initial_state["deep_research_source_urls"] = list(prior_channel_state.get("deep_research_source_urls", []) or [])
+                initial_state["research_output_formats"] = list(prior_channel_state.get("research_output_formats", initial_state.get("research_output_formats", [])) or initial_state.get("research_output_formats", []))
+                initial_state["research_citation_style"] = str(prior_channel_state.get("research_citation_style", initial_state.get("research_citation_style", "")) or initial_state.get("research_citation_style", ""))
+                initial_state["research_enable_plagiarism_check"] = bool(prior_channel_state.get("research_enable_plagiarism_check", initial_state.get("research_enable_plagiarism_check", True)))
+                initial_state["research_web_search_enabled"] = bool(prior_channel_state.get("research_web_search_enabled", initial_state.get("research_web_search_enabled", True)))
+                initial_state["research_date_range"] = str(prior_channel_state.get("research_date_range", initial_state.get("research_date_range", "")) or initial_state.get("research_date_range", ""))
+                initial_state["research_max_sources"] = int(prior_channel_state.get("research_max_sources", 0) or 0)
+                initial_state["research_checkpoint_enabled"] = bool(prior_channel_state.get("research_checkpoint_enabled", False))
                 if prior_channel_state.get("long_document_outline"):
                     initial_state["long_document_outline"] = prior_channel_state.get("long_document_outline", {})
                 if initial_state.get("plan_steps") and initial_state.get("plan_approval_status") == "approved" and not initial_state.get("plan_waiting_for_approval", False):
