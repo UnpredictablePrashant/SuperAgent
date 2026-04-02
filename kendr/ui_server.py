@@ -407,6 +407,118 @@ def _append_project_chat_messages(
     )
 
 
+def _resolve_project_chat_identity(
+    project_id: str = "",
+    project_path: str = "",
+    project_name: str = "",
+) -> tuple[str, str, str]:
+    resolved_id = str(project_id or "").strip()
+    resolved_path = str(project_path or "").strip()
+    resolved_name = str(project_name or "").strip()
+    project = None
+    if _HAS_PROJECT_MANAGER:
+        try:
+            if resolved_id:
+                project = _pm_get_project(resolved_id)
+            elif resolved_path:
+                project = next(
+                    (item for item in _pm_list_projects() if str(item.get("path") or "").strip() == resolved_path),
+                    None,
+                )
+            elif _pm_get_active():
+                active = _pm_get_active() or {}
+                project = active if (
+                    resolved_name and str(active.get("name") or "").strip() == resolved_name
+                ) else active
+        except Exception:
+            project = None
+    if project:
+        resolved_id = resolved_id or str(project.get("id") or "").strip()
+        resolved_path = resolved_path or str(project.get("path") or "").strip()
+        resolved_name = resolved_name or str(project.get("name") or "").strip()
+    return resolved_id, resolved_path, resolved_name
+
+
+def _project_chat_result_text(result: dict) -> str:
+    if not isinstance(result, dict):
+        return str(result or "")
+    for key in ("final_output", "output", "draft_response", "answer"):
+        value = str(result.get(key) or "").strip()
+        if value:
+            return value
+    summary = str(result.get("summary") or "").strip()
+    if summary:
+        return summary
+    return ""
+
+
+def _persist_project_chat_user_request(payload: dict, text: str) -> tuple[str, str, str]:
+    channel = str(payload.get("channel") or "").strip().lower()
+    if channel != "project_ui":
+        return "", "", ""
+    project_id, project_path, project_name = _resolve_project_chat_identity(
+        str(payload.get("project_id") or "").strip(),
+        str(payload.get("project_root") or payload.get("working_directory") or "").strip(),
+        str(payload.get("project_name") or "").strip(),
+    )
+    if not project_id:
+        return "", project_path, project_name
+    try:
+        _append_project_chat_messages(
+            project_id,
+            project_path=project_path,
+            project_name=project_name,
+            messages=[{
+                "role": "user",
+                "content": text,
+                "content_format": _project_chat_guess_format(text),
+            }],
+        )
+    except Exception as exc:
+        _log.debug("Project chat user persistence failed for %s: %s", project_id, exc)
+    return project_id, project_path, project_name
+
+
+def _persist_project_chat_result(
+    payload: dict,
+    *,
+    result: dict | None = None,
+    error: str = "",
+    run_id: str = "",
+) -> None:
+    channel = str(payload.get("channel") or "").strip().lower()
+    if channel != "project_ui":
+        return
+    project_id, project_path, project_name = _resolve_project_chat_identity(
+        str(payload.get("project_id") or "").strip(),
+        str(payload.get("project_root") or payload.get("working_directory") or "").strip(),
+        str(payload.get("project_name") or "").strip(),
+    )
+    if not project_id:
+        return
+    content = ""
+    if error:
+        content = "Error: " + str(error)
+    else:
+        content = _project_chat_result_text(result or {})
+    if not content:
+        return
+    try:
+        _append_project_chat_messages(
+            project_id,
+            project_path=project_path,
+            project_name=project_name,
+            messages=[{
+                "role": "agent",
+                "content": content,
+                "content_format": _project_chat_guess_format(content),
+                "run_id": run_id,
+            }],
+        )
+    except Exception as exc:
+        _log.debug("Project chat result persistence failed for %s: %s", project_id, exc)
+
+
 def _resolve_run_artifact_path(run_id: str, name: str) -> str:
     file_path = ""
     try:

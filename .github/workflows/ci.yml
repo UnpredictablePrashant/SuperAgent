@@ -112,6 +112,6 @@ jobs:
       - name: Run Secret Scanning Review
         uses: advanced-security/secret-scanning-review-action@v2.2.0
         with:
-          GitHubToken: ${{ secrets.GITHUB_TOKEN }}
-          FailOnAlert: true
-          FailOnAlertExcludeClosed: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-alert: true
+          fail-on-alert-exclude-closed: true
