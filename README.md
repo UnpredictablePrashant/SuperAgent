@@ -11,6 +11,15 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/kendr-ai/kendr/stargazers"><img src="https://img.shields.io/github/stars/kendr-ai/kendr" alt="GitHub stars" /></a>
+  <a href="https://github.com/kendr-ai/kendr/network/members"><img src="https://img.shields.io/github/forks/kendr-ai/kendr" alt="GitHub forks" /></a>
+  <a href="https://github.com/kendr-ai/kendr/watchers"><img src="https://img.shields.io/github/watchers/kendr-ai/kendr" alt="GitHub watchers" /></a>
+  <a href="https://github.com/kendr-ai/kendr/issues"><img src="https://img.shields.io/github/issues/kendr-ai/kendr" alt="GitHub issues" /></a>
+  <a href="https://github.com/kendr-ai/kendr/actions"><img src="https://img.shields.io/github/actions/workflow/status/kendr-ai/kendr/ci.yml?branch=main" alt="GitHub workflow" /></a>
+  <a href="https://discord.gg/GgU8UEdn"><img src="https://img.shields.io/badge/discord-join-blue?logo=discord" alt="Discord" /></a>
+</p>
+
 # Kendr
 
 > Open-source multi-agent intelligence platform — Web UI + CLI for research, project management, and software automation.
@@ -292,6 +301,22 @@ Contribution baseline:
 - preserve setup-aware gating and runtime behaviour unless fixing a bug
 - update tests and docs with user-facing changes
 - run `python scripts/verify.py` before opening a PR
+
+---
+
+## Community
+
+- Join the **Kendr Discord** community for live chat, collaboration, Q&A, and announcements: [https://discord.gg/GgU8UEdn](https://discord.gg/GgU8UEdn)
+- Track ongoing work, open issues/feedback, and CI results on the [GitHub project view](https://github.com/kendr-ai/kendr)
+- The badges above pull live GitHub metrics (stars, forks, watchers, issues, workflows + more) so you can see how the project is performing in real time.
+
+## Contributors
+
+<p align="center">
+  <a href="https://github.com/kendr-ai/kendr/graphs/contributors"><img src="https://contrib.rocks/image?repo=kendr-ai/kendr" alt="Top contributors" /></a>
+</p>
+
+Names and avatars shown above are generated automatically from GitHub contributions, so the list reflects the latest community participation without manual updates.
 
 ---
 

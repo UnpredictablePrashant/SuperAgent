@@ -6,6 +6,8 @@ on:
       - "**"
   pull_request:
 
+  workflow_dispatch:
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -55,3 +57,59 @@ jobs:
         with:
           name: dist
           path: dist/*
+
+  codeql-analysis:
+    name: CodeQL analysis
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: security
+
+  dependency-scan:
+    name: Dependency scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@v2
+        with:
+          scan-type: fs
+          format: table
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          vuln-type: os,library
+          ignore-unfixed: true
+
+  secret-scan:
+    name: Secret scanning
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run GitHub Secret Scanning
+        uses: github/secret-scanning-action@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}

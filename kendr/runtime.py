@@ -1221,8 +1221,6 @@ class AgentRuntime:
             return False
 
         direct_markers = (
-            "deep research",
-            "deep-research",
             "deep research report",
             "long document",
             "long-form document",
@@ -1765,7 +1763,7 @@ class AgentRuntime:
             and not state.get("long_document_mode")
             and current_objective
         )
-        if _skill_route_eligible:
+        if _skill_route_eligible and not self._is_superrag_request(state):
             _sr_target = self.skill_registry.top_match(current_objective)
             if _sr_target and self._is_agent_available(state, _sr_target):
                 state["next_agent"] = _sr_target
@@ -2282,6 +2280,7 @@ class AgentRuntime:
                     clarifications=state.get("plan_clarification_questions", []),
                     execution_note=forced_reason,
                 )
+                raise RuntimeError(forced_reason)
             else:
                 corrected_values = {**corrected_values, "current_objective": revised_objective}
                 state["orchestrator_reason"] = reason
