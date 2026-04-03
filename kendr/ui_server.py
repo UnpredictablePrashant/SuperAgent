@@ -10,6 +10,7 @@ import re
 import threading
 import time
 import traceback
+from datetime import datetime, timezone
 
 import urllib.error
 import urllib.request
@@ -207,6 +208,25 @@ _GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "8790"))
 
 def _gateway_url() -> str:
     return f"http://{_GATEWAY_HOST}:{_GATEWAY_PORT}"
+
+
+def _gateway_long_timeout_seconds() -> float | None:
+    raw = str(os.getenv("KENDR_GATEWAY_LONG_TIMEOUT_SECONDS", "21600") or "").strip()
+    if not raw:
+        return 21600.0
+    try:
+        timeout = float(raw)
+    except Exception:
+        return 21600.0
+    return None if timeout <= 0 else timeout
+
+
+def _gateway_open_json(req: urllib.request.Request, *, timeout: float | None) -> dict | list:
+    kwargs: dict[str, float] = {}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    with urllib.request.urlopen(req, **kwargs) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def _gateway_ready(timeout: float = 1.0) -> bool:
@@ -560,8 +580,7 @@ def _gateway_ingest(payload: dict) -> dict:
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=360) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return _gateway_open_json(req, timeout=_gateway_long_timeout_seconds())
 
 
 def _gateway_resume(payload: dict) -> dict:
@@ -572,8 +591,7 @@ def _gateway_resume(payload: dict) -> dict:
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=360) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return _gateway_open_json(req, timeout=_gateway_long_timeout_seconds())
 
 
 def _gateway_get(path: str, timeout: float = 5.0) -> dict | list:
@@ -610,16 +628,222 @@ def _push_event(run_id: str, event_type: str, data: dict) -> None:
         q.put({"type": event_type, "data": data})
 
 
+def _pending_run_state(
+    run_id: str,
+    *,
+    payload: dict | None = None,
+    status: str = "running",
+    result: dict | None = None,
+    error: str = "",
+) -> dict:
+    now = _utc_now_iso()
+    previous = _pending_runs.get(run_id, {})
+    base_payload = payload or previous.get("payload") or {}
+    resolved_status = str(status or previous.get("status") or "running").strip() or "running"
+    started_at = str(previous.get("started_at") or now).strip() or now
+    completed_at = ""
+    if resolved_status not in {"running", "started"}:
+        completed_at = str(previous.get("completed_at") or now).strip() or now
+    return {
+        "run_id": run_id,
+        "status": resolved_status,
+        "started_at": started_at,
+        "updated_at": now,
+        "completed_at": completed_at,
+        "payload": base_payload,
+        "result": result if result is not None else previous.get("result"),
+        "error": error or str(previous.get("error") or "").strip(),
+    }
+
+
+def _overlay_run_with_pending(run_row: dict | None, pending: dict | None) -> dict | None:
+    if not run_row and not pending:
+        return None
+    base = dict(run_row or {})
+    pending = pending or {}
+    payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
+    if pending:
+        base["run_id"] = base.get("run_id") or pending.get("run_id")
+        base["status"] = pending.get("status") or base.get("status") or "running"
+        base["started_at"] = pending.get("started_at") or base.get("started_at") or base.get("created_at") or ""
+        base["updated_at"] = pending.get("updated_at") or base.get("updated_at") or base.get("started_at") or ""
+        if pending.get("completed_at"):
+            base["completed_at"] = pending.get("completed_at")
+        elif str(base.get("status") or "").strip().lower() in {"running", "started"}:
+            base["completed_at"] = ""
+        if pending.get("error"):
+            base["error"] = pending.get("error")
+        if pending.get("result") is not None:
+            base["result"] = pending.get("result")
+    if payload:
+        base["user_query"] = base.get("user_query") or payload.get("text") or payload.get("message") or ""
+        base["working_directory"] = base.get("working_directory") or payload.get("working_directory") or payload.get("project_root") or ""
+        base["session_id"] = base.get("session_id") or payload.get("chat_id") or ""
+        base["channel"] = base.get("channel") or payload.get("channel") or ""
+    result = base.get("result") if isinstance(base.get("result"), dict) else {}
+    awaiting = bool(
+        base.get("awaiting_user_input")
+        or result.get("awaiting_user_input")
+        or result.get("plan_waiting_for_approval")
+        or result.get("plan_needs_clarification")
+        or str(result.get("pending_user_input_kind", "")).strip()
+    )
+    if awaiting:
+        base["status"] = "awaiting_user_input"
+        base["awaiting_user_input"] = True
+    return base
+
+
+def _live_recent_runs(runs: list[dict] | None) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for run in runs or []:
+        if not isinstance(run, dict):
+            continue
+        run_id = str(run.get("run_id") or "").strip()
+        if not run_id:
+            continue
+        merged[run_id] = dict(run)
+    with _pending_lock:
+        pending_snapshot = {rid: dict(data) for rid, data in _pending_runs.items()}
+    for run_id, pending in pending_snapshot.items():
+        merged[run_id] = _overlay_run_with_pending(merged.get(run_id), pending) or {}
+    rows = [row for row in merged.values() if isinstance(row, dict) and str(row.get("run_id") or "").strip()]
+    rows.sort(
+        key=lambda row: (
+            0 if str(row.get("status") or "").strip().lower() in {"running", "started", "awaiting_user_input"} else 1,
+            str(row.get("updated_at") or row.get("started_at") or ""),
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def _live_run(run_row: dict | None) -> dict | None:
+    if not run_row:
+        return None
+    run_id = str(run_row.get("run_id") or "").strip()
+    if not run_id:
+        return run_row
+    with _pending_lock:
+        pending = dict(_pending_runs.get(run_id, {})) if run_id in _pending_runs else None
+    return _overlay_run_with_pending(run_row, pending)
+
+
+def _parse_iso_timestamp(value: str) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except Exception:
+        return None
+
+
+def _duration_label(duration_ms: int | None) -> str:
+    if duration_ms is None or duration_ms < 0:
+        return ""
+    if duration_ms < 1000:
+        return f"{duration_ms} ms"
+    seconds = duration_ms / 1000.0
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    if seconds < 60:
+        return f"{round(seconds)}s"
+    minutes, remainder = divmod(int(round(seconds)), 60)
+    if minutes < 60:
+        return f"{minutes}m {remainder}s"
+    hours, minute_remainder = divmod(minutes, 60)
+    return f"{hours}h {minute_remainder}m"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _project_activity_event(
+    *,
+    kind: str,
+    title: str,
+    status: str = "completed",
+    actor: str = "",
+    detail: str = "",
+    command: str = "",
+    cwd: str = "",
+    task: str = "",
+    subtask: str = "",
+    started_at: str = "",
+    completed_at: str = "",
+    duration_ms: int | None = None,
+    exit_code: int | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    started = str(started_at or _utc_now_iso()).strip()
+    completed = str(completed_at or ("" if str(status).lower() == "running" else _utc_now_iso())).strip()
+    resolved_duration = duration_ms
+    if resolved_duration is None and started and completed:
+        started_dt = _parse_iso_timestamp(started)
+        completed_dt = _parse_iso_timestamp(completed)
+        if started_dt and completed_dt:
+            resolved_duration = max(0, int((completed_dt - started_dt).total_seconds() * 1000))
+    return {
+        "id": f"proj-{uuid.uuid4().hex[:10]}",
+        "kind": str(kind or "activity"),
+        "title": str(title or "Activity"),
+        "status": str(status or "completed"),
+        "actor": str(actor or "").strip(),
+        "detail": str(detail or "").strip(),
+        "command": str(command or "").strip(),
+        "cwd": str(cwd or "").strip(),
+        "task": str(task or "").strip(),
+        "subtask": str(subtask or "").strip(),
+        "started_at": started,
+        "completed_at": completed,
+        "duration_ms": resolved_duration,
+        "duration_label": _duration_label(resolved_duration),
+        "exit_code": exit_code,
+        "metadata": metadata or {},
+    }
+
+
+def _emit_project_activity(emit, activities: list[dict], **kwargs) -> dict:
+    event = _project_activity_event(**kwargs)
+    activities.append(event)
+    emit("activity", event)
+    return event
+
+
+def _project_listing_command(is_git_repo: bool) -> str:
+    if is_git_repo:
+        return "git ls-files | Select-Object -First 120" if os.name == "nt" else "git ls-files | head -n 120"
+    return "Get-ChildItem -Name | Select-Object -First 120" if os.name == "nt" else "find . -maxdepth 2 -mindepth 1 | sed 's#^\\./##' | sort | head -n 120"
+
+
 def _format_step(step: dict) -> dict:
     excerpt = str(step.get("output_excerpt") or "").strip()
     reason = str(step.get("reason") or "").strip()
     agent = step.get("agent_name", "agent")
+    started_at = str(step.get("timestamp") or step.get("started_at") or "").strip()
+    completed_at = str(step.get("completed_at") or "").strip()
+    started_dt = _parse_iso_timestamp(started_at)
+    completed_dt = _parse_iso_timestamp(completed_at)
+    effective_end = completed_dt or (datetime.now(timezone.utc) if started_dt else None)
+    duration_ms = None
+    if started_dt and effective_end:
+        duration_ms = max(0, int((effective_end - started_dt).total_seconds() * 1000))
+    status = step.get("status", "running")
+    failure_reason = excerpt or reason
     return {
         "agent": agent,
-        "status": step.get("status", "running"),
+        "status": status,
         "message": excerpt or (f"Running {agent}..." if not reason else ""),
         "reason": reason,
         "execution_id": step.get("execution_id"),
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "duration_ms": duration_ms,
+        "duration_label": _duration_label(duration_ms),
+        "failure_reason": failure_reason if str(status).lower() in {"failed", "error"} else "",
     }
 
 
@@ -752,19 +976,22 @@ def _start_run_background(run_id: str, payload: dict) -> None:
             )
             _run_status = "awaiting_user_input" if _run_awaiting else "completed"
             with _pending_lock:
-                _pending_runs[run_id] = {"status": _run_status, "result": result}
+                _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status=_run_status, result=result)
+            _persist_project_chat_result(payload, result=result, run_id=run_id)
             _push_event(run_id, "result", result)
             _push_event(run_id, "done", {"run_id": run_id, "status": _run_status, "awaiting_user_input": _run_awaiting})
         except urllib.error.URLError as exc:
             err = str(exc)
             with _pending_lock:
-                _pending_runs[run_id] = {"status": "failed", "error": err}
+                _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="failed", error=err)
+            _persist_project_chat_result(payload, error=err, run_id=run_id)
             _push_event(run_id, "error", {"message": err})
             _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
         except Exception as exc:
             err = traceback.format_exc()
             with _pending_lock:
-                _pending_runs[run_id] = {"status": "failed", "error": err}
+                _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="failed", error=str(exc))
+            _persist_project_chat_result(payload, error=str(exc), run_id=run_id)
             _push_event(run_id, "error", {"message": str(exc)})
             _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
 
@@ -816,13 +1043,15 @@ def _start_standalone_run_background(run_id: str, payload: dict) -> None:
             result = orch.run()
             result.setdefault("output_dir", result.get("project_root", ""))
             with _pending_lock:
-                _pending_runs[run_id] = {"status": "completed", "result": result}
+                _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="completed", result=result)
+            _persist_project_chat_result(payload, result=result, run_id=run_id)
             _push_event(run_id, "result", result)
             _push_event(run_id, "done", {"run_id": run_id, "status": "completed"})
         except Exception as exc:
             err = str(exc)
             with _pending_lock:
-                _pending_runs[run_id] = {"status": "failed", "error": err}
+                _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="failed", error=err)
+            _persist_project_chat_result(payload, error=err, run_id=run_id)
             _push_event(run_id, "error", {"message": err})
             _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
 
@@ -840,7 +1069,7 @@ _CHAT_HTML = r"""<!doctype html>
 :root {
   --teal: #00C9A7; --amber: #FFB347; --crimson: #FF4757; --blue: #5352ED;
   --bg: #0d0f14; --surface: #161b22; --surface2: #1e2530; --border: #2a3140;
-  --text: #e6edf3; --muted: #7d8590; --sidebar-w: 280px;
+  --text: #e6edf3; --muted: #7d8590; --sidebar-w: 280px; --inspector-w: 320px;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; overflow: hidden; }
@@ -867,6 +1096,7 @@ a:hover { text-decoration: underline; }
 .run-badge.completed { background: rgba(0,201,167,0.15); color: var(--teal); }
 .run-badge.failed { background: rgba(255,71,87,0.15); color: var(--crimson); }
 .run-badge.running { background: rgba(255,179,71,0.15); color: var(--amber); }
+.run-badge.awaiting { background: rgba(83,82,237,0.16); color: #b8b7ff; }
 .new-chat-btn { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 12px 8px 4px; padding: 10px; background: rgba(0,201,167,0.1); border: 1px solid rgba(0,201,167,0.3); color: var(--teal); border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s; }
 .new-chat-btn:hover { background: rgba(0,201,167,0.2); }
 /* Project context panel in chat sidebar */
@@ -902,6 +1132,11 @@ a:hover { text-decoration: underline; }
 .chat-header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; background: var(--surface); }
 .chat-title { font-size: 15px; font-weight: 600; color: var(--text); }
 .chat-subtitle { font-size: 12px; color: var(--muted); }
+.chat-command-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 24px; border-bottom:1px solid var(--border); background:linear-gradient(90deg, rgba(0,201,167,0.10), rgba(16,21,28,0.98) 34%, #10151c 100%); }
+.chat-command-track { font-size:12px; color:var(--muted); flex:1; min-width:220px; }
+.chat-command-modes { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.chat-command-chip { padding:6px 10px; border-radius:999px; border:1px solid var(--border); background:rgba(255,255,255,0.03); color:var(--text); font-size:11px; font-weight:700; }
+.chat-command-chip.active { border-color: rgba(0,201,167,0.35); color: var(--teal); background: rgba(0,201,167,0.08); }
 .header-status { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
 .clear-chat-btn { display: flex; align-items: center; gap: 5px; padding: 5px 12px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; transition: all 0.15s; }
 .clear-chat-btn:hover { border-color: var(--crimson); color: var(--crimson); background: rgba(255,71,87,0.08); }
@@ -941,6 +1176,10 @@ a:hover { text-decoration: underline; }
 .avatar.user { background: rgba(83,82,237,0.2); border: 1px solid rgba(83,82,237,0.3); }
 .bubble { padding: 14px 18px; border-radius: 4px 18px 18px 18px; border: 1px solid var(--border); background: var(--surface); max-width: 680px; font-size: 14px; line-height: 1.65; }
 .bubble-meta { font-size: 11px; color: var(--muted); margin-top: 8px; }
+.run-hero { padding: 12px 14px; border-radius: 12px; border: 1px solid rgba(0,201,167,0.16); background: linear-gradient(145deg, rgba(0,201,167,0.10), rgba(83,82,237,0.06)); margin-bottom: 10px; }
+.run-hero-eyebrow { font-size: 10px; font-weight: 700; color: var(--teal); letter-spacing: 0.08em; text-transform: uppercase; }
+.run-hero-title { font-size: 14px; font-weight: 700; color: var(--text); margin-top: 5px; line-height: 1.45; }
+.run-hero-meta { font-size: 11px; color: var(--muted); margin-top: 6px; display:flex; gap:8px; flex-wrap:wrap; }
 .bubble pre { background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow-x: auto; font-size: 13px; margin: 8px 0; white-space: pre-wrap; }
 .steps-wrapper { display: flex; flex-direction: column; gap: 0; margin-top: 10px; position: relative; }
 .step-card { background: transparent; border: none; border-radius: 0; padding: 0 0 4px 28px; font-size: 12px; position: relative; }
@@ -993,9 +1232,15 @@ a:hover { text-decoration: underline; }
 .mode-pill.active { background: rgba(0,201,167,0.12); border-color: rgba(0,201,167,0.45); color: var(--teal); }
 .deep-research-panel { display:none; margin-bottom:12px; padding:14px; border:1px solid rgba(0,201,167,0.18); border-radius:12px; background:linear-gradient(180deg, rgba(0,201,167,0.06), rgba(83,82,237,0.05)); }
 .deep-research-panel.visible { display:block; }
+.deep-research-panel.collapsed .dr-body { display:none; }
 .dr-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:10px; }
 .dr-title { font-size:12px; font-weight:700; color:var(--teal); letter-spacing:.08em; text-transform:uppercase; }
 .dr-subtitle { font-size:12px; color:var(--muted); line-height:1.5; max-width:620px; }
+.dr-head-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
+.dr-summary-bar { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+.dr-summary-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.04); font-size:11px; color:var(--muted); }
+.dr-toggle-btn { border:1px solid var(--border); background:rgba(0,0,0,0.16); color:var(--text); border-radius:999px; padding:7px 12px; font-size:11px; font-weight:700; cursor:pointer; transition:all .15s; }
+.dr-toggle-btn:hover { border-color: var(--teal); color: var(--teal); }
 .dr-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:10px; }
 .dr-field { display:flex; flex-direction:column; gap:6px; }
 .dr-field label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
@@ -1025,6 +1270,56 @@ a:hover { text-decoration: underline; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 .error-banner { background: rgba(255,71,87,0.1); border: 1px solid rgba(255,71,87,0.3); color: var(--crimson); border-radius: 8px; padding: 10px 14px; font-size: 13px; display: flex; gap: 8px; align-items: flex-start; }
 .streaming-status { font-size: 11px; color: var(--amber); margin-top: 4px; font-style: italic; }
+.chat-inspector { width: var(--inspector-w); min-width: var(--inspector-w); border-left: 1px solid var(--border); background: linear-gradient(180deg, rgba(255,255,255,0.03), transparent 18%), #10151c; padding: 16px; display:flex; flex-direction:column; gap:12px; overflow-y:auto; }
+.chat-inspector-header { padding: 6px 2px 4px; }
+.chat-inspector-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.chat-inspector-sub { font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.45; }
+.chat-inspector-card { border-radius: 14px; border: 1px solid var(--border); background: var(--surface); padding: 14px; display:flex; flex-direction:column; gap:10px; }
+.chat-inspector-label { font-size: 10px; font-weight: 700; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
+.chat-inspector-title-row { font-size: 14px; font-weight: 700; color: var(--text); }
+.chat-inspector-copy { font-size: 12px; line-height: 1.55; color: var(--muted); }
+.chat-inspector-stat-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:8px; }
+.chat-inspector-stat { padding: 10px; border-radius: 10px; background: var(--surface2); border: 1px solid rgba(255,255,255,0.04); }
+.chat-inspector-stat span { display:block; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; }
+.chat-inspector-stat strong { display:block; font-size:13px; color:var(--text); margin-top:5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.chat-activity-list { display:flex; flex-direction:column; gap:8px; }
+.chat-activity-empty { font-size:12px; color:var(--muted); line-height:1.5; }
+.chat-activity-card { padding: 10px 11px; border-radius: 10px; background: var(--surface2); border: 1px solid rgba(255,255,255,0.05); }
+.chat-activity-title { font-size: 12px; font-weight: 700; color: var(--text); }
+.chat-activity-meta { font-size: 10px; color: var(--muted); margin-top: 4px; line-height: 1.45; }
+.chat-activity-detail { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.chat-activity-command { margin-top: 6px; padding: 8px 9px; border-radius: 8px; border: 1px solid var(--border); background: rgba(0,0,0,0.16); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #d7e3ff; white-space: pre-wrap; word-break: break-word; }
+.chat-activity-status { font-size: 10px; font-weight: 700; padding: 3px 7px; border-radius: 999px; }
+.chat-activity-status.running, .chat-activity-status.completed { color: var(--teal); background: rgba(0,201,167,0.12); }
+.chat-activity-status.failed { color: var(--crimson); background: rgba(255,71,87,0.12); }
+.chat-activity-status.pending, .chat-activity-status.queued, .chat-activity-status.info { color: var(--muted); background: rgba(255,255,255,0.06); }
+.chat-command-preview { min-height: 70px; padding: 10px 12px; border-radius: 10px; background: rgba(0,0,0,0.18); border: 1px solid var(--border); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #d7e3ff; white-space: pre-wrap; word-break: break-word; }
+.approval-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:2200; align-items:center; justify-content:center; padding:20px; }
+.approval-overlay.open { display:flex; }
+.approval-modal { width:min(560px, 100%); background:var(--surface); border:1px solid var(--border); border-radius:16px; box-shadow:0 24px 60px rgba(0,0,0,0.45); overflow:hidden; }
+.approval-modal-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:18px 20px 14px; border-bottom:1px solid var(--border); }
+.approval-modal-title { font-size:15px; font-weight:700; color:var(--text); }
+.approval-modal-sub { font-size:11px; color:var(--muted); margin-top:4px; }
+.approval-modal-close { background:none; border:none; color:var(--muted); font-size:20px; cursor:pointer; line-height:1; }
+.approval-modal-body { padding:18px 20px; }
+.approval-scope { display:inline-flex; align-items:center; gap:6px; padding:4px 9px; border-radius:999px; background:rgba(83,82,237,0.14); border:1px solid rgba(83,82,237,0.35); color:#b8b7ff; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; }
+.approval-prompt { margin-top:12px; font-size:13px; color:var(--text); line-height:1.6; white-space:pre-wrap; }
+.approval-help { margin-top:10px; font-size:12px; color:var(--muted); line-height:1.5; }
+.approval-suggest-box { display:none; margin-top:14px; }
+.approval-suggest-box.open { display:block; }
+.approval-textarea { width:100%; min-height:100px; resize:vertical; background:var(--bg); border:1px solid var(--border); border-radius:12px; color:var(--text); font:inherit; padding:12px 14px; line-height:1.5; outline:none; }
+.approval-textarea:focus { border-color: var(--teal); }
+.approval-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:16px; }
+.approval-btn { border:none; border-radius:10px; padding:10px 16px; font-size:13px; font-weight:700; cursor:pointer; transition:opacity .15s, transform .15s; }
+.approval-btn:hover { opacity:.92; transform:translateY(-1px); }
+.approval-btn.accept { background:var(--teal); color:#0d0f14; }
+.approval-btn.reject { background:rgba(255,71,87,0.16); border:1px solid rgba(255,71,87,0.35); color:var(--crimson); }
+.approval-btn.suggest { background:rgba(83,82,237,0.16); border:1px solid rgba(83,82,237,0.35); color:#b8b7ff; }
+.approval-btn.submit { background:rgba(255,255,255,0.08); border:1px solid var(--border); color:var(--text); }
+@media (max-width: 1280px) {
+  :root { --inspector-w: 0px; }
+  .chat-inspector { display:none; }
+}
 </style>
 </head>
 <body class="mode-agent">
@@ -1100,6 +1395,14 @@ a:hover { text-decoration: underline; }
       <span id="gatewayStatus">Checking gateway...</span>
     </div>
   </div>
+  <div class="chat-command-bar">
+    <div class="chat-command-track" id="chatCommandTrack">Ask a question or launch a task. Kendr will show the live task, substeps, commands, and timing as the run progresses.</div>
+    <div class="chat-command-modes">
+      <div class="chat-command-chip active" id="chatModeChip">Chat</div>
+      <div class="chat-command-chip" id="chatResearchChip">Auto</div>
+      <div class="chat-command-chip" id="chatShellChip">Shell Off</div>
+    </div>
+  </div>
   <div class="messages" id="messages">
     <div class="welcome" id="welcome">
       <div class="welcome-logo">&#x26A1;</div>
@@ -1126,11 +1429,16 @@ a:hover { text-decoration: underline; }
           <div class="dr-title">Deep Research Mode</div>
           <div class="dr-subtitle">Tiered research flow with planning, sectioned writing, citations, plagiarism reporting, and multi-format exports.</div>
         </div>
+        <div class="dr-head-actions">
+          <div class="dr-summary-bar" id="deepResearchSummaryBar"></div>
+          <button type="button" class="dr-toggle-btn" id="deepResearchToggleBtn" onclick="toggleDeepResearchPanel()">Collapse</button>
+        </div>
       </div>
+      <div class="dr-body" id="deepResearchPanelBody">
       <div class="dr-grid">
         <div class="dr-field">
           <label for="drPages">Page Target</label>
-          <select id="drPages" class="dr-select">
+          <select id="drPages" class="dr-select" onchange="updateDeepResearchPanelSummary()">
             <option value="10">10 pages</option>
             <option value="25">25 pages</option>
             <option value="50" selected>50 pages</option>
@@ -1141,7 +1449,7 @@ a:hover { text-decoration: underline; }
         </div>
         <div class="dr-field">
           <label for="drCitation">Citation Style</label>
-          <select id="drCitation" class="dr-select">
+          <select id="drCitation" class="dr-select" onchange="updateDeepResearchPanelSummary()">
             <option value="apa" selected>APA</option>
             <option value="mla">MLA</option>
             <option value="chicago">Chicago</option>
@@ -1152,7 +1460,7 @@ a:hover { text-decoration: underline; }
         </div>
         <div class="dr-field">
           <label for="drDateRange">Date Range</label>
-          <select id="drDateRange" class="dr-select">
+          <select id="drDateRange" class="dr-select" onchange="updateDeepResearchPanelSummary()">
             <option value="all_time" selected>All time</option>
             <option value="1y">Last year</option>
             <option value="2y">Last 2 years</option>
@@ -1161,36 +1469,36 @@ a:hover { text-decoration: underline; }
         </div>
         <div class="dr-field">
           <label for="drMaxSources">Max Sources</label>
-          <input id="drMaxSources" class="dr-input" type="number" min="0" step="10" value="0" placeholder="0 = tier default">
+          <input id="drMaxSources" class="dr-input" type="number" min="0" step="10" value="0" placeholder="0 = tier default" oninput="updateDeepResearchPanelSummary()">
         </div>
       </div>
       <div class="dr-grid" style="margin-top:10px">
         <div class="dr-field">
           <label>Output Formats</label>
           <div class="dr-checks">
-            <label class="dr-check"><input type="checkbox" value="pdf" class="dr-format" checked> PDF</label>
-            <label class="dr-check"><input type="checkbox" value="docx" class="dr-format" checked> DOCX</label>
-            <label class="dr-check"><input type="checkbox" value="html" class="dr-format" checked> HTML</label>
-            <label class="dr-check"><input type="checkbox" value="md" class="dr-format" checked> Markdown</label>
+            <label class="dr-check"><input type="checkbox" value="pdf" class="dr-format" checked onchange="updateDeepResearchPanelSummary()"> PDF</label>
+            <label class="dr-check"><input type="checkbox" value="docx" class="dr-format" checked onchange="updateDeepResearchPanelSummary()"> DOCX</label>
+            <label class="dr-check"><input type="checkbox" value="html" class="dr-format" checked onchange="updateDeepResearchPanelSummary()"> HTML</label>
+            <label class="dr-check"><input type="checkbox" value="md" class="dr-format" checked onchange="updateDeepResearchPanelSummary()"> Markdown</label>
           </div>
         </div>
         <div class="dr-field">
           <label>Source Families</label>
           <div class="dr-checks">
             <label class="dr-check"><input type="checkbox" id="drWebSearch" checked onchange="toggleDeepResearchWebSearch()"> Web Search</label>
-            <label class="dr-check"><input type="checkbox" value="web" class="dr-source dr-remote-source" checked> Web</label>
-            <label class="dr-check"><input type="checkbox" value="arxiv" class="dr-source dr-remote-source"> Academic</label>
-            <label class="dr-check"><input type="checkbox" value="patents" class="dr-source dr-remote-source"> Patents</label>
-            <label class="dr-check"><input type="checkbox" value="news" class="dr-source dr-remote-source"> News</label>
-            <label class="dr-check"><input type="checkbox" value="reddit" class="dr-source dr-remote-source"> Community</label>
+            <label class="dr-check"><input type="checkbox" value="web" class="dr-source dr-remote-source" checked onchange="updateDeepResearchPanelSummary()"> Web</label>
+            <label class="dr-check"><input type="checkbox" value="arxiv" class="dr-source dr-remote-source" onchange="updateDeepResearchPanelSummary()"> Academic</label>
+            <label class="dr-check"><input type="checkbox" value="patents" class="dr-source dr-remote-source" onchange="updateDeepResearchPanelSummary()"> Patents</label>
+            <label class="dr-check"><input type="checkbox" value="news" class="dr-source dr-remote-source" onchange="updateDeepResearchPanelSummary()"> News</label>
+            <label class="dr-check"><input type="checkbox" value="reddit" class="dr-source dr-remote-source" onchange="updateDeepResearchPanelSummary()"> Community</label>
           </div>
           <div class="dr-note" id="drWebModeNote">Web search and explicit links are enabled. Disable this to restrict the report to local files/folders only.</div>
         </div>
         <div class="dr-field">
           <label>Quality Gates</label>
           <div class="dr-checks">
-            <label class="dr-check"><input type="checkbox" id="drPlagiarism" checked> Plagiarism Check</label>
-            <label class="dr-check"><input type="checkbox" id="drCheckpoint"> Checkpointing</label>
+            <label class="dr-check"><input type="checkbox" id="drPlagiarism" checked onchange="updateDeepResearchPanelSummary()"> Plagiarism Check</label>
+            <label class="dr-check"><input type="checkbox" id="drCheckpoint" onchange="updateDeepResearchPanelSummary()"> Checkpointing</label>
           </div>
         </div>
       </div>
@@ -1227,13 +1535,72 @@ a:hover { text-decoration: underline; }
           <div id="drSourceSummary" class="dr-chip-list"></div>
         </div>
       </div>
+      </div>
     </div>
     <div class="input-row">
       <textarea class="input-box" id="userInput" placeholder="Ask kendr anything &#x2014; research, code, deploy, analyze..." rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
       <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send (Enter)">&#x27A4;</button>
     </div>
-    <div class="input-hint">Enter to send &#xB7; Shift+Enter for new line &#xB7; Gateway auto-starts if not running</div>
+    <div class="input-hint">Enter to send &#xB7; Shift+Enter for new line &#xB7; Start gateway if offline: <code>kendr gateway start</code></div>
     <div class="shell-mode-banner" id="shellModeBanner">&#x26A0;&#xFE0F; Shell Automation is ON &#x2014; agents may install tools and run commands on this machine</div>
+  </div>
+</div>
+<aside class="chat-inspector">
+  <div class="chat-inspector-header">
+    <div class="chat-inspector-title">Execution Lens</div>
+    <div class="chat-inspector-sub">Codex-style visibility for normal chat runs: current task, recent activity, latest command, and runtime status without leaving the conversation.</div>
+  </div>
+  <div class="chat-inspector-card">
+    <div class="chat-inspector-label">Run Pulse</div>
+    <div class="chat-inspector-title-row" id="chatInspectorRunTitle">No active run</div>
+    <div class="chat-inspector-copy" id="chatInspectorRunSubtitle">Start a run to see live execution state, timing, and command activity.</div>
+    <div class="chat-inspector-stat-grid">
+      <div class="chat-inspector-stat"><span>Status</span><strong id="chatInspectorStatus">Idle</strong></div>
+      <div class="chat-inspector-stat"><span>Mode</span><strong id="chatInspectorMode">Auto</strong></div>
+      <div class="chat-inspector-stat"><span>Run</span><strong id="chatInspectorRunId">-</strong></div>
+      <div class="chat-inspector-stat"><span>Gateway</span><strong id="chatInspectorGateway">Offline</strong></div>
+    </div>
+  </div>
+  <div class="chat-inspector-card">
+    <div class="chat-inspector-label">Active Task</div>
+    <div class="chat-inspector-title-row" id="chatInspectorTask">No active task</div>
+    <div class="chat-inspector-copy" id="chatInspectorTaskMeta">The current run objective, plan summary, and elapsed timing will appear here.</div>
+  </div>
+  <div class="chat-inspector-card">
+    <div class="chat-inspector-label">Latest Command</div>
+    <div class="chat-inspector-copy" id="chatInspectorCommandMeta">No shell command has executed in this chat yet.</div>
+    <div class="chat-command-preview" id="chatInspectorCommand">No command activity yet.</div>
+  </div>
+  <div class="chat-inspector-card">
+    <div class="chat-inspector-label">Recent Activity</div>
+    <div class="chat-activity-list" id="chatInspectorActivityList">
+      <div class="chat-activity-empty">Runs, task steps, command executions, and failures will appear here with timestamps and durations.</div>
+    </div>
+  </div>
+</aside>
+<div class="approval-overlay" id="chatApprovalModal">
+  <div class="approval-modal">
+    <div class="approval-modal-head">
+      <div>
+        <div class="approval-modal-title">Awaiting Approval</div>
+        <div class="approval-modal-sub">Review the pending request, then accept, reject, or send guidance.</div>
+      </div>
+      <button class="approval-modal-close" type="button" onclick="_closeChatApprovalModal()">&times;</button>
+    </div>
+    <div class="approval-modal-body">
+      <div class="approval-scope" id="chatApprovalScope">Approval</div>
+      <div class="approval-prompt" id="chatApprovalPrompt">This run is waiting for your response.</div>
+      <div class="approval-help" id="chatApprovalHelp">Accept continues immediately. Reject asks the runtime to revise instead of continuing. Suggestion sends your guidance back into the paused run.</div>
+      <div class="approval-suggest-box" id="chatApprovalSuggestBox">
+        <textarea class="approval-textarea" id="chatApprovalSuggestion" placeholder="Tell Kendr what to change before continuing..."></textarea>
+      </div>
+      <div class="approval-actions">
+        <button class="approval-btn accept" type="button" onclick="_submitChatApproval('approve')">Accept</button>
+        <button class="approval-btn reject" type="button" onclick="_submitChatApproval('reject')">Reject</button>
+        <button class="approval-btn suggest" type="button" onclick="_toggleChatApprovalSuggestion()">Suggestion</button>
+        <button class="approval-btn submit" type="button" id="chatApprovalSuggestSubmit" onclick="_submitChatApproval('suggest')" style="display:none">Send Suggestion</button>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -1249,6 +1616,208 @@ let shellModeActive = false;
 let researchMode = 'auto';
 let deepResearchUploadedRoots = [];
 let deepResearchLocalPaths = [];
+let deepResearchPanelCollapsed = (localStorage.getItem('kendr_deep_research_collapsed') || '0') === '1';
+let _chatActivityFeed = [];
+let _chatPlanState = { total: 0, completed: 0, running: 0, failed: 0 };
+let _chatRunState = { runId: '', status: 'idle', title: '', task: '', startedAt: '', completedAt: '', lastCommand: '', lastCommandMeta: '' };
+let _chatAwaitingContext = null;
+
+function _chatStatusLabel(status) {
+  const normalized = String(status || 'idle').replace(/_/g, ' ').trim();
+  return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : 'Idle';
+}
+
+function _chatActivityKey(item) {
+  return [
+    item.id || '',
+    item.title || '',
+    item.status || '',
+    item.command || '',
+    item.detail || '',
+    item.started_at || item.timestamp || '',
+    item.completed_at || '',
+  ].join('|');
+}
+
+function _chatActivityTimestamp(item) {
+  return item && (item.completed_at || item.started_at || item.timestamp || '');
+}
+
+function _normalizeChatActivity(item, defaults = {}) {
+  const merged = Object.assign({}, defaults || {}, item || {});
+  if (!merged.status) merged.status = 'info';
+  if (!merged.title) merged.title = merged.kind || 'Activity';
+  if (!merged.timestamp) merged.timestamp = _chatActivityTimestamp(merged) || new Date().toISOString();
+  return merged;
+}
+
+function _chatActivitySortValue(item) {
+  const ts = _chatActivityTimestamp(item);
+  const parsed = ts ? Date.parse(ts) : NaN;
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function _chatActivityMetaParts(item) {
+  const parts = [];
+  const task = String(item.task || '').trim();
+  const subtask = String(item.subtask || '').trim();
+  const actor = String(item.actor || '').trim();
+  const started = _formatStepTimestamp(item.started_at || item.timestamp);
+  const completed = _formatStepTimestamp(item.completed_at);
+  const duration = item.duration_label || _formatStepDuration(item);
+  if (task) parts.push(task);
+  if (subtask) parts.push(subtask);
+  else if (actor) parts.push(actor);
+  if (started) parts.push(started);
+  if (completed && completed !== started) parts.push('done ' + completed);
+  if (duration) parts.push(duration);
+  if (item.exit_code !== undefined && item.exit_code !== null && item.exit_code !== '') parts.push('exit ' + item.exit_code);
+  return parts;
+}
+
+function _chatActivityStatusClass(status) {
+  const normalized = String(status || 'info').toLowerCase();
+  if (['running', 'completed', 'failed', 'pending', 'queued', 'info'].includes(normalized)) return normalized;
+  return 'info';
+}
+
+function _renderChatActivityList() {
+  const box = document.getElementById('chatInspectorActivityList');
+  if (!box) return;
+  const items = Array.isArray(_chatActivityFeed) ? _chatActivityFeed.slice(0, 7) : [];
+  if (!items.length) {
+    box.innerHTML = '<div class="chat-activity-empty">Runs, task steps, command executions, and failures will appear here with timestamps and durations.</div>';
+    return;
+  }
+  box.innerHTML = items.map(item => {
+    const meta = _chatActivityMetaParts(item).map(esc).join(' &middot; ');
+    const detail = item.detail ? '<div class="chat-activity-detail">' + esc(String(item.detail).slice(0, 220)) + '</div>' : '';
+    const command = item.command ? '<div class="chat-activity-command">' + esc(item.command) + '</div>' : '';
+    const status = _chatActivityStatusClass(item.status);
+    return `
+      <div class="chat-activity-card">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+          <div class="chat-activity-title">${esc(item.title || item.kind || 'Activity')}</div>
+          <div class="chat-activity-status ${esc(status)}">${esc(status)}</div>
+        </div>
+        ${meta ? '<div class="chat-activity-meta">' + meta + '</div>' : ''}
+        ${detail}
+        ${command}
+      </div>
+    `;
+  }).join('');
+}
+
+function _recordChatActivities(items, defaults = {}) {
+  const next = Array.isArray(items) ? items.map(item => _normalizeChatActivity(item, defaults)) : [];
+  if (!next.length) return;
+  const merged = next.concat(_chatActivityFeed || []);
+  const deduped = [];
+  const seen = new Set();
+  for (const item of merged.sort((a, b) => _chatActivitySortValue(b) - _chatActivitySortValue(a))) {
+    const key = _chatActivityKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+    if (deduped.length >= 40) break;
+  }
+  _chatActivityFeed = deduped;
+  const latestCommand = deduped.find(item => item.command);
+  if (latestCommand) {
+    _chatRunState.lastCommand = latestCommand.command || '';
+    _chatRunState.lastCommandMeta = _chatActivityMetaParts(latestCommand).join(' · ');
+  }
+  _renderChatActivityList();
+  _renderChatInspector();
+}
+
+function _recordChatActivity(item, defaults = {}) {
+  _recordChatActivities([item], defaults);
+}
+
+function _resetChatInspectorState() {
+  _chatActivityFeed = [];
+  _chatPlanState = { total: 0, completed: 0, running: 0, failed: 0 };
+  _chatRunState = { runId: '', status: 'idle', title: '', task: '', startedAt: '', completedAt: '', lastCommand: '', lastCommandMeta: '' };
+  _renderChatActivityList();
+  _renderChatInspector();
+}
+
+function _renderChatInspector() {
+  const runTitle = document.getElementById('chatInspectorRunTitle');
+  const runSubtitle = document.getElementById('chatInspectorRunSubtitle');
+  const statusEl = document.getElementById('chatInspectorStatus');
+  const modeEl = document.getElementById('chatInspectorMode');
+  const runIdEl = document.getElementById('chatInspectorRunId');
+  const gatewayEl = document.getElementById('chatInspectorGateway');
+  const taskEl = document.getElementById('chatInspectorTask');
+  const taskMetaEl = document.getElementById('chatInspectorTaskMeta');
+  const cmdMetaEl = document.getElementById('chatInspectorCommandMeta');
+  const cmdEl = document.getElementById('chatInspectorCommand');
+  const trackEl = document.getElementById('chatCommandTrack');
+  const shellChip = document.getElementById('chatShellChip');
+  const modeChip = document.getElementById('chatResearchChip');
+  const chatChip = document.getElementById('chatModeChip');
+  if (runTitle) runTitle.textContent = _chatRunState.title || 'No active run';
+  if (runSubtitle) {
+    if (_chatRunState.runId) {
+      const timing = [];
+      const started = _formatStepTimestamp(_chatRunState.startedAt);
+      const completed = _formatStepTimestamp(_chatRunState.completedAt);
+      if (started) timing.push('Started ' + started);
+      if (completed && completed !== started) timing.push('Finished ' + completed);
+      runSubtitle.textContent = timing.join(' · ') || 'Live execution details for this run.';
+    } else {
+      runSubtitle.textContent = 'Start a run to see live execution state, timing, and command activity.';
+    }
+  }
+  if (statusEl) statusEl.textContent = _chatStatusLabel(_chatRunState.status);
+  if (modeEl) modeEl.textContent = researchMode === 'deep_research' ? 'Deep Research' : 'Auto';
+  if (runIdEl) runIdEl.textContent = _chatRunState.runId || '-';
+  if (gatewayEl) gatewayEl.textContent = gatewayOnline ? 'Online' : 'Offline';
+  if (taskEl) taskEl.textContent = _chatRunState.task || 'No active task';
+  if (taskMetaEl) {
+    const parts = [];
+    if (_chatPlanState.total) parts.push(_chatPlanState.completed + '/' + _chatPlanState.total + ' steps complete');
+    if (_chatPlanState.running) parts.push(_chatPlanState.running + ' running');
+    if (_chatPlanState.failed) parts.push(_chatPlanState.failed + ' failed');
+    if (_chatRunState.startedAt && !_chatRunState.completedAt && _chatRunState.status === 'running') {
+      const elapsed = _formatStepDuration({ started_at: _chatRunState.startedAt });
+      if (elapsed) parts.push('elapsed ' + elapsed);
+    }
+    taskMetaEl.textContent = parts.join(' · ') || 'The current run objective, plan summary, and elapsed timing will appear here.';
+  }
+  if (cmdMetaEl) cmdMetaEl.textContent = _chatRunState.lastCommandMeta || 'No shell command has executed in this chat yet.';
+  if (cmdEl) cmdEl.textContent = _chatRunState.lastCommand || 'No command activity yet.';
+  if (trackEl) {
+    trackEl.textContent = _chatRunState.task
+      ? _chatRunState.task
+      : 'Ask a question or launch a task. Kendr will show the live task, substeps, commands, and timing as the run progresses.';
+  }
+  if (shellChip) {
+    shellChip.textContent = shellModeActive ? 'Shell On' : 'Shell Off';
+    shellChip.classList.toggle('active', shellModeActive);
+  }
+  if (modeChip) {
+    modeChip.textContent = researchMode === 'deep_research' ? 'Deep Research' : 'Auto';
+    modeChip.classList.toggle('active', researchMode === 'deep_research');
+  }
+  if (chatChip) chatChip.classList.add('active');
+  if (_chatRunState.runId) {
+    const heroTitle = document.getElementById('run-hero-title-' + _chatRunState.runId);
+    const heroMeta = document.getElementById('run-hero-meta-' + _chatRunState.runId);
+    if (heroTitle && _chatRunState.task) heroTitle.textContent = _chatRunState.task;
+    if (heroMeta) {
+      const parts = ['Run ' + _chatRunState.runId, _chatStatusLabel(_chatRunState.status)];
+      if (_chatRunState.startedAt) parts.push(_formatStepTimestamp(_chatRunState.startedAt));
+      if (_chatRunState.startedAt && !_chatRunState.completedAt && _chatRunState.status === 'running') {
+        const elapsed = _formatStepDuration({ started_at: _chatRunState.startedAt });
+        if (elapsed) parts.push('elapsed ' + elapsed);
+      }
+      heroMeta.innerHTML = parts.map(part => '<span>' + esc(part) + '</span>').join('');
+    }
+  }
+}
 
 function setResearchMode(mode) {
   researchMode = mode || 'auto';
@@ -1258,6 +1827,7 @@ function setResearchMode(mode) {
   if (autoBtn) autoBtn.classList.toggle('active', researchMode === 'auto');
   if (drBtn) drBtn.classList.toggle('active', researchMode === 'deep_research');
   if (panel) panel.classList.toggle('visible', researchMode === 'deep_research');
+  updateDeepResearchPanelSummary();
   const input = document.getElementById('userInput');
   if (!input) return;
   input.placeholder = researchMode === 'deep_research'
@@ -1267,6 +1837,47 @@ function setResearchMode(mode) {
     toggleDeepResearchWebSearch();
     renderDeepResearchSourceSummary();
   }
+  _renderChatInspector();
+}
+
+function _deepResearchSummaryPill(label, value) {
+  return '<span class="dr-summary-pill"><strong style="color:var(--text)">' + esc(label) + '</strong><span>' + esc(value) + '</span></span>';
+}
+
+function updateDeepResearchPanelSummary() {
+  const panel = document.getElementById('deepResearchPanel');
+  const body = document.getElementById('deepResearchPanelBody');
+  const summary = document.getElementById('deepResearchSummaryBar');
+  const toggleBtn = document.getElementById('deepResearchToggleBtn');
+  if (panel) {
+    panel.classList.toggle('visible', researchMode === 'deep_research');
+    panel.classList.toggle('collapsed', !!deepResearchPanelCollapsed);
+  }
+  if (body) body.style.display = deepResearchPanelCollapsed ? 'none' : '';
+  if (toggleBtn) toggleBtn.textContent = deepResearchPanelCollapsed ? 'Expand' : 'Collapse';
+  if (!summary) return;
+  const pages = ((document.getElementById('drPages') || {}).value || '50') + ' pages';
+  const citation = ((document.getElementById('drCitation') || {}).value || 'apa').toUpperCase();
+  const maxSources = parseInt((document.getElementById('drMaxSources') || {}).value || '0', 10) || 0;
+  const formatCount = _selectedDeepResearchFormats().length;
+  const webEnabled = !!((document.getElementById('drWebSearch') || {}).checked);
+  const localCount = _allDeepResearchLocalPaths().length;
+  const linkCount = _deepResearchLinks().length;
+  const sourceSummary = (webEnabled ? 'Web on' : 'Local only') + ' · ' + (localCount + linkCount) + ' attached';
+  const maxSummary = maxSources > 0 ? String(maxSources) : 'tier default';
+  summary.innerHTML = [
+    _deepResearchSummaryPill('Scope', pages),
+    _deepResearchSummaryPill('Citation', citation),
+    _deepResearchSummaryPill('Sources', sourceSummary),
+    _deepResearchSummaryPill('Formats', formatCount + ' selected'),
+    _deepResearchSummaryPill('Cap', maxSummary),
+  ].join('');
+}
+
+function toggleDeepResearchPanel() {
+  deepResearchPanelCollapsed = !deepResearchPanelCollapsed;
+  localStorage.setItem('kendr_deep_research_collapsed', deepResearchPanelCollapsed ? '1' : '0');
+  updateDeepResearchPanelSummary();
 }
 
 function _selectedDeepResearchFormats() {
@@ -1304,6 +1915,7 @@ function toggleDeepResearchWebSearch() {
       : 'Web search is disabled. This report will use only attached local files/folders and added local paths.';
   }
   renderDeepResearchSourceSummary();
+  updateDeepResearchPanelSummary();
 }
 
 function addDeepResearchLocalPath() {
@@ -1314,12 +1926,14 @@ function addDeepResearchLocalPath() {
   deepResearchLocalPaths = Array.from(new Set(deepResearchLocalPaths));
   if (input) input.value = '';
   renderDeepResearchSourceSummary();
+  updateDeepResearchPanelSummary();
 }
 
 function removeDeepResearchLocalPath(value) {
   deepResearchLocalPaths = deepResearchLocalPaths.filter(item => item !== value);
   deepResearchUploadedRoots = deepResearchUploadedRoots.filter(item => item !== value);
   renderDeepResearchSourceSummary();
+  updateDeepResearchPanelSummary();
 }
 
 async function handleDeepResearchUpload(kind) {
@@ -1345,6 +1959,7 @@ async function handleDeepResearchUpload(kind) {
       deepResearchUploadedRoots = Array.from(new Set(deepResearchUploadedRoots));
     }
     renderDeepResearchSourceSummary();
+    updateDeepResearchPanelSummary();
   } catch (err) {
     alert('Upload failed: ' + String(err));
   } finally {
@@ -1368,6 +1983,7 @@ function renderDeepResearchSourceSummary() {
     chips.push('<span class="dr-note">No local files, folders, paths, or explicit links attached yet.</span>');
   }
   el.innerHTML = chips.join('');
+  updateDeepResearchPanelSummary();
 }
 
 function sendQuickReply(text) {
@@ -1391,6 +2007,7 @@ function toggleShellMode() {
     btn.title = 'Enable shell automation \u2014 lets agents install tools, run commands, and execute multi-step workflows';
     if (banner) banner.classList.remove('visible');
   }
+  _renderChatInspector();
 }
 
 function _renderTerminalBlock(text) {
@@ -1587,6 +2204,75 @@ function _newChatSessionId() {
 let chatSessionId = sessionStorage.getItem('kendr_chat_session_id') || _newChatSessionId();
 sessionStorage.setItem('kendr_chat_session_id', chatSessionId);
 
+function _approvalScopeLabel(scope, pendingKind) {
+  const normalizedScope = String(scope || '').trim();
+  if (normalizedScope === 'project_blueprint') return 'Blueprint Approval';
+  if (normalizedScope === 'root_plan') return 'Plan Approval';
+  if (normalizedScope === 'long_document_plan') return 'Research Plan';
+  if (normalizedScope === 'deep_research_confirmation') return 'Research Confirmation';
+  if (normalizedScope === 'drive_data_sufficiency') return 'Data Sufficiency';
+  if (String(pendingKind || '').trim() === 'clarification') return 'Clarification';
+  return 'Approval';
+}
+
+function _openChatApprovalModal(meta) {
+  const modal = document.getElementById('chatApprovalModal');
+  if (!modal) return;
+  _chatAwaitingContext = Object.assign({}, _chatAwaitingContext || {}, meta || {});
+  document.getElementById('chatApprovalScope').textContent = _approvalScopeLabel(_chatAwaitingContext.scope, _chatAwaitingContext.pendingKind);
+  document.getElementById('chatApprovalPrompt').textContent = _chatAwaitingContext.prompt || 'This run is waiting for your response.';
+  document.getElementById('chatApprovalSuggestion').value = '';
+  document.getElementById('chatApprovalSuggestBox').classList.remove('open');
+  document.getElementById('chatApprovalSuggestSubmit').style.display = 'none';
+  modal.classList.add('open');
+}
+
+function _closeChatApprovalModal() {
+  const modal = document.getElementById('chatApprovalModal');
+  if (modal) modal.classList.remove('open');
+}
+
+function _toggleChatApprovalSuggestion() {
+  const box = document.getElementById('chatApprovalSuggestBox');
+  const submit = document.getElementById('chatApprovalSuggestSubmit');
+  if (!box || !submit) return;
+  const opening = !box.classList.contains('open');
+  box.classList.toggle('open', opening);
+  submit.style.display = opening ? '' : 'none';
+  if (opening) {
+    const input = document.getElementById('chatApprovalSuggestion');
+    if (input) input.focus();
+  }
+}
+
+function _setChatAwaitingContext(meta) {
+  _chatAwaitingContext = Object.assign({
+    runId: currentRunId || '',
+    workingDir: workingDir || _pendingResumeDir || '',
+    prompt: '',
+    pendingKind: '',
+    scope: '',
+  }, meta || {});
+  isAwaitingInput = true;
+  _showAwaitingBanner();
+  _openChatApprovalModal(_chatAwaitingContext);
+}
+
+function _submitChatApproval(action) {
+  if (!_chatAwaitingContext || isRunning) return;
+  let reply = '';
+  if (action === 'approve') reply = 'approve';
+  else if (action === 'reject') reply = 'no, reject this and revise it';
+  else {
+    reply = (document.getElementById('chatApprovalSuggestion') || {}).value || '';
+    reply = String(reply).trim();
+    if (!reply) return;
+  }
+  _pendingResumeDir = _chatAwaitingContext.workingDir || workingDir || null;
+  _closeChatApprovalModal();
+  sendQuickReply(reply);
+}
+
 function _showAwaitingBanner() {
   if (document.getElementById('awaiting-input-banner')) return;
   const msgs = document.getElementById('messages');
@@ -1594,7 +2280,7 @@ function _showAwaitingBanner() {
   const banner = document.createElement('div');
   banner.id = 'awaiting-input-banner';
   banner.style.cssText = 'margin:8px 0 4px 52px;padding:10px 14px;background:rgba(83,82,237,0.1);border:1px solid rgba(83,82,237,0.3);border-radius:8px;font-size:13px;color:var(--text)';
-  banner.innerHTML = '<span style="color:#8b8af0;font-weight:600">&#x23F3; Awaiting your input</span> &mdash; type your response below to continue this run.';
+  banner.innerHTML = '<span style="color:#8b8af0;font-weight:600">&#x23F3; Awaiting your input</span> &mdash; review the approval request or type your response below to continue this run.';
   msgs.appendChild(banner);
   scrollDown();
   const inp = document.getElementById('userInput');
@@ -1629,6 +2315,7 @@ async function checkGateway() {
     document.getElementById('gatewayDot').classList.remove('online');
     document.getElementById('gatewayStatus').textContent = 'UI server error';
   }
+  _renderChatInspector();
 }
 
 function _relTime(iso) {
@@ -1639,6 +2326,23 @@ function _relTime(iso) {
   if (diff < 3600) return Math.floor(diff/60) + 'm ago';
   if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
   return Math.floor(diff/86400) + 'd ago';
+}
+
+async function _hydrateChatInspectorRunData(runId) {
+  try {
+    const r = await fetch('/api/task-sessions/by-run/' + encodeURIComponent(runId));
+    if (!r.ok) return;
+    const session = await r.json();
+    const summary = _taskSessionSummary(session);
+    const events = Array.isArray(summary.execution_trace) ? summary.execution_trace : [];
+    if (events.length) {
+      _recordChatActivities(events, { run_id: runId, task: summary.active_task || summary.objective || '' });
+    }
+    if (summary.active_task || summary.objective) {
+      _chatRunState.task = summary.active_task || summary.objective || '';
+    }
+    _renderChatInspector();
+  } catch(_) {}
 }
 
 async function loadRuns() {
@@ -1657,20 +2361,31 @@ async function loadRuns() {
       list.innerHTML = '<div style="padding:12px 10px;font-size:12px;color:var(--muted)">No chat history yet.</div>';
       return;
     }
+    chatRuns.sort((a, b) => {
+      const rankDelta = _runStatusRank(b.status) - _runStatusRank(a.status);
+      if (rankDelta) return rankDelta;
+      const aTs = new Date(a.updated_at || a.started_at || a.created_at || 0).getTime();
+      const bTs = new Date(b.updated_at || b.started_at || b.created_at || 0).getTime();
+      return bTs - aTs;
+    });
     chatRuns.slice(0, 30).forEach(run => {
       const div = document.createElement('div');
       const status = (run.status || 'completed').toLowerCase();
       const isActive = run.run_id === currentRunId;
       const isRunning = status === 'running' || status === 'started';
+      const isAwaiting = status === 'awaiting_user_input';
       div.className = 'run-item' + (isActive ? ' active' : '');
       const rawText = run.user_query || run.query || run.text || '';
       const title = rawText.trim().split('\n')[0].substring(0, 70) || 'Untitled run';
       const ts = _relTime(run.started_at || run.updated_at || run.created_at);
-      const statusColor = isRunning ? 'var(--teal)' : status === 'failed' ? '#ef4444' : '#6b7280';
+      const statusColor = isAwaiting ? '#b8b7ff' : isRunning ? 'var(--amber)' : status === 'failed' ? '#ef4444' : status === 'completed' ? 'var(--teal)' : '#6b7280';
       const statusDot = isRunning
         ? '<span class="spinner" style="width:10px;height:10px;display:inline-block;flex-shrink:0"></span>'
+        : isAwaiting
+          ? '<span style="width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0;background:#b8b7ff;box-shadow:0 0 0 3px rgba(83,82,237,0.16)"></span>'
         : '<span style="width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0;background:' + statusColor + '"></span>';
-      const statusLabel = isRunning ? 'running' : status;
+      const statusLabel = isRunning ? 'Running' : isAwaiting ? 'Waiting' : status === 'completed' ? 'Completed' : status === 'failed' ? 'Failed' : status;
+      const badgeClass = isRunning ? 'running' : isAwaiting ? 'awaiting' : status === 'failed' ? 'failed' : 'completed';
       const wdLabel = run.working_directory ? '<span style="color:var(--muted);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px" title="' + esc(run.working_directory) + '">&#x1F4C1; ' + esc(run.working_directory.split('/').pop()) + '</span>' : '';
       const delBtn = document.createElement('button');
       delBtn.title = 'Delete this run';
@@ -1683,9 +2398,9 @@ async function loadRuns() {
       div.innerHTML =
         '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">'
         + statusDot
-        + '<div class="run-item-title" style="flex:1;font-size:12px;font-weight:' + (isRunning ? '600' : '500') + ';color:' + (isRunning ? 'var(--teal)' : '#ccc') + '">' + esc(title) + '</div></div>'
+        + '<div class="run-item-title" style="flex:1;font-size:12px;font-weight:' + ((isRunning || isAwaiting) ? '600' : '500') + ';color:' + ((isRunning || isAwaiting) ? statusColor : '#ccc') + '">' + esc(title) + '</div></div>'
         + '<div class="run-item-meta" style="display:flex;justify-content:space-between;align-items:center">'
-        + '<span style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em">' + statusLabel + '</span>'
+        + '<span class="run-badge ' + badgeClass + '">' + esc(statusLabel) + '</span>'
         + '<span style="font-size:10px;color:var(--muted)">' + ts + '</span>'
         + '</div>'
         + (wdLabel ? '<div style="margin-top:2px">' + wdLabel + '</div>' : '');
@@ -1706,6 +2421,13 @@ function continueRun(runId, workingDir) {
   const b = document.getElementById('awaiting-input-banner');
   if (b) b.remove();
   _showAwaitingBanner();
+  _openChatApprovalModal({
+    runId: runId || currentRunId || '',
+    workingDir: workingDir || _pendingResumeDir || workingDir || '',
+    prompt: (_chatAwaitingContext && _chatAwaitingContext.prompt) || 'This run is waiting for your approval or feedback.',
+    pendingKind: (_chatAwaitingContext && _chatAwaitingContext.pendingKind) || '',
+    scope: (_chatAwaitingContext && _chatAwaitingContext.scope) || '',
+  });
   document.getElementById('userInput').focus();
 }
 
@@ -1715,6 +2437,8 @@ async function loadRun(runId) {
   isRunning = false;
   isAwaitingInput = false;
   _pendingResumeDir = null;
+  _chatAwaitingContext = null;
+  _closeChatApprovalModal();
   _removeAwaitingBanner();
   document.getElementById('sendBtn').disabled = false;
   currentRunId = runId;
@@ -1734,6 +2458,20 @@ async function loadRun(runId) {
     const lastAgent = d.last_agent || '';
     const createdAt = d.created_at ? new Date(d.created_at).toLocaleString() : '';
     const completedAt = d.completed_at ? new Date(d.completed_at).toLocaleString() : '';
+    _chatRunState = {
+      runId,
+      status,
+      title: query ? (query.substring(0, 80) + (query.length > 80 ? '…' : '')) : 'Loaded run',
+      task: query || '',
+      startedAt: d.created_at || d.started_at || '',
+      completedAt: d.completed_at || '',
+      lastCommand: '',
+      lastCommandMeta: '',
+    };
+    _chatPlanState = { total: 0, completed: 0, running: 0, failed: 0 };
+    _chatActivityFeed = [];
+    _renderChatActivityList();
+    _renderChatInspector();
 
     clearMessages();
     if (query) {
@@ -1767,6 +2505,13 @@ async function loadRun(runId) {
       banner.innerHTML = '<span><span style="color:#8b8af0;font-weight:600">&#x23F3; Awaiting your input</span> &mdash; this run is paused and waiting for a response.</span>' +
         '<button onclick="continueRun(' + JSON.stringify(runId) + ',' + JSON.stringify(runWorkDir) + ')" style="padding:5px 12px;border-radius:6px;border:1px solid rgba(83,82,237,0.5);background:rgba(83,82,237,0.15);color:#8b8af0;font-size:12px;font-weight:600;cursor:pointer">&#x25B6; Continue This Run</button>';
       msgs.appendChild(banner);
+      _chatAwaitingContext = {
+        runId,
+        workingDir: runWorkDir,
+        prompt: output || 'This run is waiting for your approval or feedback.',
+        pendingKind: ((d.task_session || {}).pending_user_input_kind || ''),
+        scope: ((d.task_session || {}).approval_pending_scope || ''),
+      };
     }
 
     try {
@@ -1789,8 +2534,12 @@ async function loadRun(runId) {
     } catch(_) {}
 
     scrollDown();
+    await _hydrateChatInspectorRunData(runId);
   } catch(e) {
     msgs.innerHTML = '<div style="color:var(--crimson);font-size:13px;padding:20px">Failed to load run: ' + esc(String(e)) + '</div>';
+    _chatRunState.status = 'failed';
+    _chatRunState.task = 'Failed to load run';
+    _recordChatActivity({ title: 'Run load failed', status: 'failed', detail: String(e), completed_at: new Date().toISOString(), task: 'Load run history' });
   }
 }
 
@@ -1811,6 +2560,9 @@ function newChat() {
   isRunning = false;
   document.getElementById('sendBtn').disabled = false;
   _removeAwaitingBanner();
+  _closeChatApprovalModal();
+  _chatAwaitingContext = null;
+  _resetChatInspectorState();
   clearMessages();
   document.getElementById('chatTitle').textContent = 'New Chat';
   document.getElementById('clearChatBtn').style.display = 'none';
@@ -1833,6 +2585,9 @@ async function deleteChat() {
   document.getElementById('sendBtn').disabled = false;
   currentRunId = null;
   _removeAwaitingBanner();
+  _closeChatApprovalModal();
+  _chatAwaitingContext = null;
+  _resetChatInspectorState();
   clearMessages();
   document.getElementById('chatTitle').textContent = 'New Chat';
   document.getElementById('clearChatBtn').style.display = 'none';
@@ -1870,6 +2625,9 @@ async function deleteRun(runId, itemEl) {
     if (d.ok) {
       if (currentRunId === runId) {
         currentRunId = null;
+        _chatAwaitingContext = null;
+        _closeChatApprovalModal();
+        _resetChatInspectorState();
         clearMessages();
         document.getElementById('chatTitle').textContent = 'New Chat';
         document.getElementById('clearChatBtn').style.display = 'none';
@@ -1889,6 +2647,7 @@ async function deleteRun(runId, itemEl) {
 function clearMessages() {
   const msgs = document.getElementById('messages');
   msgs.innerHTML = '<div class="welcome" id="welcome"><div class="welcome-logo">&#x26A1;</div><h2>What would you like to research or build?</h2><p>Kendr orchestrates specialized AI agents to research, generate code, deploy applications, analyze data, and automate complex workflows &#x2014; all from a single query.</p><div class="suggestions"><div class="suggest-chip" onclick="fillInput(\'Create a competitive intelligence brief on Stripe\')">&#x1F4CA; Stripe competitive brief</div><div class="suggest-chip" onclick="fillInput(\'Build a FastAPI REST API with JWT authentication and PostgreSQL\')">&#x1F3D7;&#xFE0F; FastAPI + JWT + PostgreSQL</div><div class="suggest-chip" onclick="fillInput(\'Write API tests for https://jsonplaceholder.typicode.com\')">&#x1F9EA; API test generation</div><div class="suggest-chip" onclick="fillInput(\'Summarize my unread emails and Slack messages from today\')">&#x1F4EC; Communications digest</div><div class="suggest-chip" onclick="fillInput(\'Dockerize a Node.js app and write a docker-compose.yml\')">&#x1F433; Dockerize + compose</div><div class="suggest-chip" onclick="fillInput(\'Deploy a React app to AWS S3 and CloudFront\')">&#x2601;&#xFE0F; Deploy to AWS</div></div></div>';
+  _renderChatInspector();
 }
 
 function fillInput(text) {
@@ -2000,7 +2759,7 @@ function formatOutput(text) {
   return h;
 }
 
-function createStreamingRow(runId) {
+function createStreamingRow(runId, taskText = '') {
   const w = document.getElementById('welcome');
   if (w) w.remove();
   const msgs = document.getElementById('messages');
@@ -2008,6 +2767,11 @@ function createStreamingRow(runId) {
   row.className = 'message-row kendr';
   row.id = 'stream-row-' + runId;
   row.innerHTML = '<div class="avatar kendr">&#x26A1;</div><div class="bubble" id="stream-bubble-' + runId + '">'
+    + '<div class="run-hero" id="run-hero-' + runId + '">'
+    + '<div class="run-hero-eyebrow">Task</div>'
+    + '<div class="run-hero-title" id="run-hero-title-' + runId + '">' + esc(taskText || 'Preparing task…') + '</div>'
+    + '<div class="run-hero-meta" id="run-hero-meta-' + runId + '"><span>' + esc(runId) + '</span><span>' + esc(_formatStepTimestamp(new Date().toISOString()) || 'starting') + '</span></div>'
+    + '</div>'
     + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
     + '<span class="spinner" style="width:14px;height:14px;flex-shrink:0"></span>'
     + '<div class="streaming-status" id="stream-status-' + runId + '" style="font-size:12px;color:var(--teal);font-weight:600">Starting agents\u2026</div>'
@@ -2022,10 +2786,50 @@ function createStreamingRow(runId) {
 function updateStreamStatus(runId, msg) {
   const el = document.getElementById('stream-status-' + runId);
   if (el) el.textContent = msg;
+  const meta = document.getElementById('run-hero-meta-' + runId);
+  if (meta) {
+    const parts = ['Run ' + runId];
+    if (msg) parts.push(msg);
+    if (_chatRunState.startedAt && !_chatRunState.completedAt && _chatRunState.status === 'running') {
+      const elapsed = _formatStepDuration({ started_at: _chatRunState.startedAt });
+      if (elapsed) parts.push('elapsed ' + elapsed);
+    }
+    meta.innerHTML = parts.map(part => '<span>' + esc(part) + '</span>').join('');
+  }
 }
 
 function _agentDisplayName(agentName) {
   return agentName.replace(/_agent$/, '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function _formatStepTimestamp(value) {
+  if (!value) return '';
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return '';
+  return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function _formatStepDuration(step) {
+  if (!step || typeof step !== 'object') return '';
+  const direct = Number(step.duration_ms || 0);
+  let ms = Number.isFinite(direct) && direct > 0 ? direct : 0;
+  if (!ms && step.started_at) {
+    const started = new Date(step.started_at);
+    const ended = step.completed_at ? new Date(step.completed_at) : new Date();
+    if (!Number.isNaN(started.getTime()) && !Number.isNaN(ended.getTime())) {
+      ms = Math.max(0, ended.getTime() - started.getTime());
+    }
+  }
+  if (!ms) return '';
+  if (ms < 1000) return ms + ' ms';
+  const seconds = ms / 1000;
+  if (seconds < 10) return seconds.toFixed(1) + 's';
+  if (seconds < 60) return Math.round(seconds) + 's';
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.round(seconds % 60);
+  if (minutes < 60) return minutes + 'm ' + remainder + 's';
+  const hours = Math.floor(minutes / 60);
+  return hours + 'h ' + (minutes % 60) + 'm';
 }
 
 function addStreamStep(runId, step) {
@@ -2062,6 +2866,10 @@ function addStreamStep(runId, step) {
 
   const reason = step.reason || '';
   const message = step.message || '';
+  const startedAt = _formatStepTimestamp(step.started_at);
+  const completedAt = _formatStepTimestamp(step.completed_at);
+  const durationLabel = step.duration_label || _formatStepDuration(step);
+  const failureReason = step.failure_reason || (isFailed ? (message || reason || '') : '');
 
   let reasonHtml = '';
   if (reason) {
@@ -2090,6 +2898,17 @@ function addStreamStep(runId, step) {
       + 'Thinking<span>.</span><span>.</span><span>.</span></div>';
   }
 
+  const metaParts = [];
+  if (startedAt) metaParts.push('Started ' + esc(startedAt));
+  if (completedAt && !isRunning) metaParts.push('Finished ' + esc(completedAt));
+  if (durationLabel) metaParts.push('Elapsed ' + esc(durationLabel));
+  const metaHtml = metaParts.length
+    ? '<div style="margin-top:6px;font-size:10px;color:var(--muted)">' + metaParts.join(' &middot; ') + '</div>'
+    : '';
+  const failureHtml = isFailed && failureReason
+    ? '<div style="margin-top:6px;font-size:11px;color:var(--crimson);white-space:pre-wrap;word-break:break-word"><strong>Failure:</strong> ' + esc(failureReason) + '</div>'
+    : '';
+
   div.innerHTML = '<div class="step-dot">' + dotIcon + '</div>'
     + '<div class="step-inner">'
     + '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
@@ -2099,6 +2918,8 @@ function addStreamStep(runId, step) {
     + reasonHtml
     + outputHtml
     + pulseHtml
+    + metaHtml
+    + failureHtml
     + '</div>';
   scrollDown();
 }
@@ -2280,6 +3101,26 @@ function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpI
     }
   }
   const resultEl = document.getElementById('stream-result-' + runId);
+  _chatRunState.status = error ? 'failed' : (isAwaitingInput ? 'awaiting_user_input' : 'completed');
+  _chatRunState.completedAt = new Date().toISOString();
+  if (error) {
+    _recordChatActivity({
+      title: 'Run failed',
+      status: 'failed',
+      detail: error,
+      completed_at: _chatRunState.completedAt,
+      task: _chatRunState.task || _chatRunState.title,
+    });
+  } else {
+    _recordChatActivity({
+      title: 'Run completed',
+      status: 'completed',
+      detail: output ? 'Final response generated.' : 'Run completed without final text output.',
+      completed_at: _chatRunState.completedAt,
+      task: _chatRunState.task || _chatRunState.title,
+    });
+  }
+  _renderChatInspector();
   if (resultEl) {
     if (error) {
       resultEl.innerHTML = '<div class="error-banner" style="margin-top:8px">\u26A0\uFE0F ' + esc(error) + '</div>';
@@ -2324,6 +3165,7 @@ function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpI
 }
 
 let _planPollInterval = null;
+let _activityPollInterval = null;
 
 function startPlanPolling(runId) {
   stopPlanPolling();
@@ -2334,6 +3176,16 @@ function startPlanPolling(runId) {
       if (!r.ok) return;
       const plan = await r.json();
       if (!plan.has_plan || !plan.steps || plan.steps.length === 0) return;
+      _chatPlanState = {
+        total: Number(plan.total_steps || plan.steps.length || 0),
+        completed: Number(plan.completed_steps || 0),
+        running: Number(plan.running_steps || 0),
+        failed: Number(plan.failed_steps || 0),
+      };
+      if (plan.summary || plan.scope) {
+        _chatRunState.task = [plan.scope, plan.summary].filter(Boolean).join(' — ') || _chatRunState.task;
+      }
+      _renderChatInspector();
       const panelId = 'plan-panel-' + runId;
       let panel = document.getElementById(panelId);
       if (!panel) {
@@ -2355,12 +3207,20 @@ function startPlanPolling(runId) {
         const color = statusColor[st] || 'var(--muted)';
         const title = esc(s.title || s.id || ('Step ' + (i+1)));
         const agent = esc(s.agent || '');
+        const startedAt = _formatStepTimestamp(s.started_at);
+        const completedAt = _formatStepTimestamp(s.completed_at);
+        const durationLabel = _formatStepDuration(s);
+        const metaParts = [];
+        if (startedAt) metaParts.push('Started ' + esc(startedAt));
+        if (completedAt && st !== 'running') metaParts.push('Finished ' + esc(completedAt));
+        if (durationLabel) metaParts.push('Elapsed ' + esc(durationLabel));
+        const meta = metaParts.length ? '<div style="font-size:10px;color:var(--muted);margin-top:3px">' + metaParts.join(' &middot; ') + '</div>' : '';
         const result = s.result_summary ? '<div style="font-size:11px;color:var(--muted);margin-top:2px;padding-left:4px;border-left:2px solid var(--border)">' + esc(s.result_summary.slice(0,120)) + '</div>' : '';
         const err = s.error ? '<div style="font-size:11px;color:var(--crimson);margin-top:2px">\u26A0 ' + esc(s.error.slice(0,120)) + '</div>' : '';
         return '<div style="display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">' +
           '<span style="font-size:13px;min-width:18px">' + icon + '</span>' +
           '<div style="flex:1;min-width:0"><div style="font-size:12px;color:' + color + ';font-weight:' + (st==='running'?'600':'400') + '">' + title + '</div>' +
-          '<div style="font-size:11px;color:var(--muted)">' + agent + '</div>' + result + err + '</div></div>';
+          '<div style="font-size:11px;color:var(--muted)">' + agent + '</div>' + meta + result + err + '</div></div>';
       }).join('');
       const summary = '<div style="font-size:11px;color:var(--muted);margin-top:6px">' + plan.completed_steps + '/' + plan.total_steps + ' done' + (plan.running_steps > 0 ? ' &middot; ' + plan.running_steps + ' running' : '') + (plan.failed_steps > 0 ? ' &middot; <span style=\'color:var(--crimson)\'>' + plan.failed_steps + ' failed</span>' : '') + '</div>';
       stepsEl.insertAdjacentHTML('beforeend', summary);
@@ -2372,21 +3232,160 @@ function stopPlanPolling() {
   if (_planPollInterval) { clearInterval(_planPollInterval); _planPollInterval = null; }
 }
 
+function _taskSessionSummary(session) {
+  if (!session || typeof session !== 'object') return {};
+  if (session.summary && typeof session.summary === 'object') return session.summary;
+  if (typeof session.summary_json === 'string' && session.summary_json) {
+    try { return JSON.parse(session.summary_json); } catch (_) {}
+  }
+  return {};
+}
+
+function _runStatusRank(status) {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'running' || normalized === 'started') return 4;
+  if (normalized === 'awaiting_user_input') return 3;
+  if (normalized === 'failed') return 2;
+  if (normalized === 'completed') return 1;
+  return 0;
+}
+
+function _renderTraceActivity(runId, session) {
+  const summary = _taskSessionSummary(session);
+  const events = Array.isArray(summary.execution_trace) ? summary.execution_trace : [];
+  if (!events.length) return '';
+  const activeTask = summary.active_task || summary.objective || '';
+  const rows = events.map(event => {
+    const status = String(event.status || 'info');
+    const title = event.title || event.kind || 'Activity';
+    const actor = event.actor || 'system';
+    const metadata = (event && typeof event.metadata === 'object' && event.metadata) ? event.metadata : {};
+    const startedAt = _formatStepTimestamp(event.started_at || event.timestamp);
+    const completedAt = _formatStepTimestamp(event.completed_at);
+    const durationLabel = event.duration_label || _formatStepDuration(event);
+    const command = event.command || '';
+    const cwd = event.cwd || '';
+    const detail = event.detail || '';
+    const searchQuery = metadata.search_query || '';
+    const urlList = Array.isArray(metadata.urls) ? metadata.urls.filter(Boolean) : [];
+    const failedUrlList = Array.isArray(metadata.failed_urls) ? metadata.failed_urls.filter(Boolean) : [];
+    const metaParts = [];
+    if (startedAt) metaParts.push(startedAt);
+    if (completedAt && completedAt !== startedAt) metaParts.push('done ' + completedAt);
+    if (durationLabel) metaParts.push(durationLabel);
+    if (event.exit_code !== null && event.exit_code !== undefined && event.exit_code !== '') metaParts.push('exit ' + event.exit_code);
+    const meta = metaParts.length ? '<div style="font-size:10px;color:var(--muted);margin-top:3px">' + metaParts.join(' &middot; ') + '</div>' : '';
+    const commandLabel = searchQuery ? 'query' : 'command';
+    const commandValue = command || searchQuery || '';
+    const commandHtml = commandValue
+      ? '<div style="margin-top:6px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">' + esc(commandLabel) + '</div><div style="padding:8px 10px;background:#ffffff0a;border:1px solid var(--border);border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#d7e3ff;white-space:pre-wrap;word-break:break-word">' + esc(commandValue) + '</div></div>'
+      : '';
+    const cwdHtml = cwd
+      ? '<div style="margin-top:4px;font-size:10px;color:var(--muted)">cwd: ' + esc(cwd) + '</div>'
+      : '';
+    const detailHtml = detail && detail !== commandValue
+      ? '<div style="margin-top:5px;font-size:11px;color:var(--muted);white-space:pre-wrap;word-break:break-word">' + esc(detail) + '</div>'
+      : '';
+    const urlsHtml = urlList.length
+      ? '<div style="margin-top:7px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">URLs</div>' +
+        urlList.map(url => '<div style="font-size:11px;color:#9ad7ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(url) + '</div>').join('') +
+        '</div>'
+      : '';
+    const failedUrlsHtml = failedUrlList.length
+      ? '<div style="margin-top:7px"><div style="font-size:10px;color:var(--crimson);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Failed URLs</div>' +
+        failedUrlList.map(url => '<div style="font-size:11px;color:var(--crimson);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(url) + '</div>').join('') +
+        '</div>'
+      : '';
+    const color = status === 'failed' ? 'var(--crimson)' : status === 'completed' ? 'var(--teal)' : status === 'running' ? 'var(--amber)' : 'var(--muted)';
+    const icon = status === 'failed' ? '\u2717' : status === 'completed' ? '\u2713' : status === 'running' ? '\u25CF' : '\u2022';
+    return '<div style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.05)">' +
+      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+      '<span style="font-size:12px;color:' + color + '">' + icon + '</span>' +
+      '<span style="font-size:12px;font-weight:700;color:var(--text)">' + esc(title) + '</span>' +
+      '<span style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">' + esc(actor) + '</span>' +
+      '</div>' + meta + detailHtml + commandHtml + urlsHtml + failedUrlsHtml + cwdHtml + '</div>';
+  }).join('');
+
+  let html = '<div style="font-size:11px;font-weight:700;color:var(--amber);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px">Run Activity</div>';
+  if (activeTask) {
+    html += '<div style="font-size:11px;color:var(--muted);margin-bottom:10px">Current task: <span style="color:var(--text)">' + esc(activeTask) + '</span></div>';
+  }
+  html += rows;
+  return html;
+}
+
+function startActivityPolling(runId) {
+  stopActivityPolling();
+  _activityPollInterval = setInterval(async () => {
+    try {
+      const r = await fetch('/api/task-sessions/by-run/' + encodeURIComponent(runId));
+      if (!r.ok) return;
+      const session = await r.json();
+      const summary = _taskSessionSummary(session);
+      const events = Array.isArray(summary.execution_trace) ? summary.execution_trace : [];
+      if (!events.length) return;
+      if (summary.active_task || summary.objective) _chatRunState.task = summary.active_task || summary.objective || _chatRunState.task;
+      _recordChatActivities(events, { run_id: runId, task: summary.active_task || summary.objective || '' });
+      const wrapper = document.getElementById('stream-steps-' + runId);
+      if (!wrapper) return;
+      const panelId = 'activity-panel-' + runId;
+      let panel = document.getElementById(panelId);
+      if (!panel) {
+        panel = document.createElement('div');
+        panel.id = panelId;
+        panel.style.cssText = 'background:rgba(255,179,71,0.05);border:1px solid rgba(255,179,71,0.2);border-radius:10px;padding:12px 14px;margin:10px 0 6px;';
+        wrapper.appendChild(panel);
+      }
+      panel.innerHTML = _renderTraceActivity(runId, session);
+    } catch(_) {}
+  }, 2000);
+}
+
+function stopActivityPolling() {
+  if (_activityPollInterval) { clearInterval(_activityPollInterval); _activityPollInterval = null; }
+}
+
 function openEventStream(runId) {
   if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
   const evtSrc = new EventSource(API + '/api/stream?run_id=' + encodeURIComponent(runId));
   activeEvtSource = evtSrc;
+  _chatRunState.status = 'running';
+  _renderChatInspector();
   startPlanPolling(runId);
+  startActivityPolling(runId);
 
   evtSrc.addEventListener('status', e => {
     try {
       const d = JSON.parse(e.data);
+      if (d.message || d.status) {
+        _recordChatActivity({
+          title: 'Runtime status updated',
+          status: 'running',
+          detail: d.message || d.status || '',
+          started_at: _chatRunState.startedAt || new Date().toISOString(),
+          task: _chatRunState.task || _chatRunState.title,
+        });
+      }
       updateStreamStatus(runId, d.message || d.status || '');
     } catch(_) {}
   });
 
   evtSrc.addEventListener('step', e => {
-    try { addStreamStep(runId, JSON.parse(e.data)); } catch(_) {}
+    try {
+      const step = JSON.parse(e.data);
+      addStreamStep(runId, step);
+      _recordChatActivity({
+        title: (step.agent || step.name || 'agent') + ' step',
+        status: step.status || 'running',
+        detail: step.message || step.reason || '',
+        started_at: step.started_at || '',
+        completed_at: step.completed_at || '',
+        duration_ms: step.duration_ms,
+        duration_label: step.duration_label,
+        actor: step.agent || step.name || '',
+        task: _chatRunState.task || _chatRunState.title,
+      });
+    } catch(_) {}
   });
 
   evtSrc.addEventListener('result', e => {
@@ -2394,19 +3393,36 @@ function openEventStream(runId) {
       const d = JSON.parse(e.data);
       const output = d.final_output || d.output || d.draft_response || '';
       const awaiting = d.awaiting_user_input || d.plan_waiting_for_approval || d.plan_needs_clarification || false;
+      _chatRunState.status = awaiting ? 'awaiting_user_input' : 'completed';
       updateStreamStatus(runId, awaiting ? 'Awaiting your input\u2026' : 'Completed.');
       finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null, d.mcp_invocations || null, d.long_document_exports || null, d.deep_research_result_card || null);
+      if (awaiting) {
+        _setChatAwaitingContext({
+          runId: d.run_id || runId,
+          workingDir: d.working_directory || workingDir || _pendingResumeDir || '',
+          prompt: d.pending_user_question || output || 'This run is waiting for your approval or feedback.',
+          pendingKind: d.pending_user_input_kind || '',
+          scope: d.approval_pending_scope || '',
+        });
+      }
     } catch(_) {}
   });
 
   evtSrc.addEventListener('error', e => {
     try {
       const d = JSON.parse(e.data);
+      _chatRunState.status = 'failed';
+      _chatAwaitingContext = null;
+      _closeChatApprovalModal();
       finalizeStreamRow(runId, '', d.message || 'Run failed');
     } catch(_) {
+      _chatRunState.status = 'failed';
+      _chatAwaitingContext = null;
+      _closeChatApprovalModal();
       finalizeStreamRow(runId, '', 'Stream error');
     }
     stopPlanPolling();
+    stopActivityPolling();
     evtSrc.close();
     activeEvtSource = null;
     isRunning = false;
@@ -2419,13 +3435,18 @@ function openEventStream(runId) {
       const d = JSON.parse(e.data);
       if (d.awaiting_user_input) {
         isAwaitingInput = true;
+        _chatRunState.status = 'awaiting_user_input';
         _showAwaitingBanner();
       } else {
         isAwaitingInput = false;
+        _chatAwaitingContext = null;
+        _closeChatApprovalModal();
+        _chatRunState.status = _chatRunState.status === 'failed' ? 'failed' : 'completed';
         sessionStorage.removeItem('kendr_active_run_id');
       }
     } catch(_) { sessionStorage.removeItem('kendr_active_run_id'); }
     stopPlanPolling();
+    stopActivityPolling();
     evtSrc.close();
     activeEvtSource = null;
     isRunning = false;
@@ -2457,16 +3478,37 @@ async function sendMessage() {
 
   const isContinuation = isAwaitingInput;
   isAwaitingInput = false;
+  _closeChatApprovalModal();
   _removeAwaitingBanner();
 
   appendUserMsg(text);
   const runId = 'ui-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   currentRunId = runId;
   sessionStorage.setItem('kendr_active_run_id', runId);
+  _chatRunState = {
+    runId,
+    status: 'running',
+    title: text.substring(0, 80) + (text.length > 80 ? '…' : ''),
+    task: text,
+    startedAt: new Date().toISOString(),
+    completedAt: '',
+    lastCommand: '',
+    lastCommandMeta: '',
+  };
+  _chatPlanState = { total: 0, completed: 0, running: 0, failed: 0 };
+  _chatActivityFeed = [];
+  _renderChatActivityList();
+  _recordChatActivity({
+    title: 'User request submitted',
+    status: 'running',
+    detail: text,
+    started_at: _chatRunState.startedAt,
+    task: text,
+  });
   if (!isContinuation) {
     document.getElementById('chatTitle').textContent = text.substring(0, 40) + (text.length > 40 ? '...' : '');
   }
-  createStreamingRow(runId);
+  createStreamingRow(runId, text);
 
   try {
     const resumeDir = _pendingResumeDir;
@@ -2520,6 +3562,7 @@ async function sendMessage() {
     const d = await resp.json();
 
     if (d.error) {
+      _chatRunState.status = 'failed';
       finalizeStreamRow(runId, '', d.error + (d.detail ? ': ' + d.detail : ''));
       isRunning = false;
       document.getElementById('sendBtn').disabled = false;
@@ -2536,6 +3579,7 @@ async function sendMessage() {
       loadRuns();
     }
   } catch(err) {
+    _chatRunState.status = 'failed';
     finalizeStreamRow(runId, '', 'Request failed: ' + String(err));
     isRunning = false;
     document.getElementById('sendBtn').disabled = false;
@@ -2547,6 +3591,7 @@ loadRuns();
 loadProjContext();
 setResearchMode('auto');
 renderDeepResearchSourceSummary();
+_renderChatInspector();
 setInterval(checkGateway, 30000);
 setInterval(loadRuns, 15000);
 setInterval(loadProjContext, 60000);
@@ -2566,12 +3611,26 @@ setInterval(loadProjContext, 60000);
       const query = run.user_query || run.query || 'Running…';
       document.getElementById('chatTitle').textContent = query.substring(0, 40) + (query.length > 40 ? '...' : '');
       document.getElementById('clearChatBtn').style.display = '';
-      createStreamingRow(run.run_id);
+      _chatRunState = {
+        runId: run.run_id,
+        status: 'running',
+        title: query.substring(0, 80) + (query.length > 80 ? '…' : ''),
+        task: query,
+        startedAt: run.created_at || run.started_at || new Date().toISOString(),
+        completedAt: '',
+        lastCommand: '',
+        lastCommandMeta: '',
+      };
+      _chatPlanState = { total: 0, completed: 0, running: 0, failed: 0 };
+      _chatActivityFeed = [];
+      _renderChatActivityList();
+      _renderChatInspector();
+      createStreamingRow(run.run_id, query);
       updateStreamStatus(run.run_id, 'Reconnecting to active run\u2026');
       isRunning = true;
       document.getElementById('sendBtn').disabled = true;
       openEventStream(run.run_id);
-    } else if (status === 'completed' || status === 'failed') {
+    } else if (status === 'awaiting_user_input' || status === 'completed' || status === 'failed') {
       sessionStorage.removeItem('kendr_active_run_id');
       loadRun(run.run_id);
     } else {
@@ -2975,6 +4034,16 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
 .chat-input { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 13px; color: var(--text); font-size: 13px; outline: none; resize: none; min-height: 40px; max-height: 120px; font-family: inherit; transition: border-color 0.15s; }
 .chat-input:focus { border-color: var(--teal); }
 .chat-bar-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chat-mode-group { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface2); }
+.chat-mode-chip { padding: 5px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s; }
+.chat-mode-chip:hover { color: var(--text); }
+.chat-mode-chip.active { background: rgba(0,201,167,0.12); border-color: rgba(0,201,167,0.3); color: var(--teal); }
+.chat-toggle-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface2); color: var(--muted); font-size: 11px; font-weight: 600; cursor: pointer; user-select: none; transition: border-color 0.15s, color 0.15s, background 0.15s; }
+.chat-toggle-chip input { margin: 0; accent-color: var(--amber); }
+.chat-toggle-chip.active { border-color: rgba(255,179,71,0.35); color: var(--amber); background: rgba(255,179,71,0.08); }
+.chat-toggle-chip.danger input { accent-color: var(--crimson); }
+.chat-toggle-chip.danger.active { border-color: rgba(255,71,87,0.35); color: var(--crimson); background: rgba(255,71,87,0.08); }
+.chat-mode-note { font-size: 11px; color: var(--muted); flex: 1 1 240px; min-width: 220px; }
 .chat-model-select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer; outline: none; max-width: 180px; }
 .chat-model-select:focus { border-color: var(--teal); }
 .ctx-badge { font-size: 10px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
@@ -3043,6 +4112,28 @@ body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background
 .form-field textarea { min-height: 84px; resize: vertical; }
 .form-field input:focus, .form-field select:focus, .form-field textarea:focus { border-color: var(--teal); }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+.approval-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.72); z-index:2400; align-items:center; justify-content:center; padding:20px; }
+.approval-overlay.open { display:flex; }
+.approval-box { width:min(560px, 100%); background:var(--surface); border:1px solid var(--border); border-radius:16px; box-shadow:0 24px 60px rgba(0,0,0,.45); overflow:hidden; }
+.approval-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:18px 20px 14px; border-bottom:1px solid var(--border); }
+.approval-title { font-size:15px; font-weight:700; color:var(--text); }
+.approval-subtitle { font-size:11px; color:var(--muted); margin-top:4px; }
+.approval-close { background:none; border:none; color:var(--muted); font-size:20px; cursor:pointer; line-height:1; }
+.approval-body { padding:18px 20px; }
+.approval-scope-pill { display:inline-flex; align-items:center; gap:6px; padding:4px 9px; border-radius:999px; background:rgba(83,82,237,.14); border:1px solid rgba(83,82,237,.35); color:#b8b7ff; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+.approval-copy { margin-top:12px; font-size:13px; color:var(--text); line-height:1.6; white-space:pre-wrap; }
+.approval-hint { margin-top:10px; font-size:12px; color:var(--muted); line-height:1.5; }
+.approval-suggest-wrap { display:none; margin-top:14px; }
+.approval-suggest-wrap.open { display:block; }
+.approval-suggest-wrap textarea { width:100%; min-height:100px; resize:vertical; background:var(--surface2); border:1px solid var(--border); border-radius:12px; color:var(--text); font:inherit; padding:12px 14px; line-height:1.5; }
+.approval-suggest-wrap textarea:focus { outline:none; border-color:var(--teal); }
+.approval-actions-row { display:flex; flex-wrap:wrap; gap:10px; margin-top:16px; }
+.approval-action-btn { border:none; border-radius:10px; padding:10px 16px; font-size:13px; font-weight:700; cursor:pointer; transition:opacity .15s, transform .15s; }
+.approval-action-btn:hover { opacity:.92; transform:translateY(-1px); }
+.approval-action-btn.accept { background:var(--teal); color:#071411; }
+.approval-action-btn.reject { background:rgba(255,71,87,.16); border:1px solid rgba(255,71,87,.35); color:var(--crimson); }
+.approval-action-btn.suggest { background:rgba(83,82,237,.16); border:1px solid rgba(83,82,237,.35); color:#b8b7ff; }
+.approval-action-btn.submit { background:rgba(255,255,255,.08); border:1px solid var(--border); color:var(--text); }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .status-dot.green { background: var(--teal); }
 .status-dot.amber { background: var(--amber); }
@@ -3129,6 +4220,16 @@ body.mode-code .inspector-panel { opacity: 0; pointer-events: none; transform: t
 .inspector-item-status.running { color: var(--teal); background: rgba(0,201,167,0.12); }
 .inspector-item-status.stopped { color: var(--amber); background: rgba(255,179,71,0.12); }
 .inspector-item-status.degraded { color: var(--crimson); background: rgba(255,71,87,0.12); }
+.inspector-item-status.completed { color: var(--teal); background: rgba(0,201,167,0.12); }
+.inspector-item-status.failed { color: var(--crimson); background: rgba(255,71,87,0.12); }
+.inspector-item-status.pending, .inspector-item-status.queued, .inspector-item-status.info { color: var(--muted); background: rgba(255,255,255,0.06); }
+.inspector-activity-card { padding: 10px 11px; border-radius: 10px; background: var(--surface2); border: 1px solid rgba(255,255,255,0.05); }
+.inspector-activity-title { font-size: 12px; font-weight: 700; color: var(--text); }
+.inspector-activity-meta { font-size: 10px; color: var(--muted); margin-top: 4px; line-height: 1.45; }
+.inspector-activity-detail { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.inspector-activity-command { margin-top: 6px; padding: 8px 9px; border-radius: 8px; border: 1px solid var(--border); background: rgba(0,0,0,0.16); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #d7e3ff; white-space: pre-wrap; word-break: break-word; }
+.trace-card { margin-top: 10px; padding: 11px 12px; border-radius: 10px; border: 1px solid rgba(88,166,255,0.18); background: rgba(88,166,255,0.06); }
+.trace-card-title { font-size: 11px; font-weight: 700; color: #dbe9ff; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
 .inspector-empty { font-size: 12px; color: var(--muted); line-height: 1.5; }
 .status-bar { height: var(--statusbar-h); display: flex; align-items: center; gap: 14px; padding: 0 12px; background: linear-gradient(90deg, #096d87, #0a7f92 38%, #0e639c 100%); color: #eef9ff; font-size: 11px; border-top: 1px solid rgba(255,255,255,0.08); }
 .status-pill { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -3268,6 +4369,20 @@ body.mode-code .inspector-panel { opacity: 0; pointer-events: none; transform: t
           <button class="send-btn" id="sendBtn" onclick="sendChat()">&#x27A4;</button>
         </div>
         <div class="chat-bar-meta">
+          <div class="chat-mode-group" id="projChatModeGroup">
+            <button class="chat-mode-chip active" data-chat-mode="auto" onclick="setProjectChatMode('auto')">Auto</button>
+            <button class="chat-mode-chip" data-chat-mode="ask" onclick="setProjectChatMode('ask')">Ask</button>
+            <button class="chat-mode-chip" data-chat-mode="ai" onclick="setProjectChatMode('ai')">AI Mode</button>
+          </div>
+          <label class="chat-toggle-chip active" id="projShellToggleChip">
+            <input type="checkbox" id="projShellToggle" checked onchange="setProjectChatShell(this.checked)">
+            <span>Shell</span>
+          </label>
+          <label class="chat-toggle-chip danger" id="projDestructiveToggleChip">
+            <input type="checkbox" id="projDestructiveToggle" onchange="setProjectChatDestructive(this.checked)">
+            <span>Destructive</span>
+          </label>
+          <div class="chat-mode-note" id="projChatModeNote">Auto routes questions to quick analysis and action requests to the execution runtime.</div>
           <select class="chat-model-select" id="projModelSelect" title="Select model" onchange="projModelChanged()">
             <option value="">Default model</option>
           </select>
@@ -3392,6 +4507,12 @@ body.mode-code .inspector-panel { opacity: 0; pointer-events: none; transform: t
     </div>
   </div>
   <div class="inspector-card">
+    <div class="inspector-card-label">Recent Activity</div>
+    <div class="inspector-list" id="inspectorActivityList">
+      <div class="inspector-empty">Project analysis, file reads, terminal commands, runtime steps, and failures will appear here with timestamps and durations.</div>
+    </div>
+  </div>
+  <div class="inspector-card">
     <div class="inspector-card-label">Service Pulse</div>
     <div class="inspector-list" id="inspectorServiceList">
       <div class="inspector-empty">Tracked project services will appear here once a project is open.</div>
@@ -3477,6 +4598,31 @@ body.mode-code .inspector-panel { opacity: 0; pointer-events: none; transform: t
     </div>
   </div>
 </div>
+<div class="approval-overlay" id="projectApprovalModal">
+  <div class="approval-box">
+    <div class="approval-head">
+      <div>
+        <div class="approval-title">Awaiting Approval</div>
+        <div class="approval-subtitle">Review the paused run, then accept, reject, or send guidance back into it.</div>
+      </div>
+      <button class="approval-close" type="button" onclick="_closeProjectApprovalModal()">&times;</button>
+    </div>
+    <div class="approval-body">
+      <div class="approval-scope-pill" id="projectApprovalScope">Approval</div>
+      <div class="approval-copy" id="projectApprovalPrompt">This project run is waiting for your response.</div>
+      <div class="approval-hint">Accept continues immediately. Reject tells the runtime to revise instead of continuing. Suggestion sends your changes back into the paused run.</div>
+      <div class="approval-suggest-wrap" id="projectApprovalSuggestWrap">
+        <textarea id="projectApprovalSuggestion" placeholder="Tell Kendr what to change before continuing..."></textarea>
+      </div>
+      <div class="approval-actions-row">
+        <button class="approval-action-btn accept" type="button" onclick="_submitProjectApproval('approve')">Accept</button>
+        <button class="approval-action-btn reject" type="button" onclick="_submitProjectApproval('reject')">Reject</button>
+        <button class="approval-action-btn suggest" type="button" onclick="_toggleProjectApprovalSuggestion()">Suggestion</button>
+        <button class="approval-action-btn submit" type="button" id="projectApprovalSuggestSubmit" onclick="_submitProjectApproval('suggest')" style="display:none">Send Suggestion</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 const API = '';
@@ -3494,6 +4640,79 @@ let _servicesCache = [];
 let _gitStatusCache = null;
 let _projectRunCount = 0;
 let _projectChatMessages = [];
+let _projectChatMode = 'auto';
+let _projectChatShell = true;
+let _projectChatAllowDestructive = false;
+let _projectActivityFeed = [];
+let _projectRuntimeActivityPoll = null;
+let _projectAwaitingContext = null;
+
+function _formatStepTimestamp(value) {
+  if (!value) return '';
+  try {
+    return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch(_) { return String(value); }
+}
+
+function _formatStepDuration(step) {
+  const durationMs = step && Number(step.duration_ms);
+  if (Number.isFinite(durationMs) && durationMs >= 0) {
+    if (durationMs < 1000) return durationMs + ' ms';
+    if (durationMs < 60000) return (durationMs / 1000).toFixed(durationMs >= 10000 ? 0 : 1) + ' s';
+    return (durationMs / 60000).toFixed(1) + ' min';
+  }
+  return step && step.duration_label ? String(step.duration_label) : '';
+}
+
+function _projectApprovalScopeLabel(scope, pendingKind) {
+  const normalizedScope = String(scope || '').trim();
+  if (normalizedScope === 'project_blueprint') return 'Blueprint Approval';
+  if (normalizedScope === 'root_plan') return 'Plan Approval';
+  if (normalizedScope === 'long_document_plan') return 'Research Plan';
+  if (normalizedScope === 'deep_research_confirmation') return 'Research Confirmation';
+  if (normalizedScope === 'drive_data_sufficiency') return 'Data Sufficiency';
+  if (String(pendingKind || '').trim() === 'clarification') return 'Clarification';
+  return 'Approval';
+}
+
+function _openProjectApprovalModal(meta) {
+  const modal = document.getElementById('projectApprovalModal');
+  if (!modal) return;
+  _projectAwaitingContext = Object.assign({}, _projectAwaitingContext || {}, meta || {});
+  document.getElementById('projectApprovalScope').textContent = _projectApprovalScopeLabel(_projectAwaitingContext.scope, _projectAwaitingContext.pendingKind);
+  document.getElementById('projectApprovalPrompt').textContent = _projectAwaitingContext.prompt || 'This project run is waiting for your response.';
+  document.getElementById('projectApprovalSuggestion').value = '';
+  document.getElementById('projectApprovalSuggestWrap').classList.remove('open');
+  document.getElementById('projectApprovalSuggestSubmit').style.display = 'none';
+  modal.classList.add('open');
+}
+
+function _closeProjectApprovalModal() {
+  const modal = document.getElementById('projectApprovalModal');
+  if (modal) modal.classList.remove('open');
+}
+
+function _toggleProjectApprovalSuggestion() {
+  const wrap = document.getElementById('projectApprovalSuggestWrap');
+  const submit = document.getElementById('projectApprovalSuggestSubmit');
+  if (!wrap || !submit) return;
+  const opening = !wrap.classList.contains('open');
+  wrap.classList.toggle('open', opening);
+  submit.style.display = opening ? '' : 'none';
+  if (opening) {
+    const input = document.getElementById('projectApprovalSuggestion');
+    if (input) input.focus();
+  }
+}
+
+function _taskSessionSummary(session) {
+  if (!session || typeof session !== 'object') return {};
+  if (session.summary && typeof session.summary === 'object') return session.summary;
+  if (typeof session.summary_json === 'string' && session.summary_json) {
+    try { return JSON.parse(session.summary_json); } catch (_) {}
+  }
+  return {};
+}
 
 function _currentViewLabel() {
   return {
@@ -3524,6 +4743,189 @@ function _renderInspectorServices() {
       </div>
     `;
   }).join('');
+}
+
+function _projectActivityTimestamp(item) {
+  const candidate = item && (item.completed_at || item.started_at || item.timestamp || item.created_at);
+  return candidate || '';
+}
+
+function _projectActivityKey(item) {
+  return [
+    item.kind || '',
+    item.title || '',
+    item.status || '',
+    item.command || '',
+    item.cwd || '',
+    item.detail || '',
+    _projectActivityTimestamp(item),
+  ].join('|');
+}
+
+function _normalizeProjectActivity(item, defaults = {}) {
+  const merged = Object.assign({}, defaults || {}, item || {});
+  if (!merged.timestamp) merged.timestamp = _projectActivityTimestamp(merged) || new Date().toISOString();
+  if (!merged.status) merged.status = 'info';
+  if (!merged.title) merged.title = merged.kind || 'Activity';
+  return merged;
+}
+
+function _projectActivitySortValue(item) {
+  const iso = _projectActivityTimestamp(item);
+  const value = iso ? Date.parse(iso) : NaN;
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function _activityStatusClass(status) {
+  const normalized = String(status || 'info').toLowerCase();
+  if (['running', 'completed', 'failed', 'pending', 'queued', 'info', 'stopped', 'degraded'].includes(normalized)) return normalized;
+  return 'info';
+}
+
+function _projectActivityMeta(item) {
+  const parts = [];
+  const task = String(item.task || '').trim();
+  const subtask = String(item.subtask || '').trim();
+  const actor = String(item.actor || '').trim();
+  const started = _formatStepTimestamp(item.started_at || item.timestamp);
+  const completed = _formatStepTimestamp(item.completed_at);
+  const duration = item.duration_label || _formatStepDuration(item);
+  if (task) parts.push(task);
+  if (subtask) parts.push(subtask);
+  else if (actor) parts.push(actor);
+  if (started) parts.push(started);
+  if (completed && completed !== started) parts.push('done ' + completed);
+  if (duration) parts.push(duration);
+  if (item.exit_code !== undefined && item.exit_code !== null && item.exit_code !== '') parts.push('exit ' + item.exit_code);
+  return parts;
+}
+
+function _renderProjectActivityList(containerId, items, emptyMessage, limit = 6) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  const list = Array.isArray(items) ? items.slice(0, limit) : [];
+  if (!list.length) {
+    box.innerHTML = '<div class="inspector-empty">' + esc(emptyMessage) + '</div>';
+    return;
+  }
+  box.innerHTML = list.map(item => {
+    const status = _activityStatusClass(item.status);
+    const meta = _projectActivityMeta(item).map(esc).join(' &middot; ');
+    const detail = item.detail ? '<div class="inspector-activity-detail">' + esc(String(item.detail).slice(0, 220)) + '</div>' : '';
+    const command = item.command ? '<div class="inspector-activity-command">' + esc(item.command) + '</div>' : '';
+    return `
+      <div class="inspector-activity-card">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+          <div class="inspector-activity-title">${esc(item.title || item.kind || 'Activity')}</div>
+          <div class="inspector-item-status ${esc(status)}">${esc(status)}</div>
+        </div>
+        ${meta ? '<div class="inspector-activity-meta">' + meta + '</div>' : ''}
+        ${detail}
+        ${command}
+      </div>
+    `;
+  }).join('');
+}
+
+function _renderInspectorActivities() {
+  _renderProjectActivityList(
+    'inspectorActivityList',
+    _projectActivityFeed,
+    'Project analysis, file reads, terminal commands, runtime steps, and failures will appear here with timestamps and durations.',
+    7,
+  );
+}
+
+function _recordProjectActivities(items, defaults = {}) {
+  const next = Array.isArray(items) ? items.map(item => _normalizeProjectActivity(item, defaults)) : [];
+  if (!next.length) return;
+  const merged = next.concat(_projectActivityFeed || []);
+  const deduped = [];
+  const seen = new Set();
+  for (const item of merged.sort((a, b) => _projectActivitySortValue(b) - _projectActivitySortValue(a))) {
+    const key = _projectActivityKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+    if (deduped.length >= 40) break;
+  }
+  _projectActivityFeed = deduped;
+  _renderInspectorActivities();
+  updateWorkbenchChrome();
+}
+
+function _recordProjectActivity(item, defaults = {}) {
+  _recordProjectActivities([item], defaults);
+}
+
+function _countTreeNodes(nodes) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  let count = 0;
+  for (const node of list) {
+    count += 1;
+    if (node && node.type === 'dir' && Array.isArray(node.children)) count += _countTreeNodes(node.children);
+  }
+  return count;
+}
+
+function _renderProjectTraceCard(items, title = 'Recent Activity') {
+  const normalized = Array.isArray(items) ? items.slice(0, 6).map(item => _normalizeProjectActivity(item)) : [];
+  if (!normalized.length) return '';
+  const rows = normalized.map(item => {
+    const status = _activityStatusClass(item.status);
+    const meta = _projectActivityMeta(item).map(esc).join(' &middot; ');
+    const detail = item.detail ? '<div class="inspector-activity-detail">' + esc(String(item.detail).slice(0, 320)) + '</div>' : '';
+    const command = item.command ? '<div class="inspector-activity-command">' + esc(item.command) + '</div>' : '';
+    return `
+      <div class="inspector-activity-card" style="margin-top:8px">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+          <div class="inspector-activity-title">${esc(item.title || item.kind || 'Activity')}</div>
+          <div class="inspector-item-status ${esc(status)}">${esc(status)}</div>
+        </div>
+        ${meta ? '<div class="inspector-activity-meta">' + meta + '</div>' : ''}
+        ${detail}
+        ${command}
+      </div>
+    `;
+  }).join('');
+  return `<div class="trace-card"><div class="trace-card-title">${esc(title)}</div>${rows}</div>`;
+}
+
+function _upsertProjectBubbleTrace(bubble, items, title = 'Recent Activity') {
+  if (!bubble) return;
+  const html = _renderProjectTraceCard(items, title);
+  const existing = bubble.querySelector('.trace-card');
+  if (!html) {
+    if (existing) existing.remove();
+    return;
+  }
+  if (existing) existing.remove();
+  bubble.insertAdjacentHTML('beforeend', html);
+}
+
+function _stopProjectRuntimeActivityPolling() {
+  if (_projectRuntimeActivityPoll) {
+    clearInterval(_projectRuntimeActivityPoll);
+    _projectRuntimeActivityPoll = null;
+  }
+}
+
+function _startProjectRuntimeActivityPolling(runId, bubble) {
+  _stopProjectRuntimeActivityPolling();
+  const poll = async () => {
+    try {
+      const r = await fetch(API + '/api/task-sessions/by-run/' + encodeURIComponent(runId));
+      if (!r.ok) return;
+      const session = await r.json();
+      const summary = _taskSessionSummary(session);
+      const events = Array.isArray(summary.execution_trace) ? summary.execution_trace : [];
+      if (!events.length) return;
+      _recordProjectActivities(events, { run_id: runId, task: summary.objective || summary.active_task || '' });
+      _upsertProjectBubbleTrace(bubble, events, summary.active_task || summary.objective || 'Runtime Activity');
+    } catch(_) {}
+  };
+  poll();
+  _projectRuntimeActivityPoll = setInterval(poll, 2000);
 }
 
 function updateWorkbenchChrome() {
@@ -3587,9 +4989,12 @@ function updateWorkbenchChrome() {
   if (inspectorRuns) inspectorRuns.textContent = String(_projectRunCount || 0);
   if (inspectorView) inspectorView.textContent = _currentViewLabel();
   if (inspectorRunSummary) {
+    const latestActivity = (_projectActivityFeed && _projectActivityFeed.length) ? _projectActivityFeed[0] : null;
     inspectorRunSummary.textContent = !_activeProjectName
       ? 'Open a project and start from chat, then switch to coding mode when you want tighter file, terminal, and git focus.'
-      : `${_projectRunCount} saved chat turn${_projectRunCount === 1 ? '' : 's'}. Active surface: ${_currentViewLabel()}.`;
+      : latestActivity
+        ? `${_projectRunCount} saved chat turn${_projectRunCount === 1 ? '' : 's'}. Latest activity: ${latestActivity.title || latestActivity.kind || 'activity'}.`
+        : `${_projectRunCount} saved chat turn${_projectRunCount === 1 ? '' : 's'}. Active surface: ${_currentViewLabel()}.`;
   }
   if (filePanelSubtitle) {
     filePanelSubtitle.textContent = _workspaceMode === 'code'
@@ -3672,6 +5077,8 @@ async function _clearProjectUI(id) {
     _gitStatusCache = null;
     _projectRunCount = 0;
     _projectChatMessages = [];
+    _projectActivityFeed = [];
+    _stopProjectRuntimeActivityPolling();
     document.getElementById('wsTitle').textContent = 'Projects';
     document.getElementById('wsPath').style.display = 'none';
     document.getElementById('wsBranch').style.display = 'none';
@@ -3684,6 +5091,7 @@ async function _clearProjectUI(id) {
     document.getElementById('servicesList').innerHTML = 'Open a project to manage its services.';
     document.getElementById('serviceLogMeta').textContent = 'Select a service to inspect its recent logs.';
     document.getElementById('serviceLogOutput').textContent = 'No log selected.';
+    _renderInspectorActivities();
     updateWorkbenchChrome();
   }
 }
@@ -3725,11 +5133,23 @@ async function openProject(id, path, name) {
   _activeProjectName = name;
   _activeServiceLogId = '';
   _projectChatMessages = [];
+  _projectActivityFeed = [];
+  _stopProjectRuntimeActivityPolling();
   document.getElementById('wsTitle').textContent = name;
   document.getElementById('wsPath').textContent = path;
   document.getElementById('wsPath').style.display = '';
   document.getElementById('filePanelTitle').textContent = name;
   document.getElementById('termPrompt').textContent = name.substring(0,12) + ' $';
+  _recordProjectActivity({
+    kind: 'project',
+    title: 'Project opened',
+    status: 'completed',
+    detail: path,
+    cwd: path,
+    task: 'Open project workbench',
+    subtask: name,
+    completed_at: new Date().toISOString(),
+  });
   await fetch(API + '/api/projects/' + id + '/activate', { method: 'POST' });
   await loadProjects();
   await loadFileTree();
@@ -3865,11 +5285,41 @@ async function loadFileTree() {
   if (!_activeProjectId) return;
   const box = document.getElementById('fileTree');
   box.innerHTML = '<div style="padding:10px 12px;font-size:12px;color:var(--muted)"><span class="spinner"></span> Loading...</div>';
+  const startedAt = new Date().toISOString();
+  const startedTs = Date.now();
   try {
     const r = await fetch(API + '/api/projects/' + _activeProjectId + '/files');
     const tree = await r.json();
     box.innerHTML = renderTree(tree, 0);
-  } catch(e) { box.innerHTML = '<div style="padding:10px;color:var(--crimson);font-size:12px">Error: ' + e + '</div>'; }
+    _recordProjectActivity({
+      kind: 'file_tree',
+      title: 'Explorer loaded',
+      status: 'completed',
+      detail: `Loaded ${_countTreeNodes(tree)} nodes from the project explorer.`,
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      task: 'Inspect project files',
+      subtask: 'Load explorer tree',
+    });
+  } catch(e) {
+    box.innerHTML = '<div style="padding:10px;color:var(--crimson);font-size:12px">Error: ' + e + '</div>';
+    _recordProjectActivity({
+      kind: 'file_tree',
+      title: 'Explorer load failed',
+      status: 'failed',
+      detail: String(e),
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      task: 'Inspect project files',
+      subtask: 'Load explorer tree',
+    });
+  }
 }
 
 function renderTree(nodes, depth) {
@@ -3926,16 +5376,60 @@ async function openFile(path, name, rowEl = null) {
   switchTab('file');
   document.getElementById('fileViewerPath').textContent = path;
   document.getElementById('fileViewerContent').textContent = 'Loading...';
+  const startedAt = new Date().toISOString();
+  const startedTs = Date.now();
   try {
     const r = await fetch(API + '/api/projects/file?path=' + encodeURIComponent(path) + '&root=' + encodeURIComponent(_activeProjectPath || ''));
     const d = await r.json();
     if (d.ok) {
       document.getElementById('fileViewerContent').textContent = d.content;
+      _recordProjectActivity({
+        kind: 'file_read',
+        title: 'File opened',
+        status: 'completed',
+        detail: `${name || path} (${(d.content || '').length} chars)`,
+        started_at: startedAt,
+        completed_at: new Date().toISOString(),
+        duration_ms: Math.max(0, Date.now() - startedTs),
+        duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+        cwd: _activeProjectPath || '',
+        command: path,
+        task: 'Inspect project files',
+        subtask: 'Open file',
+      });
     } else {
       document.getElementById('fileViewerContent').textContent = 'Error: ' + d.error;
+      _recordProjectActivity({
+        kind: 'file_read',
+        title: 'File open failed',
+        status: 'failed',
+        detail: d.error || 'Unknown file read error',
+        started_at: startedAt,
+        completed_at: new Date().toISOString(),
+        duration_ms: Math.max(0, Date.now() - startedTs),
+        duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+        cwd: _activeProjectPath || '',
+        command: path,
+        task: 'Inspect project files',
+        subtask: 'Open file',
+      });
     }
   } catch(e) {
     document.getElementById('fileViewerContent').textContent = 'Error: ' + e;
+    _recordProjectActivity({
+      kind: 'file_read',
+      title: 'File open failed',
+      status: 'failed',
+      detail: String(e),
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      command: path,
+      task: 'Inspect project files',
+      subtask: 'Open file',
+    });
   }
 }
 
@@ -4138,29 +5632,509 @@ async function loadProjModels() {
     const sel = document.getElementById('projModelSelect');
     if (!sel) return;
     sel.innerHTML = '';
-    const defOpt = document.createElement('option');
-    defOpt.value = '';
-    defOpt.textContent = (d.active_provider || 'default') + ' / ' + (d.active_model || 'default');
-    defOpt.title = 'Context window: ' + _fmtTokens(d.active_context_window || 128000) + ' tokens';
-    sel.appendChild(defOpt);
-    for (const p of (d.providers || [])) {
-      if (!p.ready) continue;
-      const opt = document.createElement('option');
-      opt.value = p.provider + '::' + p.model;
-      opt.textContent = p.provider + ' / ' + p.model;
-      opt.title = 'Context: ' + _fmtTokens(p.context_window || 128000);
-      sel.appendChild(opt);
+    const readyProviders = (d.providers || []).filter(p => p && p.ready);
+    for (const p of readyProviders) {
+      const models = Array.isArray(p.selectable_models) && p.selectable_models.length ? p.selectable_models : [p.model].filter(Boolean);
+      for (const modelName of models) {
+        const opt = document.createElement('option');
+        opt.value = p.provider + '::' + modelName;
+        opt.textContent = p.provider + ' / ' + modelName;
+        opt.title = (p.note || 'Ready') + ' · Context: ' + _fmtTokens(p.context_window || 128000);
+        sel.appendChild(opt);
+      }
     }
-    for (const om of (d.ollama_models || [])) {
-      const opt = document.createElement('option');
-      opt.value = 'ollama::' + om;
-      opt.textContent = 'ollama / ' + om;
-      sel.appendChild(opt);
+    const defaultValue = ((d.active_provider || '') && (d.active_model || '')) ? (d.active_provider + '::' + d.active_model) : '';
+    if (defaultValue && Array.from(sel.options).some(opt => opt.value === defaultValue)) {
+      sel.value = defaultValue;
+    } else if (sel.options.length) {
+      sel.selectedIndex = 0;
+    } else {
+      const defOpt = document.createElement('option');
+      defOpt.value = '';
+      defOpt.textContent = 'No ready models';
+      defOpt.title = 'Configure an API key or start a local runtime to use project AI mode.';
+      sel.appendChild(defOpt);
     }
+    projModelChanged();
     if (d.active_context_window) {
       _updateCtxBadge(0, d.active_context_window, d.active_model || '');
     }
   } catch(_) {}
+}
+
+function updateProjectChatControls() {
+  document.querySelectorAll('.chat-mode-chip').forEach(btn => btn.classList.toggle('active', btn.dataset.chatMode === _projectChatMode));
+  const shellChip = document.getElementById('projShellToggleChip');
+  const shellToggle = document.getElementById('projShellToggle');
+  const destructiveChip = document.getElementById('projDestructiveToggleChip');
+  const destructiveToggle = document.getElementById('projDestructiveToggle');
+  const note = document.getElementById('projChatModeNote');
+  if (shellToggle) shellToggle.checked = !!_projectChatShell;
+  if (destructiveToggle) destructiveToggle.checked = !!_projectChatAllowDestructive;
+  if (shellChip) shellChip.classList.toggle('active', !!_projectChatShell);
+  if (destructiveChip) destructiveChip.classList.toggle('active', !!_projectChatAllowDestructive);
+  if (note) {
+    const modeCopy = {
+      auto: 'Auto routes questions to quick analysis and action requests to the execution runtime.',
+      ask: 'Ask keeps the chat read-only and uses fast project-aware answers.',
+      ai: 'AI Mode uses the runtime so Kendr can edit files, run commands, and handle git work inside the open project.',
+    }[_projectChatMode] || '';
+    const shellCopy = _projectChatShell ? 'Shell automation is enabled.' : 'Shell automation is disabled.';
+    const destructiveCopy = _projectChatAllowDestructive ? 'Destructive changes are allowed.' : 'Destructive changes stay blocked.';
+    note.textContent = modeCopy + ' ' + shellCopy + ' ' + destructiveCopy;
+  }
+}
+
+function setProjectChatMode(mode) {
+  _projectChatMode = ['auto', 'ask', 'ai'].includes(mode) ? mode : 'auto';
+  try { localStorage.setItem('kendr.project_chat_mode', _projectChatMode); } catch(_) {}
+  updateProjectChatControls();
+}
+
+function setProjectChatShell(enabled) {
+  _projectChatShell = !!enabled;
+  try { localStorage.setItem('kendr.project_chat_shell', _projectChatShell ? '1' : '0'); } catch(_) {}
+  updateProjectChatControls();
+}
+
+function setProjectChatDestructive(enabled) {
+  _projectChatAllowDestructive = !!enabled;
+  try { localStorage.setItem('kendr.project_chat_destructive', _projectChatAllowDestructive ? '1' : '0'); } catch(_) {}
+  updateProjectChatControls();
+}
+
+function _projectChatRequestIntent(text) {
+  const body = String(text || '').trim().toLowerCase();
+  if (!body) return 'ask';
+  const actionPatterns = [
+    /^\s*(please\s+)?(delete|remove|rename|move|create|add|update|change|edit|fix|refactor|implement|write|generate|scaffold|commit|push|pull|merge|install|run|start|stop|restart|build|test|deploy|ship)\b/,
+    /\b(can you|could you|please|go ahead and|try to|help me)\s+(delete|remove|rename|move|create|add|update|change|edit|fix|refactor|implement|write|generate|scaffold|commit|push|pull|merge|install|run|start|stop|restart|build|test|deploy|ship)\b/,
+    /\b(make the change|apply the change|make these changes|ship it|open a pr)\b/,
+  ];
+  const questionPatterns = [
+    /^\s*(what|why|how|where|which|who|when|analyse|analyze|review|explain|summari[sz]e|tell me|walk me through|inspect|compare|find)\b/,
+    /\bwhat does\b/,
+    /\bhow does\b/,
+  ];
+  const actionWords = /\b(delete|remove|rename|move|create|add|update|change|edit|fix|refactor|implement|write|generate|scaffold|commit|push|pull|merge|install|run|start|stop|restart|build|test|deploy|ship)\b/;
+  const isAction = actionPatterns.some(pattern => pattern.test(body)) || (!questionPatterns.some(pattern => pattern.test(body)) && actionWords.test(body));
+  if (isAction) return 'execute';
+  if (questionPatterns.some(pattern => pattern.test(body)) || body.includes('?')) return 'ask';
+  return 'ask';
+}
+
+function _projectChatLooksDestructive(text) {
+  return /\b(delete|remove|rm|erase|wipe|drop|destroy|purge|clean out|reset)\b/i.test(String(text || ''));
+}
+
+function _projectChatRoute(text) {
+  if (_projectChatMode === 'ask') return 'ask';
+  if (_projectChatMode === 'ai') return 'execute';
+  return _projectChatRequestIntent(text);
+}
+
+function _setProjectChatProgress(bubble, text) {
+  if (!bubble) return;
+  bubble.innerHTML = '<div class="plain-text" style="color:var(--muted);font-size:11px">' + escapeHtml(text || 'Working...') + '</div>';
+}
+
+function _projectChatProgressText(payload, fallback = 'Working...') {
+  const data = payload || {};
+  const agent = String(data.agent || '').trim();
+  const message = String(data.message || data.text || '').trim();
+  const status = String(data.status || '').trim();
+  if (message && agent) return agent + ': ' + message;
+  if (message) return message;
+  if (agent && status) return agent + ' · ' + status;
+  if (agent) return agent;
+  return status || fallback;
+}
+
+async function _sendProjectAsk(text, bubble) {
+  const payload = {
+    text,
+    project_id: _activeProjectId,
+    project_root: _activeProjectPath,
+    project_name: _activeProjectName || '',
+  };
+  if (_projSelectedModel) payload.model = _projSelectedModel;
+  if (_projSelectedProvider) payload.provider = _projSelectedProvider;
+  _recordProjectActivity({
+    kind: 'analysis',
+    title: 'Project question received',
+    status: 'running',
+    detail: text,
+    started_at: new Date().toISOString(),
+    cwd: _activeProjectPath || '',
+    task: 'Inspect project and answer the question',
+    subtask: 'Project ask',
+  });
+  const resp = await fetch(API + '/api/project/ask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!resp.ok || !resp.body) {
+    const txt = await resp.text();
+    _recordProjectActivity({
+      kind: 'analysis',
+      title: 'Project ask failed',
+      status: 'failed',
+      detail: txt.slice(0, 200) || 'Server error',
+      completed_at: new Date().toISOString(),
+      cwd: _activeProjectPath || '',
+      task: 'Inspect project and answer the question',
+      subtask: 'Project ask',
+    });
+    bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 Server error: ' + escapeHtml(txt.slice(0, 200)) + '</span>';
+    return;
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  const scroller = document.getElementById('chatMessages');
+  let buf = '';
+  let answered = false;
+  const streamedActivities = [];
+
+  function _parseSseLine(chunk) {
+    const lines = chunk.split('\n');
+    let evName = '', evData = '';
+    for (const line of lines) {
+      if (line.startsWith('event: ')) evName = line.slice(7).trim();
+      else if (line.startsWith('data: ')) evData = line.slice(6).trim();
+    }
+    return { evName, evData };
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const parts = buf.split('\n\n');
+    buf = parts.pop() || '';
+    for (const chunk of parts) {
+      if (!chunk.trim()) continue;
+      const { evName, evData } = _parseSseLine(chunk);
+      if (!evName || !evData) continue;
+      try {
+        const data = JSON.parse(evData);
+        if (evName === 'log') {
+          if (!answered) {
+            _setProjectChatProgress(bubble, data.msg || 'Processing...');
+            scroller.scrollTop = 999999;
+          }
+        } else if (evName === 'activity') {
+          streamedActivities.unshift(data || {});
+          _recordProjectActivity(data, { task: 'Inspect project and answer the question' });
+          _upsertProjectBubbleTrace(bubble, streamedActivities, 'Project Analysis');
+        } else if (evName === 'result') {
+          answered = true;
+          const answer = data.answer || '(No response)';
+          setChatBubbleContent(bubble, answer, isLikelyMarkdown(answer) ? 'markdown' : 'text', 'agent');
+          if (Array.isArray(data.activities) && data.activities.length) {
+            _recordProjectActivities(data.activities, { task: 'Inspect project and answer the question' });
+            _upsertProjectBubbleTrace(bubble, data.activities, 'Project Analysis');
+          } else if (streamedActivities.length) {
+            _upsertProjectBubbleTrace(bubble, streamedActivities, 'Project Analysis');
+          }
+          if (data.context_tokens && data.model_context_limit) {
+            const ctxMeta = document.createElement('div');
+            ctxMeta.className = 'msg-ctx';
+            const pct = Math.round(data.context_pct || 0);
+            ctxMeta.innerHTML = '<span>\uD83D\uDCAC ' + escapeHtml(data.model || '') + '</span>'
+              + '<span style="opacity:0.6">\u2022</span>'
+              + '<span>' + _fmtTokens(data.context_tokens) + ' / ' + _fmtTokens(data.model_context_limit) + ' ctx (' + pct + '%)'
+              + (data.kendr_md_generated ? ' \u2728 kendr.md created' : data.kendr_md_loaded ? ' \uD83D\uDCCB kendr.md' : '') + '</span>';
+            bubble.appendChild(ctxMeta);
+            _updateCtxBadge(data.context_tokens, data.model_context_limit, data.model || '');
+          }
+          scroller.scrollTop = 999999;
+        } else if (evName === 'error') {
+          bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 ' + escapeHtml(data.error || 'Unknown error') + '</span>';
+          if (Array.isArray(data.activities) && data.activities.length) {
+            _recordProjectActivities(data.activities, { task: 'Inspect project and answer the question' });
+            _upsertProjectBubbleTrace(bubble, data.activities, 'Project Analysis');
+          } else if (streamedActivities.length) {
+            _upsertProjectBubbleTrace(bubble, streamedActivities, 'Project Analysis');
+          }
+        }
+      } catch(_) {}
+    }
+  }
+  if (!answered) bubble.innerHTML = '<em style="color:var(--muted)">No response received.</em>';
+}
+
+function _streamProjectRuntime(runId, bubble) {
+  return new Promise(resolve => {
+    if (_sseSource) {
+      try { _sseSource.close(); } catch(_) {}
+      _sseSource = null;
+    }
+    const evtSrc = new EventSource(API + '/api/stream?run_id=' + encodeURIComponent(runId));
+    _sseSource = evtSrc;
+    let finished = false;
+
+    function finish() {
+      if (finished) return;
+      finished = true;
+      _stopProjectRuntimeActivityPolling();
+      if (_sseSource === evtSrc) _sseSource = null;
+      try { evtSrc.close(); } catch(_) {}
+      resolve();
+    }
+
+    _startProjectRuntimeActivityPolling(runId, bubble);
+
+    evtSrc.addEventListener('status', event => {
+      try {
+        const data = JSON.parse(event.data);
+        _setProjectChatProgress(bubble, _projectChatProgressText(data, 'Agents mobilizing...'));
+      } catch(_) {}
+    });
+
+    evtSrc.addEventListener('step', event => {
+      try {
+        const data = JSON.parse(event.data);
+        _setProjectChatProgress(bubble, _projectChatProgressText(data, 'Working...'));
+      } catch(_) {}
+    });
+
+    evtSrc.addEventListener('result', event => {
+      try {
+        const data = JSON.parse(event.data);
+        const output = data.final_output || data.output || data.draft_response || data.summary || '(Run completed)';
+        setChatBubbleContent(bubble, output, isLikelyMarkdown(output) ? 'markdown' : 'text', 'agent');
+        const awaiting = data.awaiting_user_input || data.plan_waiting_for_approval || data.plan_needs_clarification || false;
+        if (awaiting) {
+          _recordProjectActivity({
+            kind: 'runtime',
+            title: 'Runtime awaiting approval',
+            status: 'pending',
+            detail: data.pending_user_question || 'This run is waiting for your response.',
+            completed_at: new Date().toISOString(),
+            task: 'Execute project task',
+            subtask: runId,
+            run_id: data.run_id || runId,
+          });
+          _projectAwaitingContext = {
+            runId: data.run_id || runId,
+            workingDir: data.working_directory || _activeProjectPath || '',
+            prompt: data.pending_user_question || output || 'This project run is waiting for your response.',
+            pendingKind: data.pending_user_input_kind || '',
+            scope: data.approval_pending_scope || '',
+          };
+          _openProjectApprovalModal(_projectAwaitingContext);
+        } else if (data.run_id || runId) {
+          _projectAwaitingContext = null;
+          _closeProjectApprovalModal();
+          _recordProjectActivity({
+            kind: 'runtime',
+            title: 'Runtime completed',
+            status: 'completed',
+            detail: 'Agent execution finished and returned a final output.',
+            completed_at: new Date().toISOString(),
+            task: 'Execute project task',
+            subtask: runId,
+            run_id: data.run_id || runId,
+          });
+        }
+      } catch(_) {}
+    });
+
+    evtSrc.addEventListener('error', event => {
+      let message = 'Execution failed';
+      try {
+        const data = JSON.parse(event.data);
+        message = data.message || data.error || message;
+      } catch(_) {}
+      bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 ' + escapeHtml(message) + '</span>';
+      _projectAwaitingContext = null;
+      _closeProjectApprovalModal();
+      _recordProjectActivity({
+        kind: 'runtime',
+        title: 'Runtime failed',
+        status: 'failed',
+        detail: message,
+        completed_at: new Date().toISOString(),
+        task: 'Execute project task',
+        subtask: runId,
+        run_id: runId,
+      });
+      finish();
+    });
+
+    evtSrc.addEventListener('done', () => finish());
+
+    evtSrc.onerror = () => {
+      if (evtSrc.readyState === EventSource.CLOSED) finish();
+    };
+  });
+}
+
+async function _sendProjectResume(replyText, approvalContext, existingBubble, appendUserBubble = true) {
+  const context = approvalContext || _projectAwaitingContext;
+  if (!context || !_activeProjectPath) return;
+  if (appendUserBubble) appendMsg('user', replyText, isLikelyMarkdown(replyText) ? 'markdown' : 'text');
+  const bubble = existingBubble || (() => {
+    const agentDiv = appendMsg('agent', '');
+    const created = agentDiv.querySelector('.msg-bubble');
+    created.innerHTML = '<span class="spinner"></span>';
+    return created;
+  })();
+  bubble.innerHTML = '<span class="spinner"></span>';
+  const runId = 'project-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  const payload = {
+    text: replyText,
+    channel: 'project_ui',
+    sender_id: 'project_ui_user',
+    chat_id: _activeProjectId || '',
+    run_id: runId,
+    resume_dir: context.workingDir || _activeProjectPath || '',
+    working_directory: context.workingDir || _activeProjectPath || '',
+    project_id: _activeProjectId || '',
+    project_root: _activeProjectPath || '',
+    project_name: _activeProjectName || '',
+  };
+  if (_projSelectedModel) payload.model = _projSelectedModel;
+  if (_projSelectedProvider) payload.provider = _projSelectedProvider;
+  if (_activeProjectPath) payload.privileged_allowed_paths = [_activeProjectPath];
+  if (_projectChatShell) {
+    payload.shell_auto_approve = true;
+    payload.privileged_approval_note = 'Approved via project workbench AI Mode';
+  }
+  if (_projectChatAllowDestructive) payload.privileged_allow_destructive = true;
+  _recordProjectActivity({
+    kind: 'runtime',
+    title: 'Approval reply submitted',
+    status: 'running',
+    detail: replyText,
+    started_at: new Date().toISOString(),
+    cwd: _activeProjectPath || '',
+    task: 'Resume project task',
+    subtask: runId,
+    run_id: runId,
+  });
+  _setProjectChatProgress(bubble, 'Resuming paused run...');
+  const resp = await fetch(API + '/api/chat/resume', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || data.error) {
+    const detail = data.detail ? ': ' + data.detail : '';
+    bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 ' + escapeHtml((data.error || 'Resume failed') + detail) + '</span>';
+    _recordProjectActivity({
+      kind: 'runtime',
+      title: 'Resume request rejected',
+      status: 'failed',
+      detail: (data.error || 'Resume failed') + detail,
+      completed_at: new Date().toISOString(),
+      cwd: _activeProjectPath || '',
+      task: 'Resume project task',
+      subtask: runId,
+      run_id: runId,
+    });
+    return;
+  }
+  if (data.streaming) {
+    await _streamProjectRuntime(runId, bubble);
+    return;
+  }
+  const output = data.final_output || data.output || data.draft_response || data.summary || '(Run completed)';
+  setChatBubbleContent(bubble, output, isLikelyMarkdown(output) ? 'markdown' : 'text', 'agent');
+}
+
+function _submitProjectApproval(action) {
+  if (!_projectAwaitingContext) return;
+  let reply = '';
+  if (action === 'approve') reply = 'approve';
+  else if (action === 'reject') reply = 'no, reject this and revise it';
+  else {
+    reply = String((document.getElementById('projectApprovalSuggestion') || {}).value || '').trim();
+    if (!reply) return;
+  }
+  _closeProjectApprovalModal();
+  const previousContext = _projectAwaitingContext;
+  _projectAwaitingContext = null;
+  _sendProjectResume(reply, previousContext).catch(err => {
+    _projectAwaitingContext = previousContext;
+    appendSysMsg('Resume failed: ' + String(err));
+  });
+}
+
+async function _sendProjectRuntime(text, bubble) {
+  const runId = 'project-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  const payload = {
+    text,
+    channel: 'project_ui',
+    sender_id: 'project_ui_user',
+    chat_id: _activeProjectId || '',
+    run_id: runId,
+    project_id: _activeProjectId || '',
+    project_root: _activeProjectPath || '',
+    project_name: _activeProjectName || '',
+    working_directory: _activeProjectPath || '',
+  };
+  if (_projSelectedModel) payload.model = _projSelectedModel;
+  if (_projSelectedProvider) payload.provider = _projSelectedProvider;
+  if (_activeProjectPath) payload.privileged_allowed_paths = [_activeProjectPath];
+  if (_projectChatShell) {
+    payload.shell_auto_approve = true;
+    payload.privileged_approval_note = 'Approved via project workbench AI Mode';
+  }
+  if (_projectChatAllowDestructive) payload.privileged_allow_destructive = true;
+  _recordProjectActivity({
+    kind: 'runtime',
+    title: 'Runtime started',
+    status: 'running',
+    detail: text,
+    started_at: new Date().toISOString(),
+    cwd: _activeProjectPath || '',
+    task: 'Execute project task',
+    subtask: runId,
+    run_id: runId,
+  });
+  _setProjectChatProgress(bubble, 'Agents mobilizing...');
+  const resp = await fetch(API + '/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || data.error) {
+    const detail = data.detail ? ': ' + data.detail : '';
+    _recordProjectActivity({
+      kind: 'runtime',
+      title: 'Runtime request rejected',
+      status: 'failed',
+      detail: (data.error || 'Execution failed') + detail,
+      completed_at: new Date().toISOString(),
+      cwd: _activeProjectPath || '',
+      task: 'Execute project task',
+      subtask: runId,
+      run_id: runId,
+    });
+    bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 ' + escapeHtml((data.error || 'Execution failed') + detail) + '</span>';
+    return;
+  }
+  if (data.streaming) {
+    await _streamProjectRuntime(runId, bubble);
+    return;
+  }
+  const output = data.final_output || data.output || data.draft_response || data.summary || '(Run completed)';
+  setChatBubbleContent(bubble, output, isLikelyMarkdown(output) ? 'markdown' : 'text', 'agent');
+  _recordProjectActivity({
+    kind: 'runtime',
+    title: 'Runtime completed',
+    status: 'completed',
+    detail: 'Execution returned a non-streaming result.',
+    completed_at: new Date().toISOString(),
+    cwd: _activeProjectPath || '',
+    task: 'Execute project task',
+    subtask: runId,
+    run_id: runId,
+  });
 }
 
 async function sendChat() {
@@ -4169,86 +6143,27 @@ async function sendChat() {
   const text = inp.value.trim();
   if (!text) return;
   if (!_activeProjectPath) { appendSysMsg('Please open a project first.'); return; }
+  const pendingApprovalContext = _projectAwaitingContext;
+  const resumingApproval = !!pendingApprovalContext;
+  const route = _projectChatRoute(text);
+  if (route === 'execute' && _projectChatLooksDestructive(text) && !_projectChatAllowDestructive) {
+    appendSysMsg('This request looks destructive. Enable Destructive in the project chat controls before asking Kendr to delete, remove, reset, or wipe project files.');
+    return;
+  }
   inp.value = '';
   inp.style.height = 'auto';
   btn.disabled = true;
+  _closeProjectApprovalModal();
   appendMsg('user', text, isLikelyMarkdown(text) ? 'markdown' : 'text');
   const agentDiv = appendMsg('agent', '');
   const bubble = agentDiv.querySelector('.msg-bubble');
   bubble.innerHTML = '<span class="spinner"></span>';
-  const scroller = document.getElementById('chatMessages');
   try {
-    const payload = {
-      text,
-      project_id: _activeProjectId,
-      project_root: _activeProjectPath,
-      project_name: _activeProjectName || '',
-    };
-    if (_projSelectedModel) payload.model = _projSelectedModel;
-    if (_projSelectedProvider) payload.provider = _projSelectedProvider;
-    const resp = await fetch(API + '/api/project/ask', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (!resp.ok || !resp.body) {
-      const txt = await resp.text();
-      bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 Server error: ' + escapeHtml(txt.slice(0, 200)) + '</span>';
-      btn.disabled = false; return;
-    }
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let answered = false;
-    function _parseSseLine(chunk) {
-      const lines = chunk.split('\n');
-      let evName = '', evData = '';
-      for (const l of lines) {
-        if (l.startsWith('event: ')) evName = l.slice(7).trim();
-        else if (l.startsWith('data: ')) evData = l.slice(6).trim();
-      }
-      return { evName, evData };
-    }
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const parts = buf.split('\n\n');
-      buf = parts.pop() || '';
-      for (const chunk of parts) {
-        if (!chunk.trim()) continue;
-        const { evName, evData } = _parseSseLine(chunk);
-        if (!evName || !evData) continue;
-        try {
-          const d = JSON.parse(evData);
-          if (evName === 'log') {
-            if (!answered) {
-              bubble.innerHTML = '<div class="plain-text" style="color:var(--muted);font-size:11px">' + escapeHtml(d.msg || 'Processing...') + '</div>';
-              scroller.scrollTop = 999999;
-            }
-          } else if (evName === 'result') {
-            answered = true;
-            const answer = d.answer || '(No response)';
-            setChatBubbleContent(bubble, answer, isLikelyMarkdown(answer) ? 'markdown' : 'text', 'agent');
-            if (d.context_tokens && d.model_context_limit) {
-              const ctxMeta = document.createElement('div');
-              ctxMeta.className = 'msg-ctx';
-              const pct = Math.round(d.context_pct || 0);
-              ctxMeta.innerHTML = '<span>\uD83D\uDCAC ' + escapeHtml(d.model || '') + '</span>'
-                + '<span style="opacity:0.6">\u2022</span>'
-                + '<span>' + _fmtTokens(d.context_tokens) + ' / ' + _fmtTokens(d.model_context_limit) + ' ctx (' + pct + '%)'
-                + (d.kendr_md_generated ? ' \u2728 kendr.md created' : d.kendr_md_loaded ? ' \uD83D\uDCCB kendr.md' : '') + '</span>';
-              bubble.appendChild(ctxMeta);
-              _updateCtxBadge(d.context_tokens, d.model_context_limit, d.model || '');
-            }
-            scroller.scrollTop = 999999;
-          } else if (evName === 'error') {
-            bubble.innerHTML = '<span style="color:var(--crimson)">\u26A0 ' + escapeHtml(d.error || 'Unknown error') + '</span>';
-          }
-        } catch(_) {}
-      }
-    }
-    if (!answered) bubble.innerHTML = '<em style="color:var(--muted)">No response received.</em>';
+    if (resumingApproval) {
+      _projectAwaitingContext = null;
+      await _sendProjectResume(text, pendingApprovalContext, bubble, false);
+    } else if (route === 'execute') await _sendProjectRuntime(text, bubble);
+    else await _sendProjectAsk(text, bubble);
     if (_activeProjectId) await loadProjectChatHistory();
     btn.disabled = false;
   } catch(e) {
@@ -4274,6 +6189,18 @@ async function runTermCmd() {
   input.value = '';
   output.textContent += '\n$ ' + cmd + '\n';
   output.scrollTop = output.scrollHeight;
+  const startedAt = new Date().toISOString();
+  const startedTs = Date.now();
+  _recordProjectActivity({
+    kind: 'command',
+    title: 'Running terminal command',
+    status: 'running',
+    command: cmd,
+    started_at: startedAt,
+    cwd: _activeProjectPath || '',
+    task: 'Execute terminal command',
+    subtask: 'Project terminal',
+  });
   try {
     const r = await fetch(API + '/api/projects/shell', {
       method: 'POST',
@@ -4284,7 +6211,38 @@ async function runTermCmd() {
     if (d.stdout) output.textContent += d.stdout;
     if (d.stderr) output.textContent += d.stderr;
     if (!d.ok && !d.stderr && !d.stdout) output.textContent += '(exit code ' + d.returncode + ')';
-  } catch(e) { output.textContent += 'Request error: ' + e; }
+    _recordProjectActivity({
+      kind: 'command',
+      title: d.ok ? 'Terminal command completed' : 'Terminal command failed',
+      status: d.ok ? 'completed' : 'failed',
+      detail: d.stderr || d.stdout || ('Exit code ' + d.returncode),
+      command: d.command || cmd,
+      cwd: d.cwd || _activeProjectPath || '',
+      started_at: d.started_at || startedAt,
+      completed_at: d.completed_at || new Date().toISOString(),
+      duration_ms: d.duration_ms,
+      duration_label: d.duration_label,
+      exit_code: d.returncode,
+      task: 'Execute terminal command',
+      subtask: 'Project terminal',
+    });
+  } catch(e) {
+    output.textContent += 'Request error: ' + e;
+    _recordProjectActivity({
+      kind: 'command',
+      title: 'Terminal command failed',
+      status: 'failed',
+      detail: String(e),
+      command: cmd,
+      cwd: _activeProjectPath || '',
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      task: 'Execute terminal command',
+      subtask: 'Project terminal',
+    });
+  }
   output.scrollTop = output.scrollHeight;
   if (output.textContent.length > 30000) output.textContent = output.textContent.slice(-20000);
 }
@@ -4309,11 +6267,26 @@ async function loadProjectServices() {
     return;
   }
   listEl.innerHTML = '<div class="service-empty"><span class="spinner"></span> Loading tracked services...</div>';
+  const startedAt = new Date().toISOString();
+  const startedTs = Date.now();
   try {
     const r = await fetch(API + '/api/projects/' + _activeProjectId + '/services');
     const payload = await r.json();
     const services = payload.services || [];
     _servicesCache = services;
+    _recordProjectActivity({
+      kind: 'service_scan',
+      title: 'Services refreshed',
+      status: 'completed',
+      detail: `Loaded ${services.length} tracked services.`,
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      task: 'Inspect project services',
+      subtask: 'Refresh tracked services',
+    });
     if (!services.length) {
       listEl.innerHTML = '<div class="service-empty">No tracked services yet. Start one above so Kendr can monitor it, include it in project context, and surface it in <code>kendr gateway status</code>.</div>';
       if (!_activeServiceLogId) {
@@ -4372,6 +6345,19 @@ async function loadProjectServices() {
   } catch(e) {
     _servicesCache = [];
     listEl.innerHTML = '<div class="service-empty" style="color:var(--crimson)">Error: ' + esc(String(e)) + '</div>';
+    _recordProjectActivity({
+      kind: 'service_scan',
+      title: 'Services refresh failed',
+      status: 'failed',
+      detail: String(e),
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      task: 'Inspect project services',
+      subtask: 'Refresh tracked services',
+    });
   }
   updateWorkbenchChrome();
 }
@@ -4493,6 +6479,8 @@ async function loadProjectServiceLog(serviceId) {
   const out = document.getElementById('serviceLogOutput');
   meta.textContent = 'Loading log tail for ' + serviceId + '...';
   out.textContent = '';
+  const startedAt = new Date().toISOString();
+  const startedTs = Date.now();
   try {
     const r = await fetch(API + '/api/projects/' + _activeProjectId + '/services/' + encodeURIComponent(serviceId) + '/log');
     const d = await r.json();
@@ -4500,9 +6488,35 @@ async function loadProjectServiceLog(serviceId) {
     meta.textContent = (d.log_path || serviceId) + (d.truncated ? ' (tail)' : '');
     out.textContent = d.content || '(log file is empty)';
     out.scrollTop = out.scrollHeight;
+    _recordProjectActivity({
+      kind: 'service_log',
+      title: 'Service log loaded',
+      status: 'completed',
+      detail: d.log_path || serviceId,
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      task: 'Inspect project services',
+      subtask: 'Read service log',
+    });
   } catch(e) {
     meta.textContent = 'Log load failed';
     out.textContent = 'Error: ' + e;
+    _recordProjectActivity({
+      kind: 'service_log',
+      title: 'Service log load failed',
+      status: 'failed',
+      detail: String(e),
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      task: 'Inspect project services',
+      subtask: 'Read service log',
+    });
   }
 }
 
@@ -4511,10 +6525,25 @@ async function loadGitStatus() {
   if (!_activeProjectId) return;
   const panel = document.getElementById('gitPanel');
   panel.innerHTML = '<div style="color:var(--muted);font-size:13px"><span class="spinner"></span> Loading git status...</div>';
+  const startedAt = new Date().toISOString();
+  const startedTs = Date.now();
   try {
     const r = await fetch(API + '/api/projects/' + _activeProjectId + '/git/status');
     const s = await r.json();
     _gitStatusCache = s;
+    _recordProjectActivity({
+      kind: 'git',
+      title: s.is_git ? 'Git status loaded' : 'Project is not a git repo',
+      status: s.is_git ? 'completed' : 'info',
+      detail: s.is_git ? `Branch ${s.branch || 'unknown'} with ${((s.changed || []).length + (s.staged || []).length + (s.untracked || []).length)} visible changes.` : 'Initialize git to unlock source-control workflows.',
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      task: 'Inspect git state',
+      subtask: 'Load repository status',
+    });
     if (!s.is_git) {
       panel.innerHTML = '<div class="git-section"><div style="color:var(--muted)">&#x26A0; Not a git repository.</div><button class="btn btn-outline" style="margin-top:10px" onclick="gitRun(\'git init\')">Initialize git repo</button></div>';
       updateWorkbenchChrome();
@@ -4560,7 +6589,22 @@ async function loadGitStatus() {
         <button class="btn btn-purple" onclick="switchTab(\'terminal\')">&#x1F4BB; Open Terminal</button>
       </div>
     </div>`;
-  } catch(e) { panel.innerHTML = '<div style="color:var(--crimson)">Error: ' + e + '</div>'; _gitStatusCache = null; }
+  } catch(e) {
+    panel.innerHTML = '<div style="color:var(--crimson)">Error: ' + e + '</div>'; _gitStatusCache = null;
+    _recordProjectActivity({
+      kind: 'git',
+      title: 'Git status failed',
+      status: 'failed',
+      detail: String(e),
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      task: 'Inspect git state',
+      subtask: 'Load repository status',
+    });
+  }
   updateWorkbenchChrome();
 }
 
@@ -4580,15 +6624,47 @@ async function gitRun(cmd) {
 async function doGitAction(url, body = {}) {
   const outEl = document.getElementById('gitOutput');
   if (outEl) { outEl.textContent = 'Running...'; outEl.classList.add('show'); }
+  const startedAt = new Date().toISOString();
+  const startedTs = Date.now();
   try {
     const r = await fetch(API + url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     const d = await r.json();
     const text = [d.stdout, d.stderr].filter(Boolean).join('\n').trim() || (d.ok ? 'Done.' : 'Failed.');
     if (outEl) { outEl.textContent = text; }
+    _recordProjectActivity({
+      kind: 'git',
+      title: d.ok ? 'Git action completed' : 'Git action failed',
+      status: d.ok ? 'completed' : 'failed',
+      detail: text,
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      command: url,
+      task: 'Execute git action',
+      subtask: body.message || url.split('/').pop() || 'git',
+    });
     await loadGitStatus();
     const badge = document.getElementById('wsBranchName');
     if (badge && d.branch) badge.textContent = d.branch;
-  } catch(e) { if (outEl) outEl.textContent = 'Error: ' + e; }
+  } catch(e) {
+    if (outEl) outEl.textContent = 'Error: ' + e;
+    _recordProjectActivity({
+      kind: 'git',
+      title: 'Git action failed',
+      status: 'failed',
+      detail: String(e),
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      duration_ms: Math.max(0, Date.now() - startedTs),
+      duration_label: _formatStepDuration({ duration_ms: Math.max(0, Date.now() - startedTs) }),
+      cwd: _activeProjectPath || '',
+      command: url,
+      task: 'Execute git action',
+      subtask: body.message || url.split('/').pop() || 'git',
+    });
+  }
 }
 
 // ── Add project modal ─────────────────────────────────────────────────────────
@@ -4662,6 +6738,21 @@ function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'
   } catch(_) {
     updateWorkbenchChrome();
   }
+  try {
+    const savedChatMode = localStorage.getItem('kendr.project_chat_mode');
+    const savedShell = localStorage.getItem('kendr.project_chat_shell');
+    const savedDestructive = localStorage.getItem('kendr.project_chat_destructive');
+    if (savedChatMode === 'ask' || savedChatMode === 'ai' || savedChatMode === 'auto') {
+      _projectChatMode = savedChatMode;
+    }
+    if (savedShell === '0' || savedShell === '1') {
+      _projectChatShell = savedShell === '1';
+    }
+    if (savedDestructive === '0' || savedDestructive === '1') {
+      _projectChatAllowDestructive = savedDestructive === '1';
+    }
+  } catch(_) {}
+  updateProjectChatControls();
   const fileTree = document.getElementById('fileTree');
   if (fileTree) fileTree.addEventListener('click', handleFileTreeClick);
   await loadProjects();
@@ -5699,6 +7790,11 @@ function renderActiveBar(d) {
   document.getElementById('activeModelName').textContent = d.active_model || '(default)';
 }
 
+function selectedProviderModel(providerId, fallbackModel) {
+  const sel = document.getElementById('providerModelSelect-' + providerId);
+  return sel && sel.value ? sel.value : (fallbackModel || '');
+}
+
 function renderProviders(d) {
   const grid = document.getElementById('providersGrid');
   const active = d.active_provider;
@@ -5710,22 +7806,39 @@ function renderProviders(d) {
     const isActive = id === active;
     const ready = st.ready;
     const model = st.model || (meta.models[0] || '');
+    const selectable = Array.isArray(st.selectable_models) && st.selectable_models.length ? st.selectable_models : (ready && model ? [model] : []);
     const statusCls = isActive ? 'st-active' : ready ? 'st-ready' : 'st-nokey';
-    const statusLabel = isActive ? '\u2714 Active' : ready ? '\u2714 Ready' : '\u26A1 Add Key';
+    const statusLabel = isActive
+      ? '\u2714 Active'
+      : ready
+        ? '\u2714 Ready'
+        : id === 'ollama'
+          ? '\u25A0 Offline'
+          : id === 'custom'
+            ? '\u2699 Configure'
+            : '\u26A1 Add Key';
     const cardCls = isActive ? 'provider-card active-card' : ready ? 'provider-card' : 'provider-card needs-key';
 
     let btn = '';
     if (!isActive && ready) {
-      btn = `<button class="set-btn" onclick="setActive('${id}','')">Set as Active</button>`;
+      btn = `<button class="set-btn" onclick="setActive('${id}', selectedProviderModel('${id}','${esc(model)}'))">Set as Active</button>`;
     } else if (!ready && id !== 'ollama' && id !== 'custom') {
       btn = `<button class="cfg-btn" onclick="openCfg('${id}')">Add API Key</button>`;
     } else if (id === 'custom') {
       btn = `<button class="cfg-btn" onclick="openCfg('${id}')">Configure Endpoint</button>`;
     } else if (id === 'ollama') {
-      btn = `<button class="set-btn" onclick="setActive('ollama','')">Use Ollama</button>`;
+      btn = ready
+        ? `<button class="set-btn" onclick="setActive('ollama', selectedProviderModel('ollama','${esc(model)}'))">Use Ollama</button>`
+        : `<button class="cfg-btn" onclick="document.getElementById('ollamaTitle').scrollIntoView({behavior:'smooth'})">Start Ollama</button>`;
     } else {
-      btn = `<button class="cfg-btn" onclick="openCfg('${id}')">Edit Settings</button>`;
+      btn = ready
+        ? `<button class="cfg-btn" onclick="setActive('${id}', selectedProviderModel('${id}','${esc(model)}'))">Save Default</button>`
+        : `<button class="cfg-btn" onclick="openCfg('${id}')">Edit Settings</button>`;
     }
+
+    const modelSelect = ready && selectable.length
+      ? `<select class="chat-model-select" id="providerModelSelect-${id}" title="Choose default model">${selectable.map(name => `<option value="${esc(name)}" ${name === model ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select>`
+      : `<div class="pcard-model" title="${esc(model)}">${esc(model) || '(not set)'}</div>`;
 
     return `<div class="${cardCls}">
       <div class="pcard-header">
@@ -5736,7 +7849,7 @@ function renderProviders(d) {
         </div>
         <div class="pcard-status ${statusCls}">${statusLabel}</div>
       </div>
-      <div class="pcard-model" title="${esc(model)}">${esc(model) || '(not set)'}</div>
+      ${modelSelect}
       <div class="pcard-note">${esc(st.note || meta.hint || '')}</div>
       ${btn}
     </div>`;
@@ -7184,9 +9297,35 @@ strong { color: var(--text); }
                     is_ollama_running,
                     list_ollama_models,
                 )
-                active = get_active_provider()
-                active_model = get_model_for_provider(active)
+                configured_provider = get_active_provider()
+                configured_model = get_model_for_provider(configured_provider)
                 statuses = all_provider_statuses()
+                status_by_provider = {
+                    str(item.get("provider") or "").strip(): dict(item)
+                    for item in statuses
+                    if isinstance(item, dict)
+                }
+                configured_status = dict(status_by_provider.get(configured_provider) or {})
+                configured_ready = bool(configured_status.get("ready"))
+                active = configured_provider
+                active_model = configured_model
+                active_note = str(configured_status.get("note") or "").strip()
+                if not configured_ready:
+                    fallback = next(
+                        (
+                            item
+                            for item in statuses
+                            if isinstance(item, dict) and bool(item.get("ready")) and str(item.get("provider") or "").strip()
+                        ),
+                        None,
+                    )
+                    if isinstance(fallback, dict):
+                        active = str(fallback.get("provider") or configured_provider).strip() or configured_provider
+                        active_model = str(fallback.get("model") or get_model_for_provider(active)).strip() or get_model_for_provider(active)
+                        active_note = (
+                            f"Configured provider '{configured_provider}' is offline. "
+                            f"Showing the first ready provider instead."
+                        )
                 ollama_running = is_ollama_running()
                 ollama_models = list_ollama_models() if ollama_running else []
                 for s in statuses:
@@ -7195,6 +9334,12 @@ strong { color: var(--text); }
                     "active_provider": active,
                     "active_model": active_model,
                     "active_context_window": get_context_window(active_model),
+                    "active_provider_ready": bool((status_by_provider.get(active) or {}).get("ready")),
+                    "active_provider_note": active_note,
+                    "configured_provider": configured_provider,
+                    "configured_model": configured_model,
+                    "configured_provider_ready": configured_ready,
+                    "configured_provider_note": str(configured_status.get("note") or "").strip(),
                     "providers": statuses,
                     "ollama_running": ollama_running,
                     "ollama_models": [m.get("name", "") for m in ollama_models],
@@ -7233,7 +9378,7 @@ strong { color: var(--text); }
                 runs = _gateway_get("/runs", timeout=5.0)
             except Exception:
                 runs = []
-            self._json(200, runs)
+            self._json(200, _live_recent_runs(runs if isinstance(runs, list) else []))
             return
         if path == "/api/artifacts/download":
             params = parse_qs(parsed.query or "")
@@ -7321,14 +9466,29 @@ strong { color: var(--text); }
                 "files": file_list,
             })
             return
+        if path.startswith("/api/task-sessions/by-run/"):
+            run_id = path[len("/api/task-sessions/by-run/"):]
+            try:
+                data = _gateway_get(f"/task-sessions/by-run/{run_id}")
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+                return
+            self._json(200, data)
+            return
         if path.startswith("/api/runs/"):
             run_id = path[len("/api/runs/"):]
             try:
                 data = _gateway_get(f"/runs/{run_id}")
             except Exception as exc:
+                with _pending_lock:
+                    pending = dict(_pending_runs.get(run_id, {})) if run_id in _pending_runs else None
+                live_only = _overlay_run_with_pending(None, pending)
+                if live_only:
+                    self._json(200, live_only)
+                    return
                 self._json(500, {"error": str(exc)})
                 return
-            self._json(200, data)
+            self._json(200, _live_run(data if isinstance(data, dict) else None) or data)
             return
         if path == "/api/setup/overview":
             try:
@@ -7651,14 +9811,6 @@ strong { color: var(--text); }
             return
 
         project_build_mode = bool(body.get("project_build_mode") or body.get("standalone"))
-        gateway_up = _gateway_ready(timeout=0.5)
-
-        if not gateway_up and not project_build_mode:
-            self._json(503, {
-                "error": "Gateway not running",
-                "detail": "Start it with: kendr gateway start",
-            })
-            return
 
         working_directory = str(
             body.get("working_directory") or os.getenv("KENDR_WORKING_DIR", "")
@@ -7671,11 +9823,17 @@ strong { color: var(--text); }
         }
         if working_directory:
             payload["working_directory"] = working_directory
+        for key in ("provider", "model"):
+            value = str(body.get(key) or "").strip()
+            if value:
+                payload[key] = value
         if project_build_mode:
             payload["project_build_mode"] = True
-        for key in ("project_name", "project_stack", "stack", "project_root",
+        for key in ("project_id", "project_name", "project_stack", "stack", "project_root",
                     "github_repo", "auto_approve", "skip_test_agent", "skip_devops_agent",
-                    "shell_auto_approve", "privileged_approval_note", "deep_research_mode",
+                    "shell_auto_approve", "privileged_mode", "privileged_approved",
+                    "privileged_approval_note", "privileged_allow_destructive",
+                    "privileged_allowed_paths", "deep_research_mode",
                     "long_document_mode", "long_document_pages", "long_document_title",
                     "research_output_formats", "research_citation_style",
                     "research_enable_plagiarism_check", "research_web_search_enabled", "research_date_range",
@@ -7699,13 +9857,46 @@ strong { color: var(--text); }
                             payload.setdefault("working_directory", proj_path)
             except Exception:
                 pass
+        if str(payload.get("channel") or "").strip().lower() == "project_ui":
+            project_id, project_path, project_name = _resolve_project_chat_identity(
+                str(payload.get("project_id") or "").strip(),
+                str(payload.get("project_root") or payload.get("working_directory") or "").strip(),
+                str(payload.get("project_name") or "").strip(),
+            )
+            if project_id:
+                payload["project_id"] = project_id
+                if not payload.get("chat_id"):
+                    payload["chat_id"] = project_id
+            if project_path:
+                if not payload.get("project_root"):
+                    payload["project_root"] = project_path
+                if not payload.get("working_directory"):
+                    payload["working_directory"] = project_path
+            if project_name and not payload.get("project_name"):
+                payload["project_name"] = project_name
+
+        gateway_up = _gateway_ready(timeout=0.5)
+        if not gateway_up and not project_build_mode:
+            if str(payload.get("channel") or "").strip().lower() == "project_ui":
+                _persist_project_chat_user_request(payload, text)
+                _persist_project_chat_result(
+                    payload,
+                    error="Gateway not running. Start it with: kendr gateway start",
+                )
+            self._json(503, {
+                "error": "Gateway not running",
+                "detail": "Start it with: kendr gateway start",
+            })
+            return
+        if str(payload.get("channel") or "").strip().lower() == "project_ui":
+            _persist_project_chat_user_request(payload, text)
         run_id = str(body.get("run_id") or "").strip() or f"ui-{uuid.uuid4().hex[:8]}"
         payload["run_id"] = run_id
 
         q: "queue.Queue[dict]" = queue.Queue()
         with _pending_lock:
             _run_event_queues[run_id] = q
-            _pending_runs[run_id] = {"status": "running"}
+            _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="running")
 
         use_standalone = project_build_mode and (not gateway_up or bool(body.get("standalone")))
         if use_standalone:
@@ -7730,7 +9921,7 @@ strong { color: var(--text); }
         q: "queue.Queue[dict]" = queue.Queue()
         with _pending_lock:
             _run_event_queues[run_id] = q
-            _pending_runs[run_id] = {"status": "running"}
+            _pending_runs[run_id] = _pending_run_state(run_id, payload={"text": text, **body, "working_directory": resume_dir}, status="running")
 
         def _run() -> None:
             _push_event(run_id, "status", {"status": "running", "message": "Resuming run..."})
@@ -7745,6 +9936,10 @@ strong { color: var(--text); }
                     "chat_id": str(body.get("chat_id", "")),
                     "run_id": run_id,
                 }
+                for key in ("provider", "model", "project_id", "project_root", "project_name"):
+                    value = body.get(key)
+                    if value is not None and str(value).strip():
+                        resume_payload[key] = value
                 result = _gateway_resume(resume_payload)
                 _run_awaiting = bool(
                     result.get("awaiting_user_input")
@@ -7754,7 +9949,7 @@ strong { color: var(--text); }
                 )
                 _run_status = "awaiting_user_input" if _run_awaiting else "completed"
                 with _pending_lock:
-                    _pending_runs[run_id] = {"status": _run_status, "result": result}
+                    _pending_runs[run_id] = _pending_run_state(run_id, payload=resume_payload, status=_run_status, result=result)
                 _push_event(run_id, "result", result)
                 _push_event(run_id, "done", {"run_id": run_id, "status": _run_status, "awaiting_user_input": _run_awaiting})
             except urllib.error.HTTPError as exc:
@@ -7765,13 +9960,13 @@ strong { color: var(--text); }
                 except Exception:
                     err_msg = err_body or str(exc)
                 with _pending_lock:
-                    _pending_runs[run_id] = {"status": "failed", "error": err_msg}
+                    _pending_runs[run_id] = _pending_run_state(run_id, payload=resume_payload, status="failed", error=err_msg)
                 _push_event(run_id, "error", {"message": err_msg})
                 _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
             except Exception as exc:
                 err = str(exc)
                 with _pending_lock:
-                    _pending_runs[run_id] = {"status": "failed", "error": err}
+                    _pending_runs[run_id] = _pending_run_state(run_id, payload=resume_payload, status="failed", error=err)
                 _push_event(run_id, "error", {"message": err})
                 _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
 
@@ -7914,12 +10109,21 @@ strong { color: var(--text); }
             self._json(400, {"error": "missing_provider"})
             return
         try:
-            values: dict[str, str] = {"KENDR_LLM_PROVIDER": provider}
-            if model:
-                values["KENDR_MODEL"] = model
+            from kendr.llm_router import get_model_for_provider, get_model_setting_env
+
+            values: dict[str, str] = {"KENDR_LLM_PROVIDER": provider, "KENDR_MODEL": ""}
+            model_env_key = get_model_setting_env(provider)
+            if model and model_env_key:
+                values[model_env_key] = model
             result = save_component_values("core_runtime", values)
+            os.environ["KENDR_LLM_PROVIDER"] = provider
+            os.environ.pop("KENDR_PROVIDER", None)
+            os.environ.pop("KENDR_MODEL", None)
+            if model and model_env_key:
+                os.environ[model_env_key] = model
             apply_setup_env_defaults()
-            self._json(200, {"saved": True, "provider": provider, "model": model})
+            effective_model = model or get_model_for_provider(provider)
+            self._json(200, {"saved": True, "provider": provider, "model": effective_model})
         except Exception as exc:
             self._json(500, {"error": str(exc)})
 
@@ -8182,21 +10386,66 @@ strong { color: var(--text); }
                 except Exception as persist_exc:
                     _log.debug("Project chat history save failed for %s: %s", proj_id, persist_exc)
 
+            activities: list[dict] = []
+            task_title = f"Inspect {proj_name or 'the project'} and answer the question"
+
             emit("log", {"msg": "\U0001f4c1 Checking project directory...", "step": "init"})
+            _emit_project_activity(
+                emit,
+                activities,
+                kind="task",
+                title="Project question received",
+                status="running",
+                detail=text,
+                task=task_title,
+                subtask="Initialize project-aware analysis",
+                cwd=proj_root,
+            )
 
             kendr_md = ""
             kendr_md_generated = False
             file_tree = ""
+            git_status_text = ""
             service_lines = ""
+            key_file_notes: list[str] = []
             if proj_root and os.path.isdir(proj_root):
                 kpath = os.path.join(proj_root, "kendr.md")
+                kendr_started = _utc_now_iso()
                 if os.path.isfile(kpath):
                     emit("log", {"msg": "\U0001f4cb Reading kendr.md context file...", "step": "kendr_md"})
                     try:
                         with open(kpath, "r", encoding="utf-8", errors="replace") as f:
                             kendr_md = f.read()[:12000]
+                        _emit_project_activity(
+                            emit,
+                            activities,
+                            kind="file_read",
+                            title="Loaded kendr.md",
+                            status="completed",
+                            detail=f"Loaded {len(kendr_md)} characters of persistent project context.",
+                            cwd=proj_root,
+                            task=task_title,
+                            subtask="Load persistent project context",
+                            started_at=kendr_started,
+                            completed_at=_utc_now_iso(),
+                            metadata={"path": kpath},
+                        )
                         emit("log", {"msg": "\u2705 kendr.md loaded (" + str(len(kendr_md)) + " chars)", "step": "kendr_md_ok"})
                     except Exception as e:
+                        _emit_project_activity(
+                            emit,
+                            activities,
+                            kind="file_read",
+                            title="kendr.md read failed",
+                            status="failed",
+                            detail=str(e),
+                            cwd=proj_root,
+                            task=task_title,
+                            subtask="Load persistent project context",
+                            started_at=kendr_started,
+                            completed_at=_utc_now_iso(),
+                            metadata={"path": kpath},
+                        )
                         emit("log", {"msg": "\u26a0 Could not read kendr.md: " + str(e), "step": "kendr_md_err"})
                 else:
                     emit("log", {"msg": "\U0001f527 kendr.md not found — generating project context...", "step": "kendr_md_gen"})
@@ -8204,17 +10453,126 @@ strong { color: var(--text); }
                         from kendr.project_context import ensure_kendr_md
                         kendr_md = ensure_kendr_md(proj_root, proj_name)[:12000]
                         kendr_md_generated = True
+                        _emit_project_activity(
+                            emit,
+                            activities,
+                            kind="file_generate",
+                            title="Generated kendr.md",
+                            status="completed",
+                            detail=f"Generated {len(kendr_md)} characters of structural project context.",
+                            cwd=proj_root,
+                            task=task_title,
+                            subtask="Generate persistent project context",
+                            started_at=kendr_started,
+                            completed_at=_utc_now_iso(),
+                            metadata={"path": kpath},
+                        )
                         emit("log", {"msg": "\u2728 kendr.md created and loaded (" + str(len(kendr_md)) + " chars)", "step": "kendr_md_gen_ok"})
                     except Exception as e:
+                        _emit_project_activity(
+                            emit,
+                            activities,
+                            kind="file_generate",
+                            title="kendr.md generation failed",
+                            status="failed",
+                            detail=str(e),
+                            cwd=proj_root,
+                            task=task_title,
+                            subtask="Generate persistent project context",
+                            started_at=kendr_started,
+                            completed_at=_utc_now_iso(),
+                            metadata={"path": kpath},
+                        )
                         emit("log", {"msg": "\u26a0 Could not generate kendr.md: " + str(e), "step": "kendr_md_gen_err"})
 
-                emit("log", {"msg": "\U0001f4c2 Scanning project files...", "step": "file_tree"})
-                try:
-                    entries = sorted(os.listdir(proj_root))[:60]
-                    file_tree = "\n".join(entries)
-                    emit("log", {"msg": "\u2705 Found " + str(len(entries)) + " items in project root", "step": "file_tree_ok"})
-                except Exception:
-                    pass
+                emit("log", {"msg": "\U0001f4c2 Inspecting project files...", "step": "file_tree"})
+                is_git_repo = os.path.isdir(os.path.join(proj_root, ".git"))
+                listing_command = _project_listing_command(is_git_repo)
+                listing_result = _pm_shell(listing_command, proj_root, timeout=20) if _HAS_PROJECT_MANAGER else {}
+                if listing_result.get("stdout"):
+                    file_tree = str(listing_result.get("stdout") or "").strip()
+                else:
+                    try:
+                        entries = sorted(os.listdir(proj_root))[:60]
+                        file_tree = "\n".join(entries)
+                    except Exception:
+                        file_tree = ""
+                _emit_project_activity(
+                    emit,
+                    activities,
+                    kind="command" if listing_result else "filesystem",
+                    title="Enumerated project files",
+                    status="completed" if (not listing_result or listing_result.get("ok")) else "failed",
+                    detail=(str(listing_result.get("stderr") or "") or f"Collected {len([line for line in file_tree.splitlines() if line.strip()])} file paths.")[:240],
+                    command=str(listing_result.get("command") or listing_command if listing_result else ""),
+                    cwd=proj_root,
+                    task=task_title,
+                    subtask="Enumerate candidate files",
+                    started_at=str(listing_result.get("started_at") or _utc_now_iso()),
+                    completed_at=str(listing_result.get("completed_at") or _utc_now_iso()),
+                    duration_ms=listing_result.get("duration_ms"),
+                    exit_code=listing_result.get("returncode"),
+                )
+                emit("log", {"msg": "\u2705 File inventory ready (" + str(len([line for line in file_tree.splitlines() if line.strip()])) + " entries)", "step": "file_tree_ok"})
+                if is_git_repo and _HAS_PROJECT_MANAGER:
+                    git_result = _pm_shell("git status --short --branch", proj_root, timeout=15)
+                    git_status_text = str(git_result.get("stdout") or "").strip()
+                    _emit_project_activity(
+                        emit,
+                        activities,
+                        kind="command",
+                        title="Checked git status",
+                        status="completed" if git_result.get("ok") else "failed",
+                        detail=(git_status_text or str(git_result.get("stderr") or "No git status output available."))[:240],
+                        command=str(git_result.get("command") or "git status --short --branch"),
+                        cwd=proj_root,
+                        task=task_title,
+                        subtask="Inspect repository state",
+                        started_at=str(git_result.get("started_at") or _utc_now_iso()),
+                        completed_at=str(git_result.get("completed_at") or _utc_now_iso()),
+                        duration_ms=git_result.get("duration_ms"),
+                        exit_code=git_result.get("returncode"),
+                    )
+                for candidate in ("README.md", "pyproject.toml", "package.json", "requirements.txt"):
+                    candidate_path = os.path.join(proj_root, candidate)
+                    if not os.path.isfile(candidate_path):
+                        continue
+                    read_started = _utc_now_iso()
+                    read_result = _pm_read_file(candidate_path, proj_root) if _HAS_PROJECT_MANAGER else {"ok": False, "error": "Project manager unavailable"}
+                    if read_result.get("ok"):
+                        content = str(read_result.get("content") or "")
+                        key_file_notes.append(f"=== {candidate} ===\n{content[:3000]}")
+                        _emit_project_activity(
+                            emit,
+                            activities,
+                            kind="file_read",
+                            title=f"Read {candidate}",
+                            status="completed",
+                            detail=f"Loaded {len(content)} characters from {candidate}.",
+                            cwd=proj_root,
+                            task=task_title,
+                            subtask="Read key project files",
+                            started_at=read_started,
+                            completed_at=_utc_now_iso(),
+                            metadata={"path": candidate_path},
+                        )
+                    else:
+                        _emit_project_activity(
+                            emit,
+                            activities,
+                            kind="file_read",
+                            title=f"Read {candidate} failed",
+                            status="failed",
+                            detail=str(read_result.get("error") or "Unknown read error"),
+                            cwd=proj_root,
+                            task=task_title,
+                            subtask="Read key project files",
+                            started_at=read_started,
+                            completed_at=_utc_now_iso(),
+                            metadata={"path": candidate_path},
+                        )
+                    if len(key_file_notes) >= 3:
+                        break
                 if proj and proj.get("id"):
                     try:
                         services = _pm_list_services(str(proj.get("id")), include_stopped=True)
@@ -8236,10 +10594,47 @@ strong { color: var(--text); }
                                     + str(service.get("cwd") or "-")
                                 )
                             service_lines = "\n".join(lines)
+                            _emit_project_activity(
+                                emit,
+                                activities,
+                                kind="service_scan",
+                                title="Loaded tracked services",
+                                status="completed",
+                                detail=f"Loaded {len(services)} tracked services.",
+                                cwd=proj_root,
+                                task=task_title,
+                                subtask="Inspect project services",
+                            )
                             emit("log", {"msg": "\u2705 Loaded " + str(len(services)) + " tracked project services", "step": "services_ok"})
                     except Exception as e:
+                        _emit_project_activity(
+                            emit,
+                            activities,
+                            kind="service_scan",
+                            title="Project services load failed",
+                            status="failed",
+                            detail=str(e),
+                            cwd=proj_root,
+                            task=task_title,
+                            subtask="Inspect project services",
+                        )
                         emit("log", {"msg": "\u26a0 Could not load project services: " + str(e), "step": "services_err"})
 
+            llm_started = _utc_now_iso()
+            llm_started_ts = time.time()
+            _emit_project_activity(
+                emit,
+                activities,
+                kind="analysis",
+                title="Calling project analysis model",
+                status="running",
+                detail="Synthesizing command-based project observations into a direct answer.",
+                started_at=llm_started,
+                cwd=proj_root,
+                actor="project_ask",
+                task=task_title,
+                subtask="Answer project question",
+            )
             emit("log", {"msg": "\U0001f9e0 Building context and calling LLM...", "step": "llm"})
 
             system_ctx = "You are a knowledgeable assistant for the software project '" + (proj_name or "this project") + "'."
@@ -8247,12 +10642,17 @@ strong { color: var(--text); }
                 system_ctx += "\n\nProject context (kendr.md):\n" + kendr_md
             if file_tree:
                 system_ctx += "\n\nProject root files:\n" + file_tree
+            if git_status_text:
+                system_ctx += "\n\nGit status:\n" + git_status_text
+            if key_file_notes:
+                system_ctx += "\n\nKey file excerpts:\n" + "\n\n".join(key_file_notes)
             if service_lines:
                 system_ctx += "\n\nTracked project services:\n" + service_lines
             system_ctx += (
                 "\n\nAnswer the user's question concisely and accurately. "
                 "If asked about what the project is or does, summarise from the kendr.md context above. "
-                "Do NOT generate execution plans or project scaffolds — just answer the question."
+                "Ground the answer in the observed files, git state, and service status when relevant. "
+                "Do NOT generate execution plans or project scaffolds - just answer the question."
             )
 
             provider = provider_override or get_active_provider()
@@ -8266,6 +10666,21 @@ strong { color: var(--text); }
             messages = [SystemMessage(content=system_ctx), HumanMessage(content=text)]
             response = llm.invoke(messages)
             answer = response.content if hasattr(response, "content") else str(response)
+            _emit_project_activity(
+                emit,
+                activities,
+                kind="analysis",
+                title="Project answer ready",
+                status="completed",
+                detail=f"Returned {len(answer or '')} characters from the project analysis model.",
+                started_at=llm_started,
+                completed_at=_utc_now_iso(),
+                duration_ms=max(0, int((time.time() - llm_started_ts) * 1000)),
+                cwd=proj_root,
+                actor=model or provider or "project_ask",
+                task=task_title,
+                subtask="Answer project question",
+            )
 
             if proj_id:
                 try:
@@ -8291,6 +10706,7 @@ strong { color: var(--text); }
                 "context_pct": round(ctx_tokens / max(ctx_limit, 1) * 100, 1),
                 "kendr_md_loaded": bool(kendr_md),
                 "kendr_md_generated": kendr_md_generated,
+                "activities": activities,
             })
             emit("done", {})
         except Exception as exc:
@@ -8316,7 +10732,20 @@ strong { color: var(--text); }
                     )
                 except Exception as persist_exc:
                     _log.debug("Project chat history error save failed for %s: %s", proj_id, persist_exc)
-            emit("error", {"error": str(exc)})
+            _emit_project_activity(
+                emit,
+                activities if 'activities' in locals() and isinstance(activities, list) else [],
+                kind="analysis",
+                title="Project ask failed",
+                status="failed",
+                detail=str(exc),
+                completed_at=_utc_now_iso(),
+                cwd=proj_root if 'proj_root' in locals() else "",
+                actor="project_ask",
+                task=task_title if 'task_title' in locals() else "Inspect project and answer the question",
+                subtask="Answer project question",
+            )
+            emit("error", {"error": str(exc), "activities": activities if 'activities' in locals() and isinstance(activities, list) else []})
             emit("done", {})
 
     def _handle_project_context_generate(self, body: dict) -> None:

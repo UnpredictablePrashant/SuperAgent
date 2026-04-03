@@ -26,6 +26,8 @@ from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
+from kendr.execution_trace import duration_label
+
 _log = logging.getLogger("kendr.project_manager")
 
 
@@ -446,13 +448,24 @@ def _build_shell_env() -> dict:
 def _shell_args_for_path(shell_path: str, command: str) -> list[str]:
     """Return subprocess arguments for the given shell binary."""
     clean = shell_path.lower()
+    command_body = _shell_command_body(clean, command)
     if os.name == "nt":
         if "bash" in clean or clean.endswith("bash.exe"):
-            return [shell_path, "-lc", command]
+            return [shell_path, "-lc", command_body]
         if "powershell" in clean or "pwsh" in clean:
-            return [shell_path, "-NoLogo", "-NoProfile", "-Command", command]
-        return [shell_path, "/d", "/s", "/c", command]
-    return [shell_path, "-c", command]
+            return [shell_path, "-NoLogo", "-NoProfile", "-Command", command_body]
+        return [shell_path, "/d", "/s", "/c", command_body]
+    return [shell_path, "-c", command_body]
+
+
+def _shell_command_body(shell_name: str, command: str) -> str:
+    body = str(command or "").strip()
+    if not body:
+        return body
+    if "powershell" in shell_name or "pwsh" in shell_name:
+        if body.startswith('"') or body.startswith("'"):
+            return f"& {body}"
+    return body
 
 
 def _resolve_shell_args(command: str) -> list[str]:
@@ -462,6 +475,10 @@ def _resolve_shell_args(command: str) -> list[str]:
         shell_path = shutil.which(preferred) or preferred
         return _shell_args_for_path(shell_path, command)
     if os.name == "nt":
+        for candidate in ("pwsh", "powershell"):
+            shell_path = shutil.which(candidate)
+            if shell_path:
+                return _shell_args_for_path(shell_path, command)
         candidate = str(os.environ.get("COMSPEC") or "cmd.exe")
         shell_path = shutil.which(candidate) or candidate
         return _shell_args_for_path(shell_path, command)
@@ -477,15 +494,20 @@ def _resolve_shell_args(command: str) -> list[str]:
 def run_shell(command: str, cwd: str, timeout: int = 60) -> dict:
     """Run a shell command in the given directory via an OS-appropriate shell."""
     cwd = _normalize_path(cwd)
+    shell_args = _resolve_shell_args(command)
+    started = time.time()
+    started_at = _utc_now()
     try:
         result = subprocess.run(
-            _resolve_shell_args(command),
+            shell_args,
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
             env=_build_shell_env(),
         )
+        completed_at = _utc_now()
+        elapsed_ms = max(0, int((time.time() - started) * 1000))
         return {
             "ok": result.returncode == 0,
             "stdout": result.stdout,
@@ -493,11 +515,44 @@ def run_shell(command: str, cwd: str, timeout: int = 60) -> dict:
             "returncode": result.returncode,
             "command": command,
             "cwd": cwd,
+            "shell_argv": shell_args,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_ms": elapsed_ms,
+            "duration_label": duration_label(elapsed_ms),
         }
     except subprocess.TimeoutExpired:
-        return {"ok": False, "stdout": "", "stderr": f"Command timed out after {timeout}s", "returncode": -1, "command": command, "cwd": cwd}
+        completed_at = _utc_now()
+        elapsed_ms = max(0, int((time.time() - started) * 1000))
+        return {
+            "ok": False,
+            "stdout": "",
+            "stderr": f"Command timed out after {timeout}s",
+            "returncode": -1,
+            "command": command,
+            "cwd": cwd,
+            "shell_argv": shell_args,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_ms": elapsed_ms,
+            "duration_label": duration_label(elapsed_ms),
+        }
     except Exception as exc:
-        return {"ok": False, "stdout": "", "stderr": str(exc), "returncode": -1, "command": command, "cwd": cwd}
+        completed_at = _utc_now()
+        elapsed_ms = max(0, int((time.time() - started) * 1000))
+        return {
+            "ok": False,
+            "stdout": "",
+            "stderr": str(exc),
+            "returncode": -1,
+            "command": command,
+            "cwd": cwd,
+            "shell_argv": shell_args,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_ms": elapsed_ms,
+            "duration_label": duration_label(elapsed_ms),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -711,7 +766,15 @@ def _stop_service_process(service: dict[str, Any], timeout: float = 6.0) -> bool
         return False
     try:
         if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"], capture_output=True, check=False)
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+            deadline = time.time() + min(timeout, 2.0)
+            while time.time() < deadline and _pid_is_alive(pid):
+                time.sleep(0.15)
+            if _pid_is_alive(pid):
+                subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"], capture_output=True, check=False)
         else:
             try:
                 os.killpg(pid, signal.SIGTERM)
@@ -772,11 +835,12 @@ def start_project_service(
     log_parent = Path(log_path).parent
     log_parent.mkdir(parents=True, exist_ok=True)
     launched_at = _utc_now()
+    shell_args = _resolve_shell_args(resolved_command)
     with open(log_path, "a", encoding="utf-8") as log_fh:
         log_fh.write(f"\n[{launched_at}] starting service {resolved_name}: {resolved_command}\n")
         log_fh.flush()
         proc = subprocess.Popen(
-            ["/bin/bash", "-lc", resolved_command],
+            shell_args,
             cwd=resolved_cwd,
             env=_build_shell_env(),
             stdin=subprocess.DEVNULL,
@@ -801,6 +865,7 @@ def start_project_service(
             "name": resolved_name,
             "kind": resolved_kind,
             "command": resolved_command,
+            "shell_argv": shell_args,
             "cwd": resolved_cwd,
             "port": resolved_port,
             "health_url": resolved_health_url,

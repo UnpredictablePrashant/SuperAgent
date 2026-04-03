@@ -169,6 +169,164 @@ class TestUIRequestLogging(unittest.TestCase):
         self.assertIn("127.0.0.1", logged[0])
 
 
+class TestUIStepFormatting(unittest.TestCase):
+    def test_format_step_includes_timing_and_failure_reason(self):
+        import kendr.ui_server as ui_server
+
+        step = {
+            "execution_id": 42,
+            "agent_name": "planner_agent",
+            "status": "failed",
+            "reason": "Create a detailed step-by-step plan before execution.",
+            "output_excerpt": "Planner failed while calling provider 'openai' with model 'gpt-4o-mini' (APIConnectionError): Connection error.",
+            "timestamp": "2026-04-03T10:00:00+00:00",
+            "completed_at": "2026-04-03T10:00:02.500000+00:00",
+        }
+
+        formatted = ui_server._format_step(step)
+
+        self.assertEqual(formatted["execution_id"], 42)
+        self.assertEqual(formatted["started_at"], step["timestamp"])
+        self.assertEqual(formatted["completed_at"], step["completed_at"])
+        self.assertEqual(formatted["duration_ms"], 2500)
+        self.assertEqual(formatted["duration_label"], "2.5s")
+        self.assertIn("Connection error", formatted["failure_reason"])
+
+
+class TestProjectActivityFormatting(unittest.TestCase):
+    def test_project_activity_event_includes_actor_and_duration(self):
+        import kendr.ui_server as ui_server
+
+        event = ui_server._project_activity_event(
+            kind="analysis",
+            title="Calling project analysis model",
+            actor="project_ask",
+            status="completed",
+            task="Inspect project and answer the question",
+            subtask="Answer project question",
+            started_at="2026-04-03T10:00:00+00:00",
+            completed_at="2026-04-03T10:00:01.250000+00:00",
+        )
+
+        self.assertEqual(event["actor"], "project_ask")
+        self.assertEqual(event["duration_ms"], 1250)
+        self.assertEqual(event["duration_label"], "1.2s")
+
+    def test_project_activity_event_keeps_running_events_open(self):
+        import kendr.ui_server as ui_server
+
+        event = ui_server._project_activity_event(
+            kind="command",
+            title="Running terminal command",
+            status="running",
+            command="git status",
+            cwd="/workspace",
+        )
+
+        self.assertEqual(event["status"], "running")
+        self.assertEqual(event["completed_at"], "")
+        self.assertEqual(event["command"], "git status")
+
+
+class TestChatHtmlExecutionLens(unittest.TestCase):
+    def test_chat_html_includes_execution_lens_surface(self):
+        import kendr.ui_server as ui_server
+
+        self.assertIn("Execution Lens", ui_server._CHAT_HTML)
+        self.assertIn("chatInspectorActivityList", ui_server._CHAT_HTML)
+        self.assertIn("chatCommandTrack", ui_server._CHAT_HTML)
+
+    def test_chat_html_includes_collapsible_deep_research_panel(self):
+        import kendr.ui_server as ui_server
+
+        self.assertIn("deepResearchToggleBtn", ui_server._CHAT_HTML)
+        self.assertIn("deepResearchPanelBody", ui_server._CHAT_HTML)
+        self.assertIn("toggleDeepResearchPanel()", ui_server._CHAT_HTML)
+        self.assertIn("updateDeepResearchPanelSummary()", ui_server._CHAT_HTML)
+
+    def test_chat_html_includes_approval_modal(self):
+        import kendr.ui_server as ui_server
+
+        self.assertIn("chatApprovalModal", ui_server._CHAT_HTML)
+        self.assertIn("_submitChatApproval('approve')", ui_server._CHAT_HTML)
+        self.assertIn("Send Suggestion", ui_server._CHAT_HTML)
+
+
+class TestProjectsHtmlApprovalModal(unittest.TestCase):
+    def test_projects_html_includes_approval_modal(self):
+        import kendr.ui_server as ui_server
+
+        self.assertIn("projectApprovalModal", ui_server._PROJECTS_HTML)
+        self.assertIn("_submitProjectApproval('approve')", ui_server._PROJECTS_HTML)
+        self.assertIn("Suggestion", ui_server._PROJECTS_HTML)
+
+
+class TestGatewayTimeoutHelpers(unittest.TestCase):
+    def test_gateway_long_timeout_accepts_zero_as_unbounded(self):
+        import kendr.ui_server as ui_server
+
+        with patch.dict(os.environ, {"KENDR_GATEWAY_LONG_TIMEOUT_SECONDS": "0"}, clear=False):
+            self.assertIsNone(ui_server._gateway_long_timeout_seconds())
+
+
+class TestLiveRunOverlay(unittest.TestCase):
+    def test_live_recent_runs_prefers_running_pending_state(self):
+        import kendr.ui_server as ui_server
+
+        runs = [{
+            "run_id": "run-1",
+            "user_query": "Old query",
+            "status": "completed",
+            "started_at": "2026-04-03T10:00:00+00:00",
+            "updated_at": "2026-04-03T10:01:00+00:00",
+            "completed_at": "2026-04-03T10:01:00+00:00",
+        }]
+        pending = {
+            "run_id": "run-1",
+            "status": "running",
+            "started_at": "2026-04-03T10:00:00+00:00",
+            "updated_at": "2026-04-03T10:02:00+00:00",
+            "completed_at": "",
+            "payload": {"text": "Fresh query", "working_directory": "/tmp/demo"},
+        }
+
+        with patch.dict("kendr.ui_server._pending_runs", {"run-1": pending}, clear=True):
+            merged = ui_server._live_recent_runs(runs)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["status"], "running")
+        self.assertEqual(merged[0]["user_query"], "Old query")
+        self.assertEqual(merged[0]["working_directory"], "/tmp/demo")
+        self.assertEqual(merged[0]["completed_at"], "")
+
+    def test_live_run_marks_awaiting_input_from_pending_result(self):
+        import kendr.ui_server as ui_server
+
+        run_row = {
+            "run_id": "run-2",
+            "user_query": "Need approval",
+            "status": "running",
+            "started_at": "2026-04-03T10:00:00+00:00",
+            "updated_at": "2026-04-03T10:01:00+00:00",
+            "completed_at": "",
+        }
+        pending = {
+            "run_id": "run-2",
+            "status": "completed",
+            "started_at": "2026-04-03T10:00:00+00:00",
+            "updated_at": "2026-04-03T10:02:00+00:00",
+            "completed_at": "2026-04-03T10:02:00+00:00",
+            "payload": {"text": "Need approval"},
+            "result": {"awaiting_user_input": True, "pending_user_input_kind": "approval"},
+        }
+
+        with patch.dict("kendr.ui_server._pending_runs", {"run-2": pending}, clear=True):
+            merged = ui_server._live_run(run_row)
+
+        self.assertEqual(merged["status"], "awaiting_user_input")
+        self.assertTrue(merged["awaiting_user_input"])
+
+
 class TestUIServerRawValuesStripped(unittest.TestCase):
     def setUp(self):
         self._patch_snapshot = patch(
@@ -293,6 +451,135 @@ class TestHealthEndpoint(unittest.TestCase):
         self.assertEqual(body.get("status"), "ok")
 
 
+class TestUIModelInventory(unittest.TestCase):
+    def test_models_endpoint_uses_ready_provider_when_configured_provider_is_offline(self):
+        from kendr.ui_server import KendrUIHandler
+        from http.client import HTTPConnection
+
+        with (
+            patch("kendr.llm_router.get_active_provider", return_value="ollama"),
+            patch("kendr.llm_router.get_model_for_provider", side_effect=lambda provider, role="general": {
+                "ollama": "llama3.2",
+                "openai": "gpt-5.1",
+            }.get(provider, "gpt-4o-mini")),
+            patch("kendr.llm_router.is_ollama_running", return_value=False),
+            patch("kendr.llm_router.list_ollama_models", return_value=[]),
+            patch("kendr.llm_router.all_provider_statuses", return_value=[
+                {"provider": "ollama", "ready": False, "model": "llama3.2", "note": "Not running"},
+                {"provider": "openai", "ready": True, "model": "gpt-5.1", "note": "API key configured"},
+            ]),
+        ):
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), KendrUIHandler)
+            _, port = srv.server_address
+            t = threading.Thread(target=srv.handle_request, daemon=True)
+            t.start()
+            try:
+                conn = HTTPConnection("127.0.0.1", port, timeout=3)
+                conn.request("GET", "/api/models")
+                resp = conn.getresponse()
+                body = json.loads(resp.read())
+                conn.close()
+            finally:
+                srv.server_close()
+                t.join(timeout=3)
+
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body.get("configured_provider"), "ollama")
+        self.assertFalse(body.get("configured_provider_ready"))
+        self.assertEqual(body.get("active_provider"), "openai")
+        self.assertEqual(body.get("active_model"), "gpt-5.1")
+
+
+class TestUIChatPayloads(unittest.TestCase):
+    def test_chat_endpoint_forwards_provider_and_model_to_runtime_payload(self):
+        from kendr.ui_server import KendrUIHandler
+        from http.client import HTTPConnection
+
+        captured = {}
+
+        def _capture(run_id, payload):
+            captured["run_id"] = run_id
+            captured["payload"] = dict(payload)
+
+        with patch("kendr.ui_server._gateway_ready", return_value=True), patch("kendr.ui_server._start_run_background", side_effect=_capture):
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), KendrUIHandler)
+            _, port = srv.server_address
+            t = threading.Thread(target=srv.handle_request, daemon=True)
+            t.start()
+            try:
+                conn = HTTPConnection("127.0.0.1", port, timeout=3)
+                payload = json.dumps({
+                    "text": "inspect the project",
+                    "channel": "project_ui",
+                    "working_directory": os.getcwd(),
+                    "provider": "openai",
+                    "model": "gpt-5.1",
+                }).encode()
+                conn.request(
+                    "POST",
+                    "/api/chat",
+                    body=payload,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(payload))},
+                )
+                resp = conn.getresponse()
+                body = json.loads(resp.read())
+                conn.close()
+            finally:
+                srv.server_close()
+                t.join(timeout=3)
+
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(body.get("streaming"))
+        self.assertEqual(captured["payload"]["provider"], "openai")
+        self.assertEqual(captured["payload"]["model"], "gpt-5.1")
+
+
+class TestUIModelSelectionPersistence(unittest.TestCase):
+    def test_models_set_saves_provider_specific_model_key(self):
+        from kendr.ui_server import KendrUIHandler
+        from http.client import HTTPConnection
+
+        save_calls = {}
+
+        def _capture(component_id, values):
+            save_calls["component_id"] = component_id
+            save_calls["values"] = dict(values)
+            return {}
+
+        with (
+            patch("kendr.ui_server.save_component_values", side_effect=_capture),
+            patch("kendr.ui_server.apply_setup_env_defaults"),
+            patch("kendr.llm_router.get_model_setting_env", return_value="OPENAI_MODEL_GENERAL"),
+            patch("kendr.llm_router.get_model_for_provider", return_value="gpt-5.1"),
+        ):
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), KendrUIHandler)
+            _, port = srv.server_address
+            t = threading.Thread(target=srv.handle_request, daemon=True)
+            t.start()
+            try:
+                conn = HTTPConnection("127.0.0.1", port, timeout=3)
+                payload = json.dumps({"provider": "openai", "model": "gpt-5.1"}).encode()
+                conn.request(
+                    "POST",
+                    "/api/models/set",
+                    body=payload,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(payload))},
+                )
+                resp = conn.getresponse()
+                body = json.loads(resp.read())
+                conn.close()
+            finally:
+                srv.server_close()
+                t.join(timeout=3)
+
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(body.get("saved"))
+        self.assertEqual(save_calls["component_id"], "core_runtime")
+        self.assertEqual(save_calls["values"]["KENDR_LLM_PROVIDER"], "openai")
+        self.assertEqual(save_calls["values"]["KENDR_MODEL"], "")
+        self.assertEqual(save_calls["values"]["OPENAI_MODEL_GENERAL"], "gpt-5.1")
+
+
 class TestStreamAlias(unittest.TestCase):
     def test_stream_alias_rejects_missing_run_id(self):
         from kendr.ui_server import KendrUIHandler
@@ -346,10 +633,13 @@ class TestProjectsWorkbenchHtml(unittest.TestCase):
 
         self.assertIn("Agent Mode", ui_server._PROJECTS_HTML)
         self.assertIn("Coding Mode", ui_server._PROJECTS_HTML)
+        self.assertIn("AI Mode", ui_server._PROJECTS_HTML)
         self.assertIn("Agent-Focused Workbench", ui_server._PROJECTS_HTML)
         self.assertIn('data-project-tab="chat"', ui_server._PROJECTS_HTML)
         self.assertIn("renderMarkdown", ui_server._PROJECTS_HTML)
         self.assertIn("handleFileTreeClick", ui_server._PROJECTS_HTML)
+        self.assertIn('id="projShellToggle"', ui_server._PROJECTS_HTML)
+        self.assertIn('id="projDestructiveToggle"', ui_server._PROJECTS_HTML)
 
 
 class TestProjectChatPersistence(unittest.TestCase):
@@ -543,6 +833,74 @@ class TestDeepResearchChatPayload(unittest.TestCase):
         self.assertEqual(forwarded["local_drive_paths"], ["/tmp/work/research-inputs"])
         self.assertTrue(forwarded["local_drive_recursive"])
         self.assertTrue(forwarded["local_drive_force_long_document"])
+
+    def test_handle_chat_project_ui_starts_runtime_and_persists_request(self):
+        from kendr.ui_server import KendrUIHandler
+
+        handler = object.__new__(KendrUIHandler)
+        handler._json = MagicMock()
+
+        body = {
+            "text": "Delete agentgamma and push the code",
+            "channel": "project_ui",
+            "project_id": "proj-1",
+            "project_root": "/tmp/demo",
+            "project_name": "Demo",
+            "run_id": "ui-project-run",
+            "shell_auto_approve": True,
+            "privileged_allow_destructive": True,
+            "privileged_allowed_paths": ["/tmp/demo"],
+        }
+
+        with (
+            patch("kendr.ui_server._gateway_ready", return_value=True),
+            patch("kendr.ui_server._persist_project_chat_user_request", return_value=("proj-1", "/tmp/demo", "Demo")) as persist_user,
+            patch("kendr.ui_server._start_run_background") as start_run,
+            patch.dict("kendr.ui_server._pending_runs", {}, clear=True),
+            patch.dict("kendr.ui_server._run_event_queues", {}, clear=True),
+        ):
+            handler._handle_chat(body)
+
+        handler._json.assert_called_once_with(200, {"run_id": "ui-project-run", "streaming": True, "status": "started"})
+        persist_user.assert_called_once()
+        forwarded = start_run.call_args.args[1]
+        self.assertEqual(forwarded["channel"], "project_ui")
+        self.assertEqual(forwarded["chat_id"], "proj-1")
+        self.assertEqual(forwarded["project_id"], "proj-1")
+        self.assertEqual(forwarded["project_root"], "/tmp/demo")
+        self.assertEqual(forwarded["working_directory"], "/tmp/demo")
+        self.assertEqual(forwarded["project_name"], "Demo")
+        self.assertTrue(forwarded["shell_auto_approve"])
+        self.assertTrue(forwarded["privileged_allow_destructive"])
+        self.assertEqual(forwarded["privileged_allowed_paths"], ["/tmp/demo"])
+
+    def test_handle_chat_project_ui_persists_gateway_error(self):
+        from kendr.ui_server import KendrUIHandler
+
+        handler = object.__new__(KendrUIHandler)
+        handler._json = MagicMock()
+
+        body = {
+            "text": "Delete agentgamma and push the code",
+            "channel": "project_ui",
+            "project_id": "proj-1",
+            "project_root": "/tmp/demo",
+            "project_name": "Demo",
+        }
+
+        with (
+            patch("kendr.ui_server._gateway_ready", return_value=False),
+            patch("kendr.ui_server._persist_project_chat_user_request") as persist_user,
+            patch("kendr.ui_server._persist_project_chat_result") as persist_result,
+        ):
+            handler._handle_chat(body)
+
+        handler._json.assert_called_once_with(
+            503,
+            {"error": "Gateway not running", "detail": "Start it with: kendr gateway start"},
+        )
+        persist_user.assert_called_once()
+        persist_result.assert_called_once()
 
 
 if __name__ == "__main__":

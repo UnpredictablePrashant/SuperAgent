@@ -12,6 +12,7 @@ from typing import Any
 
 from langgraph.graph import END, StateGraph
 from kendr.orchestration import ResumeStateOverrides, RuntimeState, state_awaiting_user_input
+from kendr.execution_trace import append_execution_event, render_execution_event_line
 from kendr.persistence import (
     get_channel_session,
     initialize_db,
@@ -58,6 +59,7 @@ from tasks.utils import (
     record_work_note,
     resolve_output_path,
     reset_text_file,
+    runtime_model_override,
     set_active_output_dir,
     write_text_file,
 )
@@ -429,6 +431,62 @@ class AgentRuntime:
         )
         return any(marker in text for marker in markers)
 
+    _PROJECT_WORKBENCH_RE = re.compile(
+        r"(?:"  # explicit codebase inspection / modification requests from the project workbench
+        r"\breview\b|\binspect\b|\bdebug\b|\btrace\b|\bexplain\b|\bsummarize\b|\bsummarise\b"
+        r"|\banaly[sz]e\b|\bfind\b|\bsearch\b|\bgrep\b|\bscan\b|\bfix\b|\bimplement\b"
+        r"|\brefactor\b|\bedit\b|\bchange\b|\bupdate\b|\bcompare\b|\bwhy\b|\bhow\b"
+        r"|\bwhat\s+does\b|\bwhere\s+is\b|\bfailing\b|\bbug\b|\bfeature\b"
+        r")",
+        re.IGNORECASE,
+    )
+
+    def _project_channel_name(self, state: dict) -> str:
+        for value in (
+            state.get("incoming_channel", ""),
+            ((state.get("gateway_message") or {}) if isinstance(state.get("gateway_message"), dict) else {}).get("channel", ""),
+            ((state.get("channel_session") or {}) if isinstance(state.get("channel_session"), dict) else {}).get("channel", ""),
+        ):
+            channel = str(value or "").strip().lower()
+            if channel:
+                return channel
+        return ""
+
+    def _is_project_workbench_request(self, state: dict) -> bool:
+        channel = self._project_channel_name(state)
+        if channel not in {"project_ui", "projectui", "project"}:
+            return False
+
+        project_root = str(state.get("project_root", "") or "").strip()
+        working_directory = str(state.get("working_directory", "") or "").strip()
+        if not project_root and not working_directory:
+            return False
+
+        if self._is_project_build_request(state):
+            return False
+        if self._is_github_request(state):
+            return False
+        if self._is_local_command_request(state):
+            return False
+        if self._is_research_request(state):
+            return False
+        if self._is_communication_summary_request(state):
+            return False
+        if self._is_document_generation_request(state):
+            return False
+        if self._is_superrag_request(state):
+            return False
+
+        text = " ".join(
+            [
+                str(state.get("user_query", "") or ""),
+                str(state.get("current_objective", "") or ""),
+            ]
+        ).strip()
+        if len(text.split()) < 3:
+            return False
+        return bool(self._PROJECT_WORKBENCH_RE.search(text))
+
     def _read_file_excerpt(self, path: Path, limit: int = 5000) -> str:
         try:
             raw = path.read_text(encoding="utf-8")
@@ -497,6 +555,52 @@ class AgentRuntime:
             else:
                 lines.append(f"{actor}: {event}")
         return lines
+
+    def _recent_execution_trace(self, state: dict, limit: int = 8) -> list[dict]:
+        events = state.get("execution_trace", [])
+        if not isinstance(events, list) or not events:
+            return []
+        return [item for item in events[-limit:] if isinstance(item, dict)]
+
+    def _record_execution_trace(
+        self,
+        state: dict,
+        *,
+        kind: str,
+        actor: str,
+        status: str,
+        title: str,
+        detail: str = "",
+        command: str = "",
+        cwd: str = "",
+        started_at: str = "",
+        completed_at: str = "",
+        duration_ms: int | None = None,
+        exit_code: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        active_agent = actor if kind == "agent" else str(state.get("last_agent", "") or actor)
+        event = append_execution_event(
+            state,
+            kind=kind,
+            actor=actor,
+            status=status,
+            title=title,
+            detail=detail,
+            command=command,
+            cwd=cwd,
+            started_at=started_at,
+            completed_at=completed_at,
+            duration_ms=duration_ms,
+            exit_code=exit_code,
+            metadata=metadata,
+            persist=True,
+            active_agent=active_agent,
+        )
+        summary_line = render_execution_event_line(event)
+        if summary_line:
+            append_session_event(state, actor, f"trace_{status}", summary_line)
+        return event
 
     def _recent_a2a_messages(self, state: dict) -> str:
         ensure_a2a_state(state, state.get("available_agent_cards") or self._agent_cards())
@@ -576,6 +680,7 @@ class AgentRuntime:
                 "plan_step_index": plan_summary.get("plan_step_index", 0),
                 "plan_step_total": plan_summary.get("plan_step_total", 0),
                 "recent_events": self._recent_event_summary(state),
+                "execution_trace": self._recent_execution_trace(state),
             },
         }
 
@@ -1523,6 +1628,19 @@ class AgentRuntime:
         before_state = {k: v for k, v in state.items() if k != "a2a"}
         _agent_start_mono = time.monotonic()
         _agent_start_ts = datetime.now(timezone.utc).isoformat()
+        self._record_execution_trace(
+            state,
+            kind="agent",
+            actor=agent_name,
+            status="running",
+            title=f"{agent_name} started",
+            detail=self._active_task_summary(state, active_task),
+            started_at=_agent_start_ts,
+            metadata={
+                "task_id": active_task["task_id"],
+                "intent": active_task.get("intent", ""),
+            },
+        )
         _spinner_ctx = None
         try:
             from kendr.cli_output import make_spinner as _make_spinner
@@ -1560,6 +1678,21 @@ class AgentRuntime:
             )
             state["review_pending"] = requires_review
             state = self._append_history(state, agent_name, "success", state.get("orchestrator_reason", ""), output_text, start_timestamp=_agent_start_ts)
+            self._record_execution_trace(
+                state,
+                kind="agent",
+                actor=agent_name,
+                status="completed",
+                title=f"{agent_name} completed",
+                detail=self._truncate(output_text, 240),
+                started_at=_agent_start_ts,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                duration_ms=int(_agent_elapsed * 1000),
+                metadata={
+                    "task_id": active_task["task_id"],
+                    "intent": active_task.get("intent", ""),
+                },
+            )
             try:
                 from kendr.cli_output import step_done as _cli_step_done
                 _cli_step_done(agent_name, duration=_agent_elapsed)
@@ -1602,6 +1735,21 @@ class AgentRuntime:
                 ),
             )
             state = self._append_history(state, agent_name, "error", state.get("orchestrator_reason", ""), error_message, start_timestamp=_agent_start_ts)
+            self._record_execution_trace(
+                state,
+                kind="agent",
+                actor=agent_name,
+                status="failed",
+                title=f"{agent_name} failed",
+                detail=self._truncate(error_message, 240),
+                started_at=_agent_start_ts,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                duration_ms=int((time.monotonic() - _agent_start_mono) * 1000),
+                metadata={
+                    "task_id": active_task["task_id"],
+                    "intent": active_task.get("intent", ""),
+                },
+            )
             try:
                 from kendr.cli_output import step_error as _cli_step_error
                 _cli_step_error(agent_name, error_message)
@@ -1930,6 +2078,36 @@ class AgentRuntime:
                     intent="communication-digest",
                     content=objective,
                     state_updates={"current_objective": objective},
+                ),
+            )
+            return state
+
+        if (
+            not state.get("plan_steps")
+            and state.get("last_agent") != "master_coding_agent"
+            and self._is_agent_available(state, "master_coding_agent")
+            and self._is_project_workbench_request(state)
+        ):
+            reason = (
+                "Project workbench request detected with an active repository context. "
+                "Route directly to master_coding_agent for code-aware inspection or implementation, bypassing the generic planner."
+            )
+            objective = state.get("current_objective") or state.get("user_query", "")
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "master_coding_agent"
+            state["codebase_mode"] = True
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="master_coding_agent",
+                    intent="project-workbench-dispatch",
+                    content=objective,
+                    state_updates={
+                        "master_coding_request": objective,
+                        "coding_task": objective,
+                        "codebase_mode": True,
+                    },
                 ),
             )
             return state
@@ -3541,10 +3719,13 @@ Return ONLY valid JSON in this exact schema:
         record_work_note(initial_state, "user", "request", user_query)
         append_daily_memory_note(initial_state, "user", "request", user_query)
         self._write_session_record(initial_state, status="running")
+        provider_override = str(initial_state.get("provider") or "").strip().lower()
+        model_override = str(initial_state.get("model") or "").strip()
         try:
-            app = self.build_workflow()
-            self.save_graph(app)
-            result = app.invoke(initial_state)
+            with runtime_model_override(provider_override, model_override):
+                app = self.build_workflow()
+                self.save_graph(app)
+                result = app.invoke(initial_state)
             _fo_raw = result.get("final_output") or result.get("draft_response", "")
             final_output = _fo_raw if isinstance(_fo_raw, str) else (
                 "\n".join(

@@ -21,6 +21,8 @@ os.makedirs(RUN_OUTPUT_ROOT, exist_ok=True)
 ACTIVE_OUTPUT_DIR = OUTPUT_DIR
 
 _ACTIVE_AGENT_NAME: ContextVar[str] = ContextVar("active_agent_name", default="")
+_ACTIVE_PROVIDER_OVERRIDE: ContextVar[str] = ContextVar("active_provider_override", default="")
+_ACTIVE_MODEL_OVERRIDE: ContextVar[str] = ContextVar("active_model_override", default="")
 _LLM_CLIENTS: dict[str, object] = {}
 _DEFAULT_GENERAL_MODEL = os.getenv("OPENAI_MODEL_GENERAL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 _DEFAULT_CODING_MODEL = os.getenv("OPENAI_MODEL_CODING", os.getenv("OPENAI_CODEX_MODEL", _DEFAULT_GENERAL_MODEL))
@@ -50,11 +52,26 @@ def _agent_role(agent_name: str) -> str:
     return "coding" if agent_name in _CODING_AGENTS else "general"
 
 
+@contextmanager
+def runtime_model_override(provider: str = "", model: str = ""):
+    provider_token = _ACTIVE_PROVIDER_OVERRIDE.set(str(provider or "").strip().lower())
+    model_token = _ACTIVE_MODEL_OVERRIDE.set(str(model or "").strip())
+    try:
+        yield
+    finally:
+        _ACTIVE_PROVIDER_OVERRIDE.reset(provider_token)
+        _ACTIVE_MODEL_OVERRIDE.reset(model_token)
+
+
 def model_selection_for_agent(agent_name: str = "") -> dict[str, str]:
     from kendr.llm_router import get_active_provider, get_model_for_provider
 
     name = (agent_name or "").strip()
-    provider = get_active_provider()
+    provider = (_ACTIVE_PROVIDER_OVERRIDE.get("") or get_active_provider()).strip().lower()
+    forced_model = _ACTIVE_MODEL_OVERRIDE.get("").strip()
+
+    if forced_model:
+        return {"model": forced_model, "source": "runtime_override", "provider": provider}
 
     # Agent-specific override still respected
     if name:
@@ -75,8 +92,8 @@ def model_for_agent(agent_name: str = "") -> str:
 def _client_for_model(model: str, role: str = "general") -> object:
     from kendr.llm_router import build_llm, get_active_provider
 
-    provider = get_active_provider()
-    cache_key = f"{provider}:{model}"
+    provider = (_ACTIVE_PROVIDER_OVERRIDE.get("") or get_active_provider()).strip().lower()
+    cache_key = f"{provider}:{role}:{model}"
     client = _LLM_CLIENTS.get(cache_key)
     if client is None:
         try:

@@ -39,15 +39,27 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 # ── 2. Virtual environment ───────────────────────────────────────────────────
-if [ ! -d ".venv" ]; then
+create_venv() {
   info "Creating virtual environment..."
   python3 -m venv .venv
+}
+
+if [ ! -d ".venv" ]; then
+  create_venv
+elif [ -d ".venv/Scripts" ] && [ ! -e ".venv/bin/python" ]; then
+  warn "Existing .venv was created by Windows Python and cannot be used from bash."
+  info "Recreating virtual environment for this shell..."
+  rm -rf .venv
+  create_venv
 fi
 ok "Virtual environment ready"
 
 VENV_PYTHON="$ROOT_DIR/.venv/bin/python"
-VENV_PIP="$ROOT_DIR/.venv/bin/pip"
 VENV_BIN="$ROOT_DIR/.venv/bin"
+
+if [ ! -e "$VENV_PYTHON" ]; then
+  die "Virtual environment is missing $VENV_PYTHON\n  → Delete .venv and rerun ./scripts/install.sh"
+fi
 
 # ── 3. Upgrade pip ───────────────────────────────────────────────────────────
 info "Upgrading pip..."
@@ -57,11 +69,11 @@ ok "pip up to date"
 # ── 4. Install kendr ─────────────────────────────────────────────────────────
 if [[ "$FULL_INSTALL" -eq 1 ]]; then
   info "Installing kendr with all optional providers..."
-  "$VENV_PIP" install -e ".[full]" --quiet
+  "$VENV_PYTHON" -m pip install -e ".[full]" --quiet
   ok "kendr installed (full — all providers)"
 else
   info "Installing kendr (core + OpenAI)..."
-  "$VENV_PIP" install -e "." --quiet
+  "$VENV_PYTHON" -m pip install -e "." --quiet
   ok "kendr installed"
   echo ""
   echo -e "  ${YELLOW}Add more LLM providers any time:${RESET}"

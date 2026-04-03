@@ -2,12 +2,64 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from kendr.llm_router import provider_status
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.file_memory import update_planning_file
 from tasks.utils import OUTPUT_DIR, llm, log_task_update, logger, model_selection_for_agent, normalize_llm_text, write_text_file
 
 
 NON_EXECUTABLE_PLAN_AGENTS = {"planner_agent"}
+
+
+def _planner_provider_snapshot() -> dict[str, str]:
+    selection = model_selection_for_agent("planner_agent")
+    provider = str(selection.get("provider") or "").strip()
+    snapshot = provider_status(provider)
+    snapshot["provider"] = provider
+    snapshot["model"] = str(selection.get("model") or snapshot.get("model") or "").strip()
+    snapshot["model_source"] = str(selection.get("source") or "").strip()
+    return snapshot
+
+
+def _ensure_planner_llm_ready() -> dict[str, str]:
+    snapshot = _planner_provider_snapshot()
+    if snapshot.get("ready"):
+        return snapshot
+    provider = str(snapshot.get("provider") or "unknown").strip()
+    model = str(snapshot.get("model") or "unknown").strip()
+    note = str(snapshot.get("note") or "").strip()
+    base_url = str(snapshot.get("base_url") or "").strip()
+    parts = [f"Planner preflight failed: provider '{provider}' is not ready for model '{model}'."]
+    if note:
+        parts.append(note)
+    if base_url:
+        parts.append(f"Base URL: {base_url}")
+    raise RuntimeError(" ".join(parts).strip())
+
+
+def _planner_error_message(exc: Exception, snapshot: dict[str, str]) -> str:
+    provider = str(snapshot.get("provider") or "unknown").strip()
+    model = str(snapshot.get("model") or "unknown").strip()
+    error_type = type(exc).__name__
+    raw_message = str(exc or "").strip()
+    lowered = raw_message.lower()
+    if "api key" in lowered or "authentication" in lowered or "unauthorized" in lowered:
+        guidance = "Check the configured API credentials for the active provider."
+    elif "timeout" in lowered:
+        guidance = "The provider timed out. Retryable after connectivity stabilizes."
+    elif "connection" in lowered or "dns" in lowered or "refused" in lowered:
+        guidance = "The provider could not be reached. Check network access, base URL, and provider health."
+    else:
+        guidance = "Inspect the provider configuration and the execution log for the full stack trace."
+    if raw_message:
+        return (
+            f"Planner failed while calling provider '{provider}' with model '{model}' "
+            f"({error_type}): {raw_message}. {guidance}"
+        )
+    return (
+        f"Planner failed while calling provider '{provider}' with model '{model}' "
+        f"({error_type}). {guidance}"
+    )
 
 
 def _strip_code_fences(text: str) -> str:
@@ -361,6 +413,7 @@ def planner_agent(state):
 
     user_query = str(task_content or state.get("current_objective") or state["user_query"]).strip()
     logger.info(f"[Planner] User query: {user_query}")
+    provider_snapshot = _ensure_planner_llm_ready()
 
     prompt = f"""
 You are a planning agent in a multi-agent runtime.
@@ -439,7 +492,10 @@ Return ONLY valid JSON in this exact schema (no extra fields, no markdown, no ex
 }}
 """.strip()
 
-    response = llm.invoke(prompt)
+    try:
+        response = llm.invoke(prompt)
+    except Exception as exc:
+        raise RuntimeError(_planner_error_message(exc, provider_snapshot)) from exc
     raw_plan = normalize_llm_text(response.content if hasattr(response, "content") else response)
     try:
         parsed_plan = json.loads(_strip_code_fences(raw_plan))

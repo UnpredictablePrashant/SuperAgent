@@ -212,6 +212,43 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("|- done: Ingest local files", message)
         self.assertIn("|- remaining: Draft report", message)
 
+    def test_run_progress_message_prefers_execution_trace_details(self):
+        message = cli._build_run_progress_message(
+            {
+                "status": "running",
+                "active_agent": "os_agent",
+                "step_count": 2,
+                "summary_json": json.dumps(
+                    {
+                        "active_task": "Run the security scan.",
+                        "execution_trace": [
+                            {
+                                "timestamp": "2026-04-03T10:00:00+00:00",
+                                "actor": "os_agent",
+                                "title": "Shell command started",
+                                "command": "nmap -Pn herovired.com",
+                                "status": "running",
+                            },
+                            {
+                                "timestamp": "2026-04-03T10:00:04+00:00",
+                                "actor": "os_agent",
+                                "title": "Shell command completed",
+                                "command": "nmap -Pn herovired.com",
+                                "duration_label": "4.0s",
+                                "exit_code": 0,
+                                "status": "completed",
+                            },
+                        ],
+                    }
+                ),
+            }
+        )
+
+        self.assertIn("|- log: ", message)
+        self.assertIn("Shell command started", message)
+        self.assertIn("nmap -Pn herovired.com", message)
+        self.assertIn("4.0s", message)
+
     def test_main_without_command_prints_help(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
@@ -239,7 +276,9 @@ class CliSmokeTests(unittest.TestCase):
             ):
                 log_path = cli._gateway_log_path()
 
-        self.assertEqual(log_path, project_root / "logs" / "kendr" / "gateway.log")
+        expected = os.path.normcase(os.path.realpath(str(project_root / "logs" / "kendr" / "gateway.log")))
+        actual = os.path.normcase(os.path.realpath(str(log_path)))
+        self.assertEqual(actual, expected)
 
     def test_status_json(self):
         with (

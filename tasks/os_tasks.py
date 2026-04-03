@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 
+from kendr.execution_trace import append_execution_event, now_iso
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.privileged_control import (
     append_privileged_audit_event,
@@ -374,6 +375,21 @@ def os_agent(state):
         f"Running command with shell '{shell_name}' in '{resolved_working_directory}'.",
         command,
     )
+    command_started_at = now_iso()
+    append_execution_event(
+        state,
+        kind="command",
+        actor="os_agent",
+        status="running",
+        title="Shell command started",
+        detail=thought,
+        command=command,
+        cwd=resolved_working_directory,
+        started_at=command_started_at,
+        metadata={"shell": shell_name, "target_os": target_os},
+        persist=True,
+        active_agent="os_agent",
+    )
 
     try:
         completed = subprocess.run(
@@ -412,6 +428,22 @@ def os_agent(state):
                 "backup_path": backup_path,
             },
         )
+        append_execution_event(
+            state,
+            kind="command",
+            actor="os_agent",
+            status="completed" if completed.returncode == 0 else "failed",
+            title="Shell command completed" if completed.returncode == 0 else "Shell command failed",
+            detail=(completed.stderr or completed.stdout or "")[:240],
+            command=command,
+            cwd=resolved_working_directory,
+            started_at=command_started_at,
+            completed_at=now_iso(),
+            exit_code=completed.returncode,
+            metadata={"shell": shell_name, "target_os": target_os},
+            persist=True,
+            active_agent="os_agent",
+        )
     except Exception as exc:
         completed = None
         report = _format_execution_report(
@@ -439,6 +471,21 @@ def os_agent(state):
                 "error": str(exc),
                 "backup_path": backup_path,
             },
+        )
+        append_execution_event(
+            state,
+            kind="command",
+            actor="os_agent",
+            status="failed",
+            title="Shell command errored",
+            detail=str(exc),
+            command=command,
+            cwd=resolved_working_directory,
+            started_at=command_started_at,
+            completed_at=now_iso(),
+            metadata={"shell": shell_name, "target_os": target_os},
+            persist=True,
+            active_agent="os_agent",
         )
 
     state["os_command"] = command

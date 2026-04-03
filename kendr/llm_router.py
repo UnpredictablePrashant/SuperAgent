@@ -85,6 +85,38 @@ _PROVIDER_MODEL_ENV: dict[str, str] = {
     PROVIDER_CUSTOM: "CUSTOM_LLM_MODEL",
 }
 
+_PROVIDER_DEFAULT_MODEL_SELECTION_ENV: dict[str, str] = {
+    PROVIDER_OPENAI: "OPENAI_MODEL_GENERAL",
+    PROVIDER_ANTHROPIC: "ANTHROPIC_MODEL",
+    PROVIDER_GOOGLE: "GOOGLE_MODEL",
+    PROVIDER_XAI: "XAI_MODEL",
+    PROVIDER_MINIMAX: "MINIMAX_MODEL",
+    PROVIDER_QWEN: "QWEN_MODEL",
+    PROVIDER_GLM: "GLM_MODEL",
+    PROVIDER_OLLAMA: "OLLAMA_MODEL",
+    PROVIDER_OPENROUTER: "OPENROUTER_MODEL",
+    PROVIDER_CUSTOM: "CUSTOM_LLM_MODEL",
+}
+
+_PROVIDER_RELEASE_MODELS: dict[str, list[str]] = {
+    PROVIDER_OPENAI: ["gpt-5", "gpt-5.1", "gpt-5-mini", "gpt-4o", "gpt-4o-mini", "o3"],
+    PROVIDER_ANTHROPIC: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    PROVIDER_GOOGLE: ["gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-pro"],
+    PROVIDER_XAI: ["grok-3", "grok-3-mini", "grok-2"],
+    PROVIDER_MINIMAX: ["MiniMax-M2", "image-01"],
+    PROVIDER_QWEN: ["qwen-max", "qwen-plus", "qwen-turbo"],
+    PROVIDER_GLM: ["glm-5", "glm-4", "glm-4-flash"],
+    PROVIDER_OLLAMA: ["llama3.2", "mistral", "deepseek-r1", "qwen2.5", "gemma3"],
+    PROVIDER_OPENROUTER: [
+        "openai/gpt-5",
+        "openai/gpt-4o",
+        "anthropic/claude-sonnet-4",
+        "google/gemini-2.5-pro",
+        "meta-llama/llama-3.1-8b-instruct",
+    ],
+    PROVIDER_CUSTOM: [],
+}
+
 # OpenAI-compatible base URLs per provider (None means use provider SDK)
 _PROVIDER_BASE_URLS: dict[str, str] = {
     PROVIDER_XAI: "https://api.x.ai/v1",
@@ -170,11 +202,6 @@ def get_base_url(provider: str) -> str:
 
 def get_model_for_provider(provider: str, role: str = "general") -> str:
     """Return the configured model for *provider* and *role* (general or coding)."""
-    # Allow global override
-    global_override = os.getenv("KENDR_MODEL", "").strip()
-    if global_override:
-        return global_override
-
     if provider == PROVIDER_OPENAI:
         if role == "coding":
             return (
@@ -182,10 +209,12 @@ def get_model_for_provider(provider: str, role: str = "general") -> str:
                 or os.getenv("OPENAI_CODEX_MODEL", "")
                 or os.getenv("OPENAI_MODEL_GENERAL", "")
                 or os.getenv("OPENAI_MODEL", _PROVIDER_DEFAULT_MODELS[PROVIDER_OPENAI])
+                or os.getenv("KENDR_MODEL", "")
             ).strip()
         return (
             os.getenv("OPENAI_MODEL_GENERAL", "")
             or os.getenv("OPENAI_MODEL", _PROVIDER_DEFAULT_MODELS[PROVIDER_OPENAI])
+            or os.getenv("KENDR_MODEL", "")
         ).strip()
 
     env = _PROVIDER_MODEL_ENV.get(provider, "")
@@ -194,7 +223,47 @@ def get_model_for_provider(provider: str, role: str = "general") -> str:
         if val:
             return val
 
+    global_override = os.getenv("KENDR_MODEL", "").strip()
+    if global_override:
+        return global_override
+
     return _PROVIDER_DEFAULT_MODELS.get(provider, "gpt-4o-mini")
+
+
+def get_model_setting_env(provider: str) -> str:
+    return _PROVIDER_DEFAULT_MODEL_SELECTION_ENV.get(provider, "")
+
+
+def known_models_for_provider(provider: str) -> list[str]:
+    return list(_PROVIDER_RELEASE_MODELS.get(provider, []))
+
+
+def _merge_model_choices(*groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for raw in group:
+            item = str(raw or "").strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
+def selectable_models_for_provider(provider: str) -> list[str]:
+    provider = str(provider or "").strip().lower()
+    if provider == PROVIDER_OLLAMA:
+        if not is_ollama_running():
+            return []
+        models = [str(item.get("name", "")).strip() for item in list_ollama_models()]
+        return [name for name in models if name]
+    if provider == PROVIDER_CUSTOM:
+        current = get_model_for_provider(provider)
+        return [current] if current else []
+    if not provider_status(provider).get("ready"):
+        return []
+    return known_models_for_provider(provider)
 
 
 # ── Ollama health check ───────────────────────────────────────────────────────
@@ -245,6 +314,7 @@ def provider_status(provider: str) -> dict:
             "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             "model": model,
             "local_models": [m.get("name", "") for m in models],
+            "selectable_models": [m.get("name", "") for m in models if str(m.get("name", "")).strip()],
             "note": "Running" if running else "Not running — start with: ollama serve",
         }
 
@@ -256,6 +326,7 @@ def provider_status(provider: str) -> dict:
             "has_key": True,
             "base_url": url,
             "model": model,
+            "selectable_models": [model] if model else [],
             "note": "Configured" if url else "Set CUSTOM_LLM_BASE_URL",
         }
 
@@ -265,6 +336,7 @@ def provider_status(provider: str) -> dict:
         "has_key": has_key,
         "base_url": base_url,
         "model": model,
+        "selectable_models": _merge_model_choices([model], known_models_for_provider(provider)) if has_key else [],
         "api_key_env": api_key_env,
         "note": "API key configured" if has_key else f"Set {api_key_env}",
     }

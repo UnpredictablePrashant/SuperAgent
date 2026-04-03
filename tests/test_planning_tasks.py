@@ -1,9 +1,11 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from tasks.planning_tasks import normalize_plan_data
+from tasks.planning_tasks import normalize_plan_data, planner_agent
+from tasks.utils import model_selection_for_agent, runtime_model_override
 
 
 class PlanningTaskTests(unittest.TestCase):
@@ -140,6 +142,47 @@ class PlanningTaskTests(unittest.TestCase):
         self.assertEqual(execution_steps[0]["depends_on"], [])
         self.assertEqual(execution_steps[1]["depends_on"], [])
         self.assertEqual(execution_steps[2]["depends_on"], ["step-1.1", "step-1.2"])
+
+    def test_planner_agent_fails_fast_when_provider_is_not_ready(self):
+        state = {"user_query": "Build a deployment plan.", "current_objective": "Build a deployment plan."}
+
+        with (
+            patch("tasks.planning_tasks.begin_agent_session", return_value=("", "Build a deployment plan.", "")),
+            patch("tasks.planning_tasks.log_task_update"),
+            patch("tasks.planning_tasks.model_selection_for_agent", return_value={"provider": "openai", "model": "gpt-4o-mini", "source": "OPENAI_MODEL_GENERAL"}),
+            patch("tasks.planning_tasks.provider_status", return_value={"provider": "openai", "ready": False, "note": "Set OPENAI_API_KEY", "base_url": "", "model": "gpt-4o-mini"}),
+        ):
+            with self.assertRaises(RuntimeError) as exc:
+                planner_agent(state)
+
+        self.assertIn("Planner preflight failed", str(exc.exception))
+        self.assertIn("Set OPENAI_API_KEY", str(exc.exception))
+
+    def test_planner_agent_wraps_provider_connection_errors_with_context(self):
+        state = {"user_query": "Build a deployment plan.", "current_objective": "Build a deployment plan."}
+
+        with (
+            patch("tasks.planning_tasks.begin_agent_session", return_value=("", "Build a deployment plan.", "")),
+            patch("tasks.planning_tasks.log_task_update"),
+            patch("tasks.planning_tasks.model_selection_for_agent", return_value={"provider": "openai", "model": "gpt-4o-mini", "source": "OPENAI_MODEL_GENERAL"}),
+            patch("tasks.planning_tasks.provider_status", return_value={"provider": "openai", "ready": True, "note": "API key configured", "base_url": "", "model": "gpt-4o-mini"}),
+            patch("tasks.planning_tasks.llm.invoke", side_effect=RuntimeError("Connection error")),
+        ):
+            with self.assertRaises(RuntimeError) as exc:
+                planner_agent(state)
+
+        message = str(exc.exception)
+        self.assertIn("provider 'openai'", message)
+        self.assertIn("model 'gpt-4o-mini'", message)
+        self.assertIn("Connection error", message)
+
+    def test_runtime_model_override_changes_agent_model_selection(self):
+        with runtime_model_override(provider="anthropic", model="claude-sonnet-test"):
+            selection = model_selection_for_agent("planner_agent")
+
+        self.assertEqual(selection["provider"], "anthropic")
+        self.assertEqual(selection["model"], "claude-sonnet-test")
+        self.assertEqual(selection["source"], "runtime_override")
 
 
 if __name__ == "__main__":

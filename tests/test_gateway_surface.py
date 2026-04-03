@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import tempfile
 import unittest
 import urllib.error
 import urllib.request
@@ -87,13 +88,70 @@ class GatewaySurfaceSmokeTests(unittest.TestCase):
 
         with (
             patch("tasks.gateway_tasks.write_text_file"),
-            patch("tasks.gateway_tasks.llm_text", return_value="normalized"),
         ):
             result = channel_gateway_agent(state)
 
         self.assertEqual(result["gateway_message"]["channel"], "web chat")
         self.assertTrue(result["gateway_message"]["should_activate"])
-        self.assertEqual(result["draft_response"], "normalized")
+        self.assertIn("activation enabled", result["draft_response"].lower())
+        self.assertEqual(result["gateway_message"]["activation_reason"], "direct message")
+
+    def test_ingest_prepopulates_gateway_message_for_webchat(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            request = urllib.request.Request(
+                f"{self.base_url}/ingest",
+                data=json.dumps(
+                    {
+                        "text": "hello",
+                        "channel": "webchat",
+                        "sender_id": "user-1",
+                        "chat_id": "chat-1",
+                        "working_directory": tmpdir,
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            with patch.object(gateway.RUNTIME, "run_query", return_value={"run_id": "run-1", "final_output": "ok"}) as run_query:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(payload["run_id"], "run-1")
+        _, kwargs = run_query.call_args
+        overrides = kwargs["state_overrides"]
+        self.assertEqual(overrides["gateway_message"]["channel"], "webchat")
+        self.assertEqual(overrides["gateway_message"]["activation_reason"], "direct message")
+        self.assertTrue(overrides["gateway_message"]["should_activate"])
+
+    def test_ingest_preserves_provider_and_model_overrides(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            request = urllib.request.Request(
+                f"{self.base_url}/ingest",
+                data=json.dumps(
+                    {
+                        "text": "inspect the repo",
+                        "channel": "project_ui",
+                        "sender_id": "user-1",
+                        "chat_id": "chat-1",
+                        "working_directory": tmpdir,
+                        "provider": "openai",
+                        "model": "gpt-5.1",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            with patch.object(gateway.RUNTIME, "run_query", return_value={"run_id": "run-2", "final_output": "ok"}) as run_query:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(payload["run_id"], "run-2")
+        _, kwargs = run_query.call_args
+        overrides = kwargs["state_overrides"]
+        self.assertEqual(overrides["provider"], "openai")
+        self.assertEqual(overrides["model"], "gpt-5.1")
 
     def test_session_router_preserves_existing_session_state_keys(self):
         persisted_payload = {}

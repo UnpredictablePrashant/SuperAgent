@@ -10,6 +10,7 @@ from kendr import AgentRuntime, build_registry
 from kendr.http import (
     build_resume_state_overrides,
     infer_resume_working_directory,
+    normalize_incoming_message,
     resume_candidate_requires_branch,
     resume_candidate_requires_force,
     resume_candidate_requires_reply,
@@ -17,6 +18,7 @@ from kendr.http import (
 )
 from kendr.persistence import (
     get_run,
+    get_task_session_by_run,
     list_channel_sessions,
     list_heartbeat_events,
     list_monitor_events,
@@ -147,6 +149,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not match:
                 self._send_json(404, {"error": "run_not_found", "run_id": run_id})
                 return
+            task_session = get_task_session_by_run(run_id)
+            if task_session:
+                match = dict(match)
+                match["task_session"] = task_session
             self._send_json(200, match)
             return
         if parsed.path == "/resume-candidates":
@@ -172,11 +178,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not run_id:
                 self._send_json(400, {"error": "missing_run_id"})
                 return
-            sessions = [item for item in list_task_sessions(500) if str(item.get("run_id", "")) == run_id]
-            if not sessions:
+            session = get_task_session_by_run(run_id)
+            if not session:
                 self._send_json(404, {"error": "task_session_not_found", "run_id": run_id})
                 return
-            self._send_json(200, sessions[0])
+            self._send_json(200, session)
             return
         if parsed.path == "/monitors":
             self._send_json(200, list_monitor_rules())
@@ -318,9 +324,27 @@ class GatewayHandler(BaseHTTPRequestHandler):
             state_overrides["incoming_text"] = text
             state_overrides["incoming_mentions_assistant"] = bool(payload.get("mentions_assistant", False))
             state_overrides["incoming_payload"] = payload
+        normalized_channel = normalize_incoming_message(
+            payload,
+            channel=str(state_overrides.get("incoming_channel") or payload.get("channel") or "webchat"),
+            sender_id=str(state_overrides.get("incoming_sender_id") or payload.get("sender_id") or ""),
+            chat_id=str(state_overrides.get("incoming_chat_id") or payload.get("chat_id") or ""),
+            workspace_id=str(state_overrides.get("incoming_workspace_id") or payload.get("workspace_id") or ""),
+            text=text,
+            is_group=bool(state_overrides.get("incoming_is_group", payload.get("is_group", False))),
+            mentions_assistant=bool(state_overrides.get("incoming_mentions_assistant", payload.get("mentions_assistant", False))),
+            force_activate=bool(payload.get("gateway_force_activate", False)),
+        )
+        if (
+            normalized_channel.get("channel") in {"webchat", "project_ui"}
+            and not bool(payload.get("force_channel_gateway_agent", False))
+        ):
+            state_overrides["gateway_message"] = normalized_channel
         if not str(state_overrides.get("run_id", "")).strip():
             state_overrides.pop("run_id", None)
         passthrough_keys = [
+            "provider",
+            "model",
             "privileged_mode",
             "privileged_approved",
             "privileged_approval_note",
@@ -429,11 +453,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 {
                     "run_id": result.get("run_id"),
                     "output_dir": result.get("run_output_dir", ""),
+                    "working_directory": result.get("working_directory", ""),
                     "final_output": result.get("final_output") or result.get("draft_response", ""),
                     "last_agent": result.get("last_agent", ""),
                     "status": "awaiting_user_input" if awaiting_user_input else "completed",
                     "awaiting_user_input": awaiting_user_input,
                     "pending_user_input_kind": result.get("pending_user_input_kind", ""),
+                    "approval_pending_scope": result.get("approval_pending_scope", ""),
                     "pending_user_question": result.get("pending_user_question", ""),
                     "resume_candidate": candidate if self.path == "/resume" else {},
                 },

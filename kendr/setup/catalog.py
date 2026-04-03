@@ -756,7 +756,7 @@ def setup_component_catalog() -> list[dict]:
                 asdict(_field("OUTPUT_DIR", "Output Directory", "Output folder for runs and setup artifacts.", default="./output")),
                 asdict(_field("KENDR_WORKING_DIR", "Working Folder", "Base folder for task runs, artifacts, and outputs.", required=True)),
                 asdict(_field("KENDR_LLM_PROVIDER", "LLM Provider", "Active LLM provider: openai, anthropic, google, xai, minimax, qwen, glm, ollama, openrouter, custom.", default="openai")),
-                asdict(_field("KENDR_MODEL", "Model Override", "Global model name override — applies to all providers when set.")),
+                asdict(_field("KENDR_MODEL", "Legacy Model Override", "Legacy global model override. Prefer the Models page or `kendr model set` so defaults stay provider-specific.")),
                 asdict(_field("RESEARCH_USER_AGENT", "Research User Agent", "User-Agent string for research HTTP fetches.", default="kendr-research/1.0")),
             ],
             "docs_path": "docs/install.md",

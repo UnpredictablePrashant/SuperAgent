@@ -16,6 +16,7 @@ import textwrap
 
 from openai import OpenAI
 
+from kendr.execution_trace import append_execution_event
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.coding_tasks import _extract_output_text
 from tasks.file_memory import bootstrap_file_memory, update_planning_file
@@ -28,6 +29,53 @@ DEFAULT_DEEP_RESEARCH_MODEL = os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-d
 DEFAULT_RESEARCH_FORMATS = ["pdf", "docx", "html", "md"]
 SUPPORTED_CITATION_STYLES = {"apa", "mla", "chicago", "ieee", "vancouver", "harvard"}
 DEEP_RESEARCH_LABEL = "Deep Research"
+
+
+def _trace_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def _trace_research_event(
+    state: dict,
+    *,
+    title: str,
+    detail: str = "",
+    command: str = "",
+    status: str = "running",
+    kind: str = "research_activity",
+    started_at: str = "",
+    completed_at: str = "",
+    metadata: dict[str, Any] | None = None,
+    subtask: str = "",
+) -> dict[str, Any]:
+    return append_execution_event(
+        state,
+        kind=kind,
+        actor="long_document_agent",
+        status=status,
+        title=title,
+        detail=detail,
+        command=command,
+        started_at=started_at,
+        completed_at=completed_at,
+        metadata=metadata or {},
+        persist=True,
+        active_agent="long_document_agent",
+        task=str(state.get("current_objective") or state.get("user_query") or "").strip(),
+        subtask=subtask,
+    )
+
+
+def _trace_url_list(urls: list[str] | None, *, limit: int = 6) -> list[str]:
+    compact: list[str] = []
+    for raw in urls or []:
+        value = str(raw or "").strip()
+        if not value or value in compact:
+            continue
+        compact.append(value)
+        if len(compact) >= limit:
+            break
+    return compact
 
 AGENT_METADATA = {
     "long_document_agent": {
@@ -425,6 +473,17 @@ def _collect_user_url_evidence(objective: str, state: dict, *, max_items: int = 
     urls = _normalize_research_urls(state.get("deep_research_source_urls", []))
     if not urls:
         return []
+    fetch_started_at = _trace_now()
+    _trace_research_event(
+        state,
+        title="Extracting provided URLs",
+        detail=f"Fetching and summarizing {min(len(urls), max_items)} user-provided URLs.",
+        command="\n".join(urls[:max_items]),
+        status="running",
+        started_at=fetch_started_at,
+        metadata={"phase": "provided_urls", "urls": _trace_url_list(urls[:max_items])},
+        subtask="Fetch provided URLs",
+    )
     entries = []
     for url in urls[:max_items]:
         try:
@@ -478,6 +537,26 @@ Write a concise evidence summary covering:
                     "error": str(exc),
                 }
             )
+    ok_urls = [str(item.get("url", "")).strip() for item in entries if not str(item.get("error", "")).strip()]
+    failed_urls = [str(item.get("url", "")).strip() for item in entries if str(item.get("error", "")).strip()]
+    _trace_research_event(
+        state,
+        title="Extracting provided URLs",
+        detail=(
+            f"Extracted {len(ok_urls)} URL(s)"
+            + (f"; {len(failed_urls)} failed." if failed_urls else ".")
+        ),
+        command="\n".join(urls[:max_items]),
+        status="completed" if not failed_urls else ("failed" if not ok_urls else "completed"),
+        started_at=fetch_started_at,
+        completed_at=_trace_now(),
+        metadata={
+            "phase": "provided_urls",
+            "urls": _trace_url_list(ok_urls or urls[:max_items]),
+            "failed_urls": _trace_url_list(failed_urls),
+        },
+        subtask="Fetch provided URLs",
+    )
     return entries
 
 
@@ -1687,6 +1766,7 @@ def _run_research_pass(
     max_wait_seconds: int,
     heartbeat_interval_seconds: int | None = None,
     heartbeat_label: str = "Research pass in progress",
+    heartbeat_callback: Any | None = None,
 ) -> dict:
     create_kwargs = {
         "model": model,
@@ -1723,6 +1803,11 @@ def _run_research_pass(
             last_heartbeat = elapsed_seconds
             if heartbeat_label:
                 log_task_update(DEEP_RESEARCH_LABEL, f"{heartbeat_label} ({elapsed_seconds}s elapsed).")
+            if callable(heartbeat_callback):
+                try:
+                    heartbeat_callback(elapsed_seconds)
+                except Exception:
+                    pass
         response = client.responses.retrieve(response_id)
         status = str(getattr(response, "status", "unknown"))
 
@@ -2325,6 +2410,23 @@ def long_document_agent(state):
         ),
         objective,
     )
+    _trace_research_event(
+        state,
+        title="Deep research run started",
+        detail=(
+            f"Preparing a {target_pages}-page report across about {section_count} sections with "
+            f"{citation_style.upper()} citations and {', '.join(output_formats)} exports."
+        ),
+        status="running",
+        metadata={
+            "phase": "startup",
+            "call_number": call_number,
+            "target_pages": target_pages,
+            "section_count": section_count,
+            "research_model": research_model,
+        },
+        subtask="Initialize deep research pipeline",
+    )
 
     state["deep_research_mode"] = deep_research_mode
     state["long_document_mode"] = True
@@ -2407,6 +2509,14 @@ def long_document_agent(state):
             execution_note="Deep research analysis completed; awaiting confirmation before expensive research starts.",
         )
         log_task_update(DEEP_RESEARCH_LABEL, "Prepared the deep research analysis card for approval.", analysis_md)
+        _trace_research_event(
+            state,
+            title="Deep research analysis prepared",
+            detail="Analysis card is ready for approval before the expensive research pipeline starts.",
+            status="completed",
+            metadata={"phase": "analysis", "requires_confirmation": True, "tier": analysis.get("tier", 0)},
+            subtask="Review deep research analysis",
+        )
         return publish_agent_output(
             state,
             "long_document_agent",
@@ -2491,6 +2601,14 @@ def long_document_agent(state):
             execution_note=f"Deep research subplan v{subplan_version} generated and queued for approval.",
         )
         log_task_update(DEEP_RESEARCH_LABEL, "Prepared a section-by-section deep research plan for approval.", subplan_md)
+        _trace_research_event(
+            state,
+            title="Research section plan prepared",
+            detail=f"Generated a section-by-section plan with {len(outline.get('sections', []))} sections and queued it for approval.",
+            status="completed",
+            metadata={"phase": "planning", "section_count": len(outline.get("sections", [])), "version": subplan_version},
+            subtask="Review section plan",
+        )
         return publish_agent_output(
             state,
             "long_document_agent",
@@ -2512,9 +2630,33 @@ def long_document_agent(state):
     )
     if collect_sources_first:
         if not state.get("long_document_sources_collected", False):
+            evidence_started_at = _trace_now()
+            _trace_research_event(
+                state,
+                title="Collecting evidence bank",
+                detail="Gathering shared sources, contradictions, and benchmarks before section drafting begins.",
+                command=objective,
+                status="running",
+                started_at=evidence_started_at,
+                metadata={"phase": "evidence_bank", "web_search_enabled": web_search_enabled},
+                subtask="Build cross-report evidence bank",
+            )
             log_task_update(DEEP_RESEARCH_LABEL, "Collecting the cross-report evidence bank.")
             if web_search_enabled:
                 search_results = _collect_google_search_evidence(objective, num=int(state.get("long_document_search_results", 10) or 10))
+                _trace_research_event(
+                    state,
+                    title="Google search results gathered",
+                    detail=f"Cross-report search returned {len((search_results or {}).get('results', []))} result(s).",
+                    command=objective,
+                    status="completed" if not str((search_results or {}).get("error", "")).strip() else "failed",
+                    metadata={
+                        "phase": "evidence_bank_search",
+                        "search_query": objective,
+                        "urls": _trace_url_list([str(item.get("url", "")).strip() for item in (search_results or {}).get("results", [])]),
+                    },
+                    subtask="Search for shared report evidence",
+                )
                 evidence_instructions = str(
                     state.get(
                         "long_document_evidence_instructions",
@@ -2543,6 +2685,15 @@ def long_document_agent(state):
                     max_wait_seconds=max_wait_seconds,
                     heartbeat_interval_seconds=heartbeat_seconds,
                     heartbeat_label="Evidence bank research in progress",
+                    heartbeat_callback=lambda elapsed: _trace_research_event(
+                        state,
+                        title="Collecting evidence bank",
+                        detail=f"Shared evidence bank research still running ({elapsed}s elapsed).",
+                        command=objective,
+                        status="running",
+                        metadata={"phase": "evidence_bank", "elapsed_seconds": elapsed},
+                        subtask="Build cross-report evidence bank",
+                    ),
                 )
                 evidence_sources = _merge_sources(
                     explicit_source_entries,
@@ -2596,6 +2747,30 @@ def long_document_agent(state):
             evidence_excerpt = _trim_text(evidence_bank_md, 18000)
             state["long_document_evidence_bank_excerpt"] = evidence_excerpt
             state["long_document_evidence_sources"] = evidence_sources
+            evidence_status = str(evidence_pass.get("status", "")).strip() or "completed"
+            evidence_completed = "completed" if evidence_status in {"completed", "local_only", "evidence_bank"} else "failed"
+            evidence_detail = (
+                f"Evidence bank ready with {len(evidence_sources)} consolidated sources."
+                if evidence_completed == "completed"
+                else f"Evidence bank finished with status '{evidence_status}'. Partial results will be used."
+            )
+            _trace_research_event(
+                state,
+                title="Collecting evidence bank",
+                detail=evidence_detail,
+                command=objective,
+                status=evidence_completed,
+                started_at=evidence_started_at,
+                completed_at=_trace_now(),
+                metadata={
+                    "phase": "evidence_bank",
+                    "response_status": evidence_status,
+                    "sources": len(evidence_sources),
+                    "elapsed_seconds": int(evidence_pass.get("elapsed_seconds", 0) or 0),
+                    "urls": _trace_url_list([str(item.get("url", "")).strip() for item in evidence_sources]),
+                },
+                subtask="Build cross-report evidence bank",
+            )
         else:
             evidence_bank_md = _read_text_file(state.get("long_document_evidence_bank_path", ""), "")
             evidence_excerpt = state.get("long_document_evidence_bank_excerpt", "") or _trim_text(evidence_bank_md, 18000)
@@ -2643,6 +2818,17 @@ def long_document_agent(state):
             DEEP_RESEARCH_LABEL,
             f"Phase 1/4 - researching section {index}/{total_sections}: {section_title}",
         )
+        section_research_started_at = _trace_now()
+        _trace_research_event(
+            state,
+            title=f"Researching section {index}/{total_sections}",
+            detail=section_title,
+            command=section_objective,
+            status="running",
+            started_at=section_research_started_at,
+            metadata={"phase": "section_research", "section_index": index, "section_title": section_title},
+            subtask=f"Gather evidence for {section_title}",
+        )
 
         section_search_results: dict[str, Any] = {}
         section_search_sources: list[dict] = []
@@ -2650,6 +2836,21 @@ def long_document_agent(state):
         if use_section_search:
             search_query = f"{section_title} {section_objective}"
             section_search_results = _collect_google_search_evidence(search_query, num=section_search_results_count)
+            _trace_research_event(
+                state,
+                title=f"Google search results for section {index}",
+                detail=f"{section_title} returned {len((section_search_results or {}).get('results', []))} result(s).",
+                command=search_query,
+                status="completed" if not str((section_search_results or {}).get("error", "")).strip() else "failed",
+                metadata={
+                    "phase": "section_search",
+                    "section_index": index,
+                    "section_title": section_title,
+                    "search_query": search_query,
+                    "urls": _trace_url_list([str(item.get("url", "")).strip() for item in (section_search_results or {}).get("results", [])]),
+                },
+                subtask=f"Search for {section_title}",
+            )
             if isinstance(section_search_results, dict) and str(section_search_results.get("error", "")).strip():
                 log_task_update(
                     DEEP_RESEARCH_LABEL,
@@ -2710,6 +2911,15 @@ def long_document_agent(state):
                     max_wait_seconds=max_wait_seconds,
                     heartbeat_interval_seconds=heartbeat_seconds,
                     heartbeat_label=f"Section {index} research in progress",
+                    heartbeat_callback=lambda elapsed, idx=index, name=section_title: _trace_research_event(
+                        state,
+                        title=f"Researching section {idx}/{total_sections}",
+                        detail=f"{name} still running ({elapsed}s elapsed).",
+                        command=section_objective,
+                        status="running",
+                        metadata={"phase": "section_research", "section_index": idx, "section_title": name, "elapsed_seconds": elapsed},
+                        subtask=f"Gather evidence for {name}",
+                    ),
                 )
 
                 if str(research_pass.get("status", "")).strip() not in {"completed", ""}:
@@ -2741,6 +2951,31 @@ def long_document_agent(state):
             source_ledger_md = _source_ledger_markdown(section_sources)
         if max_sources > 0:
             section_sources = section_sources[:max_sources]
+        section_research_status = str(research_pass.get("status", "")).strip() or "completed"
+        _trace_research_event(
+            state,
+            title=f"Researching section {index}/{total_sections}",
+            detail=(
+                f"{section_title} completed with {len(section_sources)} sources."
+                if section_research_status in {"completed", "local_only", "evidence_bank"}
+                else f"{section_title} finished with status '{section_research_status}'. Using partial research output."
+            ),
+            command=section_objective,
+            status="completed" if section_research_status in {"completed", "local_only", "evidence_bank"} else "failed",
+            started_at=section_research_started_at,
+            completed_at=_trace_now(),
+            metadata={
+                "phase": "section_research",
+                "section_index": index,
+                "section_title": section_title,
+                "response_status": section_research_status,
+                "sources": len(section_sources),
+                "elapsed_seconds": int(research_pass.get("elapsed_seconds", 0) or 0),
+                "search_query": search_query if use_section_search else "",
+                "urls": _trace_url_list([str(item.get("url", "")).strip() for item in section_sources]),
+            },
+            subtask=f"Gather evidence for {section_title}",
+        )
 
         write_text_file(
             _artifact_file(artifact_dir, f"section_{index:02d}/research.json"),
@@ -2770,12 +3005,39 @@ def long_document_agent(state):
         )
 
     log_task_update(DEEP_RESEARCH_LABEL, "Phase 2/4 - correlating subtopics and section dependencies.")
+    correlation_started_at = _trace_now()
+    _trace_research_event(
+        state,
+        title="Correlating sections",
+        detail="Mapping cross-cutting themes, contradictions, and the final section order.",
+        status="running",
+        started_at=correlation_started_at,
+        metadata={"phase": "correlation"},
+        subtask="Correlate sections and dependencies",
+    )
     correlation = _build_correlation_package(objective, section_packages)
     write_text_file(_artifact_file(artifact_dir, "correlation_briefing.md"), str(correlation.get("briefing", "")).strip() + "\n")
     write_text_file(_artifact_file(artifact_dir, "knowledge_graph.json"), json.dumps(correlation.get("knowledge_graph", {}), indent=2, ensure_ascii=False))
     research_log_lines.append(
         f"Correlation complete: {len(correlation.get('cross_cutting_themes', []))} themes, "
         f"{len(correlation.get('contradictions', []))} contradictions."
+    )
+    _trace_research_event(
+        state,
+        title="Correlating sections",
+        detail=(
+            f"Correlation complete with {len(correlation.get('cross_cutting_themes', []))} themes and "
+            f"{len(correlation.get('contradictions', []))} contradictions."
+        ),
+        status="completed",
+        started_at=correlation_started_at,
+        completed_at=_trace_now(),
+        metadata={
+            "phase": "correlation",
+            "theme_count": len(correlation.get("cross_cutting_themes", [])),
+            "contradiction_count": len(correlation.get("contradictions", [])),
+        },
+        subtask="Correlate sections and dependencies",
     )
 
     packages_by_title = {str(item.get("title", "")).strip(): item for item in section_packages}
@@ -2789,6 +3051,16 @@ def long_document_agent(state):
         log_task_update(
             DEEP_RESEARCH_LABEL,
             f"Phase 3/4 - drafting section {write_index}/{len(ordered_packages)}: {section_title}",
+        )
+        section_draft_started_at = _trace_now()
+        _trace_research_event(
+            state,
+            title=f"Drafting section {write_index}/{len(ordered_packages)}",
+            detail=section_title,
+            status="running",
+            started_at=section_draft_started_at,
+            metadata={"phase": "section_drafting", "section_index": write_index, "section_title": section_title},
+            subtask=f"Draft {section_title}",
         )
         section_prompt = _format_section_prompt(
             global_objective=objective,
@@ -2896,6 +3168,27 @@ def long_document_agent(state):
             ],
         }
         write_text_file(_artifact_file(artifact_dir, "deep_research_progress.json"), json.dumps(progress_payload, indent=2, ensure_ascii=False))
+        _trace_research_event(
+            state,
+            title=f"Drafting section {write_index}/{len(ordered_packages)}",
+            detail=(
+                f"{section_title} drafted with {len(package.get('sources', []))} sources, "
+                f"{len((visual_assets or {}).get('tables', []))} tables, and "
+                f"{len((visual_assets or {}).get('flowcharts', []))} flowcharts."
+            ),
+            status="completed",
+            started_at=section_draft_started_at,
+            completed_at=_trace_now(),
+            metadata={
+                "phase": "section_drafting",
+                "section_index": write_index,
+                "section_title": section_title,
+                "source_count": len(package.get("sources", [])),
+                "table_count": len((visual_assets or {}).get("tables", [])),
+                "flowchart_count": len((visual_assets or {}).get("flowcharts", [])),
+            },
+            subtask=f"Draft {section_title}",
+        )
 
     if checkpoint_enabled:
         write_text_file(
@@ -2986,6 +3279,16 @@ Section continuity notes:
     compiled_filename = _artifact_file(artifact_dir, "deep_research_report.md")
     write_text_file(compiled_filename, compiled_markdown)
     export_paths: dict[str, str] = {}
+    compile_started_at = _trace_now()
+    _trace_research_event(
+        state,
+        title="Compiling final report",
+        detail="Merging sections, references, plagiarism appendix, and export artifacts.",
+        status="running",
+        started_at=compile_started_at,
+        metadata={"phase": "compile"},
+        subtask="Compile and export final report",
+    )
     try:
         export_paths = _export_long_document_formats(compiled_markdown, compiled_filename, requested_formats=output_formats)
     except Exception as exc:
@@ -3121,6 +3424,24 @@ Section continuity notes:
         "raw_json_path": f"{OUTPUT_DIR}/{manifest_filename}",
     }
     state["draft_response"] = final_summary
+    _trace_research_event(
+        state,
+        title="Compiling final report",
+        detail=(
+            f"Final report ready with {len(section_outputs)} sections, {total_sources} sources, and "
+            f"{', '.join(output_formats)} exports."
+        ),
+        status="completed",
+        started_at=compile_started_at,
+        completed_at=_trace_now(),
+        metadata={
+            "phase": "compile",
+            "section_count": len(section_outputs),
+            "source_count": total_sources,
+            "word_count": total_words,
+        },
+        subtask="Compile and export final report",
+    )
 
     log_task_update(DEEP_RESEARCH_LABEL, f"Completed deep research pass #{call_number}.", final_summary)
     state = publish_agent_output(

@@ -118,6 +118,64 @@ class RuntimeRoutingTests(unittest.TestCase):
         task = routed_state["a2a"]["tasks"][-1]
         self.assertEqual(task["recipient"], "planner_agent")
 
+    def test_preloaded_gateway_message_skips_channel_gateway_agent(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+            patch("kendr.runtime.append_privileged_audit_event"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state(
+                "Scan this site.",
+                incoming_payload={"channel": "webchat", "text": "Scan this site."},
+                incoming_channel="webchat",
+                incoming_sender_id="user-1",
+                incoming_chat_id="chat-1",
+                gateway_message={
+                    "channel": "webchat",
+                    "sender_id": "user-1",
+                    "chat_id": "chat-1",
+                    "workspace_id": "",
+                    "text": "Scan this site.",
+                    "is_group": False,
+                    "mentioned": False,
+                    "should_activate": True,
+                    "activation_reason": "direct message",
+                },
+            )
+
+            routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "session_router_agent")
+        self.assertTrue(routed_state.get("a2a", {}).get("tasks"))
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "session_router_agent")
+
+    def test_project_workbench_request_routes_directly_to_master_coding_agent(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state(
+                "Review the auth flow in this repo and trace where login can fail.",
+                incoming_channel="project_ui",
+                project_root="D:/repo",
+                working_directory="D:/repo",
+            )
+
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "master_coding_agent")
+        self.assertIn("project workbench request", routed_state["orchestrator_reason"].lower())
+        self.assertTrue(routed_state.get("codebase_mode"))
+        self.assertFalse(mock_invoke.called, "Direct project workbench routing should not call the generic orchestrator LLM.")
+        self.assertTrue(routed_state.get("a2a", {}).get("tasks"))
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "master_coding_agent")
+        self.assertEqual(task["intent"], "project-workbench-dispatch")
+
     def test_reviewer_approval_finishes_when_no_planned_steps_remain(self):
         with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())

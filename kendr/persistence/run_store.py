@@ -667,6 +667,23 @@ def list_task_sessions(limit: int = 50, db_path: str = DB_PATH) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def get_task_session_by_run(run_id: str, db_path: str = DB_PATH) -> dict | None:
+    initialize_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT session_id, run_id, channel, session_key, started_at, updated_at,
+                   completed_at, status, active_agent, step_count, summary_json
+            FROM task_sessions
+            WHERE run_id = ?
+            ORDER BY updated_at DESC, started_at DESC
+            LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def list_scheduled_jobs(limit: int = 50, db_path: str = DB_PATH) -> list[dict]:
     initialize_db(db_path)
     with _connect(db_path) as conn:

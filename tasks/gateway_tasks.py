@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
-from kendr.http import normalize_channel, session_id_for_payload
+from kendr.http import normalize_channel, normalize_incoming_message, session_id_for_payload
 from kendr.orchestration import state_awaiting_user_input
 from kendr.persistence import (
     get_channel_session,
@@ -20,7 +20,7 @@ from kendr.persistence import (
 from kendr.providers import get_slack_bot_token
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
-from tasks.research_infra import html_to_text, llm_text
+from tasks.research_infra import html_to_text
 from tasks.utils import log_task_update, resolve_output_path, write_text_file
 
 
@@ -221,54 +221,33 @@ def channel_gateway_agent(state):
     payload = state.get("incoming_payload", {})
     if not isinstance(payload, dict):
         payload = {}
-    channel = normalize_channel(state.get("incoming_channel") or payload.get("channel") or "webchat")
-    sender_id = str(state.get("incoming_sender_id") or payload.get("sender_id") or payload.get("from") or "")
-    chat_id = str(state.get("incoming_chat_id") or payload.get("chat_id") or payload.get("thread_id") or sender_id)
-    workspace_id = str(state.get("incoming_workspace_id") or payload.get("workspace_id") or "")
-    text = (
-        state.get("incoming_text")
-        or payload.get("text")
-        or payload.get("message")
-        or task_content
-        or state.get("user_query", "")
+    normalized = normalize_incoming_message(
+        payload,
+        channel=str(state.get("incoming_channel") or ""),
+        sender_id=str(state.get("incoming_sender_id") or ""),
+        chat_id=str(state.get("incoming_chat_id") or ""),
+        workspace_id=str(state.get("incoming_workspace_id") or ""),
+        text=str(
+            state.get("incoming_text")
+            or payload.get("text")
+            or payload.get("message")
+            or task_content
+            or state.get("user_query", "")
+        ),
+        is_group=bool(state.get("incoming_is_group", payload.get("is_group", False))),
+        mentions_assistant=bool(state.get("incoming_mentions_assistant", False)),
+        gateway_trigger_tag=str(state.get("gateway_trigger_tag") or "@assistant"),
+        force_activate=bool(state.get("gateway_force_activate", False)),
     )
-    is_group = bool(state.get("incoming_is_group", payload.get("is_group", False)))
-    mention_token = (state.get("gateway_trigger_tag") or "@assistant").strip().lower()
-    text_lower = str(text).lower()
-    mentioned = bool(state.get("incoming_mentions_assistant", False) or mention_token in text_lower)
-    should_activate = not is_group or mentioned or state.get("gateway_force_activate", False)
-
-    normalized = {
-        "channel": channel,
-        "sender_id": sender_id,
-        "chat_id": chat_id,
-        "workspace_id": workspace_id,
-        "text": text,
-        "is_group": is_group,
-        "mentioned": mentioned,
-        "should_activate": should_activate,
-    }
-    if should_activate and text:
-        state["user_query"] = text
-        state["current_objective"] = text
+    if normalized.get("should_activate") and normalized.get("text"):
+        state["user_query"] = normalized["text"]
+        state["current_objective"] = normalized["text"]
     state["gateway_message"] = normalized
-    try:
-        summary = llm_text(
-            f"""You are a channel gateway agent.
-
-Summarize this inbound channel message normalization result.
-Explain whether the message should activate the main workflow and why.
-
-Payload:
-{json.dumps(normalized, indent=2, ensure_ascii=False)}
-"""
-        )
-    except Exception as exc:
-        summary = (
-            f"Channel gateway normalization completed (LLM summary unavailable: {type(exc).__name__}). "
-            f"channel={normalized.get('channel')}, should_activate={normalized.get('should_activate')}, "
-            f"sender_id={normalized.get('sender_id', 'unknown')}."
-        )
+    summary = (
+        f"Channel normalized for {normalized.get('channel', 'unknown')} and "
+        f"{'activation enabled' if normalized.get('should_activate') else 'activation suppressed'} "
+        f"because {normalized.get('activation_reason', 'normalization rules applied')}."
+    )
     _write_outputs("channel_gateway_agent", call_number, summary, normalized)
     state["draft_response"] = summary
     return publish_agent_output(

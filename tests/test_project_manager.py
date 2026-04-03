@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -16,20 +17,28 @@ class TestProjectServices(unittest.TestCase):
             project_root = Path(tmpdir) / "demo-app"
             project_root.mkdir()
             store_path = Path(tmpdir) / "state" / "projects.json"
+            service_script = project_root / "service_probe.py"
+            service_script.write_text(
+                "import time\nprint('service-ready', flush=True)\ntime.sleep(30)\n",
+                encoding="utf-8",
+            )
 
             with patch.dict(os.environ, {"KENDR_PROJECTS_STORE": str(store_path)}, clear=False):
                 project = pm.add_project(str(project_root), "demo-app")
                 service = pm.start_project_service(
                     project["id"],
                     name="frontend",
-                    command="python3 -c \"import time; print('service-ready', flush=True); time.sleep(30)\"",
+                    command=f'"{sys.executable}" "{service_script}"',
                     kind="frontend",
                     port=3000,
                 )
                 try:
                     self.assertEqual(service["name"], "frontend")
                     self.assertTrue(service["running"])
-                    self.assertTrue(str(service["log_path"]).startswith(str(project_root / "logs" / "kendr" / "services")))
+                    expected_log_root = os.path.normcase(os.path.realpath(str(project_root / "logs" / "kendr" / "services")))
+                    actual_log_path = os.path.normcase(os.path.realpath(str(service["log_path"])))
+                    self.assertTrue(actual_log_path.startswith(expected_log_root))
+                    self.assertTrue(service.get("shell_argv"))
 
                     time.sleep(0.4)
                     listed = pm.list_project_services(project["id"])
@@ -44,3 +53,19 @@ class TestProjectServices(unittest.TestCase):
 
                 self.assertFalse(stopped["running"])
                 self.assertEqual(pm.list_running_project_services(), [])
+
+    def test_run_shell_reports_duration_and_shell_argv(self):
+        from kendr import project_manager as pm
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / "probe.py"
+            script_path.write_text("print('ok')\n", encoding="utf-8")
+            result = pm.run_shell(f'"{sys.executable}" "{script_path}"', tmpdir, timeout=10)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stdout"].strip(), "ok")
+        self.assertTrue(result["shell_argv"])
+        self.assertTrue(result["started_at"])
+        self.assertTrue(result["completed_at"])
+        self.assertIn("duration_ms", result)
+        self.assertIn("duration_label", result)

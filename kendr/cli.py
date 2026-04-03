@@ -28,6 +28,7 @@ from kendr.http import (
     resume_candidate_requires_reply,
 )
 from kendr.orchestration import state_awaiting_user_input
+from kendr.execution_trace import render_execution_event_line
 from kendr.setup import (
     build_google_oauth_config,
     build_microsoft_oauth_config,
@@ -322,6 +323,13 @@ def _coerce_plan_steps(summary: dict) -> list[dict]:
     return [step for step in raw if isinstance(step, dict)]
 
 
+def _coerce_execution_trace(summary: dict) -> list[dict]:
+    raw = summary.get("execution_trace")
+    if not isinstance(raw, list):
+        return []
+    return [event for event in raw if isinstance(event, dict)]
+
+
 def _plan_step_titles(steps: list[dict]) -> list[str]:
     titles: list[str] = []
     for step in steps:
@@ -573,8 +581,15 @@ def _build_run_progress_message(session: dict) -> str:
         }
 
     recent = summary.get("recent_events") or summary.get("recent_activity") or []
-    if isinstance(recent, list):
-        limit = _event_limit()
+    execution_trace = _coerce_execution_trace(summary)
+    limit = _event_limit()
+    if execution_trace:
+        activity = []
+        for item in execution_trace[-limit:]:
+            line = render_execution_event_line(item)
+            if line:
+                activity.append(line)
+    elif isinstance(recent, list):
         activity = [str(item) for item in recent if str(item).strip()][:limit]
     return _format_run_progress_tree(
         status=str(session.get("status", "running")),
@@ -6470,9 +6485,11 @@ def _cmd_model(args: argparse.Namespace) -> int:
         all_provider_statuses,
         get_active_provider,
         get_model_for_provider,
+        get_model_setting_env,
         is_ollama_running,
         list_ollama_models,
         provider_status,
+        selectable_models_for_provider,
     )
     from tasks.setup_config_store import save_component_values
 
@@ -6503,9 +6520,10 @@ def _cmd_model(args: argparse.Namespace) -> int:
             tick = style.ok("*") if p == active else " "
             ready = style.ok("yes") if st["ready"] else style.warn("no")
             note = st.get("note", "")
-            rows.append([tick, p, st["model"], ready, note[:50]])
+            selectable = ", ".join(selectable_models_for_provider(p)[:3])
+            rows.append([tick, p, st["model"], ready, selectable or "-", note[:50]])
         print(style.heading("\n  LLM Providers\n"))
-        print(_render_table(["", "PROVIDER", "DEFAULT MODEL", "READY", "NOTE"], rows))
+        print(_render_table(["", "PROVIDER", "DEFAULT MODEL", "READY", "SELECTABLE", "NOTE"], rows))
         print(f"\n  Active provider: {active}  (change with: kendr model set <provider>)\n")
         return 0
 
@@ -6513,14 +6531,18 @@ def _cmd_model(args: argparse.Namespace) -> int:
         provider = str(args.provider).strip().lower()
         model_name = str(getattr(args, "model", "") or "").strip()
 
-        values: dict[str, str] = {"KENDR_LLM_PROVIDER": provider}
-        if model_name:
-            values["KENDR_MODEL"] = model_name
+        values: dict[str, str] = {"KENDR_LLM_PROVIDER": provider, "KENDR_MODEL": ""}
+        model_env_key = get_model_setting_env(provider)
+        if model_name and model_env_key:
+            values[model_env_key] = model_name
         save_component_values("core_runtime", values)
         os.environ["KENDR_LLM_PROVIDER"] = provider
-        if model_name:
-            os.environ["KENDR_MODEL"] = model_name
-        print(style.ok(f"Set provider to '{provider}'" + (f" with model '{model_name}'" if model_name else "") + "."))
+        os.environ.pop("KENDR_PROVIDER", None)
+        os.environ.pop("KENDR_MODEL", None)
+        if model_name and model_env_key:
+            os.environ[model_env_key] = model_name
+        effective_model = model_name or get_model_for_provider(provider)
+        print(style.ok(f"Set provider to '{provider}'" + (f" with model '{effective_model}'" if effective_model else "") + "."))
         print("  Restart kendr for the change to take effect in running agents.")
         return 0
 

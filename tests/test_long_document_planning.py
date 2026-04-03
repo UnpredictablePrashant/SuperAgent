@@ -158,6 +158,103 @@ class LongDocumentPlanningTests(unittest.TestCase):
         self.assertTrue(result["long_document_evidence_sources"])
         self.assertTrue(result["long_document_evidence_sources"][0]["url"].startswith("file:"))
         self.assertIn("Web search: disabled", result["draft_response"])
+        trace_titles = [event.get("title", "") for event in result.get("execution_trace", [])]
+        self.assertIn("Deep research run started", trace_titles)
+        self.assertIn("Collecting evidence bank", trace_titles)
+        self.assertIn("Researching section 1/1", trace_titles)
+        self.assertIn("Drafting section 1/1", trace_titles)
+        self.assertIn("Compiling final report", trace_titles)
+
+    def test_long_document_agent_records_search_queries_and_urls_in_trace(self):
+        state = {
+            "current_objective": "Create a web-backed market report.",
+            "user_query": "Create a web-backed market report.",
+            "memory_soul_file": __file__,
+            "deep_research_mode": True,
+            "deep_research_confirmed": True,
+            "long_document_mode": True,
+            "long_document_pages": 20,
+            "long_document_plan_status": "approved",
+            "research_web_search_enabled": True,
+            "deep_research_analysis": {
+                "tier": 3,
+                "requires_deep_research": True,
+                "estimated_pages": 20,
+                "estimated_sources": 8,
+                "estimated_duration_minutes": 20,
+                "subtopics": ["Market Structure"],
+            },
+            "long_document_outline": {
+                "title": "Web Market Report",
+                "sections": [
+                    {
+                        "id": 1,
+                        "title": "Market Structure",
+                        "objective": "Explain market structure and major players.",
+                        "key_questions": ["Who leads the market?"],
+                        "target_pages": 3,
+                    }
+                ],
+            },
+        }
+
+        def _fake_llm_text(prompt: str) -> str:
+            prompt = str(prompt)
+            if "Create a concise executive summary" in prompt:
+                return "Web-backed executive summary."
+            return "## Market Structure\n\nThe market is led by several major players. [S1]"
+
+        search_payload = {
+            "results": [
+                {
+                    "title": "Example Source",
+                    "url": "https://example.com/market-report",
+                    "snippet": "Market structure summary.",
+                    "source": "Example",
+                    "date": "2026-01-01",
+                }
+            ],
+            "error": "",
+        }
+        research_pass = {
+            "response_id": "resp-1",
+            "status": "completed",
+            "elapsed_seconds": 3,
+            "output_text": "Research notes about market structure.",
+            "raw": {},
+        }
+        correlation = {
+            "briefing": "Correlation briefing",
+            "knowledge_graph": {"nodes": [], "edges": []},
+            "cross_cutting_themes": [],
+            "contradictions": [],
+            "section_order": ["Market Structure"],
+        }
+
+        with (
+            patch("tasks.long_document_tasks.OpenAI", return_value=Mock()),
+            patch("tasks.long_document_tasks.llm_text", side_effect=_fake_llm_text),
+            patch("tasks.long_document_tasks._collect_google_search_evidence", return_value=search_payload),
+            patch("tasks.long_document_tasks._run_research_pass", return_value=research_pass),
+            patch("tasks.long_document_tasks._extract_source_entries", return_value=[{"id": "S1", "url": "https://example.com/market-report", "label": "Example Source"}]),
+            patch("tasks.long_document_tasks._build_correlation_package", return_value=correlation),
+            patch("tasks.long_document_tasks._build_plagiarism_report", return_value={"overall_score": 0.0, "ai_content_score": 0.0, "status": "PASS", "sections": []}),
+            patch("tasks.long_document_tasks._generate_visual_assets", return_value={"tables": [], "flowcharts": [], "notes": ""}),
+            patch("tasks.long_document_tasks._export_long_document_formats", return_value={}),
+            patch("tasks.long_document_tasks.write_text_file"),
+            patch("tasks.long_document_tasks.update_planning_file"),
+            patch("tasks.long_document_tasks.log_task_update"),
+            patch("tasks.long_document_tasks.publish_agent_output", side_effect=lambda current_state, *args, **kwargs: current_state),
+        ):
+            result = long_document_agent(state)
+
+        trace_events = result.get("execution_trace", [])
+        evidence_search = next(event for event in trace_events if event.get("title") == "Google search results gathered")
+        section_search = next(event for event in trace_events if event.get("title") == "Google search results for section 1")
+        self.assertEqual(evidence_search.get("command"), "Create a web-backed market report.")
+        self.assertIn("https://example.com/market-report", evidence_search.get("metadata", {}).get("urls", []))
+        self.assertEqual(section_search.get("command"), "Market Structure Explain market structure and major players.")
+        self.assertIn("https://example.com/market-report", section_search.get("metadata", {}).get("urls", []))
 
 
 if __name__ == "__main__":
