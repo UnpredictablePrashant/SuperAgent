@@ -103,7 +103,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(state["available_agents"], ["worker_agent"])
         self.assertEqual([card["agent_name"] for card in state["available_agent_cards"]], ["worker_agent"])
 
-    def test_explicit_deep_research_request_routes_to_planner_first(self):
+    def test_explicit_deep_research_request_routes_to_long_document_lane(self):
         with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Do deep research on OpenAI's enterprise strategy with citations.")
@@ -111,12 +111,13 @@ class RuntimeRoutingTests(unittest.TestCase):
             with patch("kendr.runtime.llm.invoke") as mock_invoke:
                 routed_state = runtime.orchestrator_agent(state)
 
-        self.assertEqual(routed_state["next_agent"], "planner_agent")
-        self.assertIn("plan", routed_state["orchestrator_reason"].lower())
-        self.assertFalse(mock_invoke.called, "Planning-first routing should not call the generic orchestrator LLM.")
+        self.assertEqual(routed_state["next_agent"], "long_document_agent")
+        self.assertIn("deep research", routed_state["orchestrator_reason"].lower())
+        self.assertFalse(mock_invoke.called, "Direct deep-research routing should not call the generic orchestrator LLM.")
         self.assertTrue(routed_state.get("a2a", {}).get("tasks"), "Expected an A2A task to be created.")
         task = routed_state["a2a"]["tasks"][-1]
-        self.assertEqual(task["recipient"], "planner_agent")
+        self.assertEqual(task["recipient"], "long_document_agent")
+        self.assertEqual(routed_state["workflow_type"], "deep_research")
 
     def test_preloaded_gateway_message_skips_channel_gateway_agent(self):
         with (
@@ -175,6 +176,32 @@ class RuntimeRoutingTests(unittest.TestCase):
         task = routed_state["a2a"]["tasks"][-1]
         self.assertEqual(task["recipient"], "master_coding_agent")
         self.assertEqual(task["intent"], "project-workbench-dispatch")
+
+    def test_project_workbench_deep_research_request_stays_in_long_document_lane(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state(
+                (
+                    "Do an exhaustive and deep study of what data Facebook, Instagram, WhatsApp, and TikTok capture, "
+                    "what they use it for, and what an Indian microOTT can legally capture and monetise."
+                ),
+                incoming_channel="project_ui",
+                project_root="D:/repo",
+                working_directory="D:/repo",
+            )
+            state["deep_research_mode"] = True
+            state["long_document_mode"] = True
+
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "long_document_agent")
+        self.assertIn("deep research report objective", routed_state["orchestrator_reason"].lower())
+        self.assertFalse(mock_invoke.called)
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "long_document_agent")
+        self.assertEqual(task["intent"], "long-document-dispatch")
+        self.assertEqual(routed_state["workflow_type"], "deep_research")
 
     def test_reviewer_approval_finishes_when_no_planned_steps_remain(self):
         with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
@@ -357,6 +384,54 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(routed_state["next_agent"], "__finish__")
         self.assertIn("approve", routed_state["final_output"].lower())
 
+    def test_deep_research_confirmation_pending_pauses_execution(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Research the social media data market in depth.")
+            state["workflow_type"] = "deep_research"
+            state["pending_user_input_kind"] = "deep_research_confirmation"
+            state["approval_pending_scope"] = "deep_research_confirmation"
+            state["pending_user_question"] = "Reply approve to start deep research."
+            state["approval_request"] = {
+                "scope": "deep_research_confirmation",
+                "summary": "Review scope before expensive execution.",
+            }
+
+            routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "__finish__")
+        self.assertIn("approve", routed_state["final_output"].lower())
+
+    def test_deep_research_confirmation_scope_only_pauses_execution(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Research the social media data market in depth.")
+            state["workflow_type"] = "deep_research"
+            state["pending_user_input_kind"] = ""
+            state["approval_pending_scope"] = "deep_research_confirmation"
+            state["pending_user_question"] = "Reply approve to start deep research."
+            state["approval_request"] = {
+                "scope": "deep_research_confirmation",
+                "summary": "Review scope before expensive execution.",
+            }
+
+            routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "__finish__")
+        self.assertIn("approve", routed_state["final_output"].lower())
+
     def test_build_initial_state_approves_pending_plan_from_session(self):
         with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
             runtime = AgentRuntime(build_registry())
@@ -429,6 +504,70 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertFalse(state["long_document_plan_waiting_for_approval"])
         self.assertEqual(state["long_document_plan_status"], "approved")
         self.assertTrue(state["long_document_execute_from_saved_outline"])
+
+    def test_build_initial_state_restores_scope_only_pending_deep_research_confirmation(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            prior_state = {
+                "last_objective": "Create a 25-page social media data report.",
+                "awaiting_user_input": True,
+                "pending_user_input_kind": "",
+                "approval_pending_scope": "deep_research_confirmation",
+                "pending_user_question": "Review and approve deep research confirmation.",
+                "approval_request": {
+                    "scope": "deep_research_confirmation",
+                    "summary": "Review scope before expensive execution.",
+                },
+            }
+            state = runtime.build_initial_state(
+                "Create a 25-page social media data report.",
+                channel_session={"state": prior_state},
+            )
+
+        self.assertEqual(state["pending_user_input_kind"], "deep_research_confirmation")
+        self.assertEqual(state["approval_pending_scope"], "deep_research_confirmation")
+        self.assertIn("approve", state["pending_user_question"].lower())
+
+    def test_build_initial_state_resume_checkpoint_restores_scope_only_pending_approval(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            checkpoint = {
+                "summary": {
+                    "run_id": "run-1",
+                    "status": "awaiting_user_input",
+                    "awaiting_user_input": True,
+                },
+                "state_snapshot": {
+                    "current_objective": "Create a 25-page social media data report.",
+                    "pending_user_input_kind": "",
+                    "approval_pending_scope": "deep_research_confirmation",
+                    "pending_user_question": "Review and approve deep research confirmation.",
+                    "approval_request": {
+                        "scope": "deep_research_confirmation",
+                        "summary": "Review scope before expensive execution.",
+                    },
+                },
+            }
+            state = runtime.build_initial_state(
+                "Create a 25-page social media data report.",
+                resume_checkpoint_payload=checkpoint,
+            )
+
+        self.assertEqual(state["pending_user_input_kind"], "deep_research_confirmation")
+        self.assertEqual(state["approval_pending_scope"], "deep_research_confirmation")
+        self.assertIn("approve", state["pending_user_question"].lower())
 
     def test_build_initial_state_does_not_reuse_failed_approved_plan_for_fresh_run(self):
         with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):

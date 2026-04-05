@@ -26,6 +26,9 @@ class FailureCheckpoint(TypedDict, total=False):
 
 class RuntimeState(TypedDict, total=False):
     run_id: str
+    workflow_id: str
+    attempt_id: str
+    workflow_type: str
     session_id: str
     session_started_at: str
     working_directory: str
@@ -46,6 +49,7 @@ class RuntimeState(TypedDict, total=False):
     pending_user_input_kind: str
     pending_user_question: str
     approval_pending_scope: str
+    approval_request: dict[str, Any]
     failure_checkpoint: FailureCheckpoint
     recent_events: list[dict[str, Any]]
     channel_session_key: str
@@ -139,6 +143,9 @@ class RuntimeState(TypedDict, total=False):
 
 class ResumeCandidate(TypedDict, total=False):
     run_id: str
+    workflow_id: str
+    attempt_id: str
+    workflow_type: str
     session_id: str
     status: str
     resume_status: str
@@ -157,6 +164,7 @@ class ResumeCandidate(TypedDict, total=False):
     pending_user_input_kind: str
     pending_user_question: str
     approval_pending_scope: str
+    approval_request: dict[str, Any]
     plan_step_index: int
     plan_step_count: int
     current_plan_step_id: str
@@ -197,10 +205,27 @@ class ResumeStateOverrides(TypedDict, total=False):
 
 
 def state_awaiting_user_input(state: Mapping[str, Any]) -> bool:
+    approval_request = state.get("approval_request", {})
+    has_approval_request = False
+    if isinstance(approval_request, Mapping):
+        scope = str(approval_request.get("scope", "") or "").strip()
+        summary = str(approval_request.get("summary", "") or "").strip()
+        help_text = str(approval_request.get("help_text", "") or "").strip()
+        sections = approval_request.get("sections", [])
+        artifact_paths = approval_request.get("artifact_paths", [])
+        has_approval_request = bool(
+            scope
+            or summary
+            or help_text
+            or (isinstance(sections, list) and len(sections) > 0)
+            or (isinstance(artifact_paths, list) and len(artifact_paths) > 0)
+        )
     return bool(
         state.get("plan_needs_clarification", False)
         or state.get("plan_waiting_for_approval", False)
         or state.get("long_document_plan_waiting_for_approval", False)
         or state.get("blueprint_waiting_for_approval", False)
+        or str(state.get("approval_pending_scope", "")).strip()
+        or has_approval_request
         or str(state.get("pending_user_input_kind", "")).strip()
     )

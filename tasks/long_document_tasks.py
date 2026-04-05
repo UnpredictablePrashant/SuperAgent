@@ -18,6 +18,7 @@ import textwrap
 from openai import OpenAI
 
 from kendr.execution_trace import append_execution_event
+from kendr.workflow_contract import approval_request_to_text, build_approval_request
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.coding_tasks import _extract_output_text
 from tasks.file_memory import bootstrap_file_memory, update_planning_file
@@ -77,6 +78,36 @@ def _trace_url_list(urls: list[str] | None, *, limit: int = 6) -> list[str]:
         if len(compact) >= limit:
             break
     return compact
+
+
+def _cancel_requested(state: dict) -> bool:
+    if bool(state.get("user_cancelled", False)):
+        return True
+    path_value = str(state.get("kill_switch_file", "")).strip()
+    if not path_value:
+        policy = state.get("privileged_execution_policy", {})
+        if isinstance(policy, dict):
+            path_value = str(policy.get("kill_switch_file", "")).strip()
+    return bool(path_value) and Path(path_value).exists()
+
+
+def _raise_if_cancelled(state: dict, *, phase: str = "") -> None:
+    if not _cancel_requested(state):
+        return
+    state["user_cancelled"] = True
+    _trace_research_event(
+        state,
+        title="Deep research stop requested",
+        detail=(
+            f"Stop requested during {phase}. Ending the deep research workflow."
+            if phase
+            else "Stop requested. Ending the deep research workflow."
+        ),
+        status="cancelled",
+        metadata={"phase": phase or "runtime", "cancelled": True},
+        subtask="Stop deep research workflow",
+    )
+    raise RuntimeError("Kill switch triggered. Refusing further execution.")
 
 AGENT_METADATA = {
     "long_document_agent": {
@@ -234,9 +265,66 @@ def _default_subtopics(objective: str) -> list[str]:
     text = str(objective or "").strip()
     if not text:
         return seeds[:3]
-    fragments = re.split(r"[?.!]", text)
-    topical = [frag.strip().capitalize() for frag in fragments if len(frag.strip().split()) >= 4]
-    return (topical[:4] or seeds[:4]) + ([seeds[-1]] if seeds[-1] not in topical[:4] else [])
+    normalized = re.sub(r"\s+", " ", text)
+
+    def _clean_topic(raw: str) -> str:
+        value = re.sub(
+            r"^(?:so\s+i\s+am\s+looking\s+to\s+research|now\s+what\s+i['’]?m\s+trying\s+to\s+figure\s+out\s+is|what\s+i['’]?m\s+trying\s+to\s+figure\s+out\s+is)\s+",
+            "",
+            str(raw or "").strip(),
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(r"^(?:and\s+also|also)\s+", "", value, flags=re.IGNORECASE)
+        value = value.strip(" -:;,.?")
+        if not value:
+            return ""
+        return value[0].upper() + value[1:]
+
+    topical: list[str] = []
+    intro_match = re.split(
+        r"\b(?:now\s+what\s+i['’]?m\s+trying\s+to\s+figure\s+out\s+is|what\s+i['’]?m\s+trying\s+to\s+figure\s+out\s+is)\b",
+        normalized,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )
+    if intro_match:
+        intro = _clean_topic(intro_match[0])
+        if len(intro.split()) >= 6:
+            topical.append(intro)
+
+    numbered_parts = [part for part in re.split(r"\b\d+\.\s*", normalized) if part.strip()]
+    if len(numbered_parts) > 1:
+        numbered_parts = numbered_parts[1:]
+    for part in numbered_parts[:6]:
+        cleaned = _clean_topic(part)
+        if len(cleaned.split()) >= 3:
+            topical.append(cleaned)
+
+    if not topical:
+        fragments = re.split(r"[?.!;\n]", normalized)
+        topical.extend(_clean_topic(frag) for frag in fragments if len(str(frag).strip().split()) >= 4)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in topical:
+        key = item.lower()
+        if not item or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    if len(deduped) < 3:
+        for seed in seeds:
+            if seed.lower() in seen:
+                continue
+            deduped.append(seed)
+            seen.add(seed.lower())
+            if len(deduped) >= 4:
+                break
+
+    if seeds[-1].lower() not in seen:
+        deduped.append(seeds[-1])
+    return deduped[:6]
 
 
 def _research_depth_analysis(
@@ -245,6 +333,7 @@ def _research_depth_analysis(
     target_pages: int,
     requested_sources: list[str],
     date_range: str,
+    max_sources: int = 0,
 ) -> dict[str, Any]:
     text = str(objective or "").strip()
     lowered = text.lower()
@@ -331,9 +420,13 @@ Heuristic estimate:
     if not isinstance(subtopics_value, list):
         subtopics_value = fallback["subtopics"]
     subtopics = [str(item).strip() for item in subtopics_value if str(item).strip()][:8] or fallback["subtopics"]
-    budget = _tier_budget(tier)
+    budget = dict(_tier_budget(tier))
+    execution_budget = dict(budget)
     if budget["max_sources"]:
         estimated_sources = min(estimated_sources, int(budget["max_sources"]))
+    if max_sources > 0:
+        execution_budget["max_sources"] = min(int(execution_budget.get("max_sources", 0) or 0), max_sources) if execution_budget.get("max_sources", 0) else max_sources
+        estimated_sources = min(estimated_sources, execution_budget["max_sources"])
     return {
         "tier": tier,
         "reason": str(data.get("reason", "")).strip() or fallback["reason"],
@@ -343,8 +436,18 @@ Heuristic estimate:
         "requires_deep_research": bool(data.get("requires_deep_research", tier >= 3)),
         "estimated_duration_minutes": estimated_duration,
         "budget": budget,
+        "execution_budget": execution_budget,
+        "requested_target_pages": target_pages,
+        "requested_max_sources": max_sources,
         "requested_sources": requested_sources,
         "date_range": date_range or "all_time",
+        "request_signature": {
+            "objective": text,
+            "target_pages": target_pages,
+            "requested_sources": list(requested_sources),
+            "date_range": date_range or "all_time",
+            "max_sources": max_sources,
+        },
     }
 
 
@@ -531,6 +634,7 @@ def _collect_user_url_evidence(objective: str, state: dict, *, max_items: int = 
     urls = _normalize_research_urls(state.get("deep_research_source_urls", []))
     if not urls:
         return []
+    _raise_if_cancelled(state, phase="provided_urls")
     bounded_urls = urls[:max_items]
     fetch_parallelism = min(
         len(bounded_urls),
@@ -559,6 +663,7 @@ def _collect_user_url_evidence(objective: str, state: dict, *, max_items: int = 
     indexed_entries: dict[int, dict] = {}
     if fetch_parallelism <= 1:
         for index, url in enumerate(bounded_urls):
+            _raise_if_cancelled(state, phase="provided_urls")
             indexed_entries[index] = _collect_single_user_url_entry(objective, url)
     else:
         with ThreadPoolExecutor(max_workers=fetch_parallelism, thread_name_prefix="kendr-url") as executor:
@@ -567,6 +672,7 @@ def _collect_user_url_evidence(objective: str, state: dict, *, max_items: int = 
                 for index, url in enumerate(bounded_urls)
             }
             for future in as_completed(future_map):
+                _raise_if_cancelled(state, phase="provided_urls")
                 indexed_entries[future_map[future]] = future.result()
     entries = [indexed_entries[index] for index in sorted(indexed_entries)]
     ok_urls = [str(item.get("url", "")).strip() for item in entries if not str(item.get("error", "")).strip()]
@@ -1059,6 +1165,163 @@ def _extract_mermaid_blocks(text: str) -> list[str]:
     return blocks
 
 
+def _mermaid_to_dot(mermaid_text: str) -> str:
+    """Convert a Mermaid flowchart to Graphviz DOT notation."""
+    lines = [l.strip() for l in (mermaid_text or "").strip().splitlines()]
+    rankdir = "TB"
+    nodes: dict[str, dict] = {}
+    edges: list[tuple] = []
+    data_lines: list[str] = []
+
+    for line in lines:
+        if not line or line.startswith("%%"):
+            continue
+        lower = line.lower()
+        if lower.startswith("flowchart") or lower.startswith("graph"):
+            parts = line.split()
+            if len(parts) > 1:
+                rankdir = {"TD": "TB", "TB": "TB", "LR": "LR", "RL": "RL", "BT": "BT"}.get(parts[1].upper(), "TB")
+        else:
+            data_lines.append(line)
+
+    def _parse_node(token: str) -> tuple[str, str, str]:
+        token = token.strip()
+        for pat, shape in [
+            (r'^(\w+)\{([^}]*)\}$', "diamond"),
+            (r'^(\w+)\(\(([^)]*)\)\)$', "ellipse"),
+            (r'^(\w+)\[([^\]]*)\]$', "box"),
+            (r'^(\w+)>([^\]]*)\]$', "box"),
+        ]:
+            m = re.match(pat, token)
+            if m:
+                return m.group(1), m.group(2), shape
+        m = re.match(r'^(\w+)$', token)
+        if m:
+            return m.group(1), m.group(1), "box"
+        return token, token, "box"
+
+    edge_re = re.compile(r'(-->|-\.->|==>|---)')
+    label_re = re.compile(r'^\|([^|]*)\|')
+
+    for line in data_lines:
+        parts = edge_re.split(line, maxsplit=1)
+        if len(parts) == 3:
+            left = parts[0].strip()
+            right = parts[2].strip()
+            edge_label = ""
+            lm = label_re.match(right)
+            if lm:
+                edge_label = lm.group(1).strip()
+                right = right[lm.end():].strip()
+            fid, flabel, fshape = _parse_node(left)
+            tid, tlabel, tshape = _parse_node(right)
+            if fid not in nodes:
+                nodes[fid] = {"label": flabel, "shape": fshape}
+            elif flabel != fid:
+                nodes[fid].update({"label": flabel, "shape": fshape})
+            if tid not in nodes:
+                nodes[tid] = {"label": tlabel, "shape": tshape}
+            elif tlabel != tid:
+                nodes[tid].update({"label": tlabel, "shape": tshape})
+            edges.append((fid, tid, edge_label))
+        else:
+            nid, nlabel, nshape = _parse_node(line)
+            if nid not in nodes:
+                nodes[nid] = {"label": nlabel, "shape": nshape}
+
+    if not nodes and not edges:
+        return ""
+
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    dot = [
+        "digraph G {",
+        f"    rankdir={rankdir};",
+        '    node [fontname="Helvetica", fontsize=11, style=filled, fillcolor="#f0f4ff", color="#4a6fa5"];',
+        '    edge [fontname="Helvetica", fontsize=10, color="#555555"];',
+        "",
+    ]
+    for nid, attrs in nodes.items():
+        dot.append(f'    {nid} [label="{_esc(attrs.get("label", nid))}", shape={attrs.get("shape", "box")}];')
+    dot.append("")
+    for fid, tid, label in edges:
+        label_attr = f' [label="{_esc(label)}"]' if label else ""
+        dot.append(f"    {fid} -> {tid}{label_attr};")
+    dot.append("}")
+    return "\n".join(dot)
+
+
+def _render_mermaid_png(mermaid_text: str, output_path: str) -> bool:
+    """Render a Mermaid diagram to a PNG file.
+    Tries mmdc (Mermaid CLI) first, then graphviz as fallback.
+    Returns True if a PNG was successfully written."""
+    output_path = str(output_path)
+
+    # --- attempt 1: mmdc (npm install -g @mermaid-js/mermaid-cli) ---
+    try:
+        mmd_tmp = output_path.replace(".png", ".mmd")
+        Path(mmd_tmp).write_text(mermaid_text, encoding="utf-8")
+        result = subprocess.run(
+            ["mmdc", "-i", mmd_tmp, "-o", output_path, "--backgroundColor", "white"],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode == 0 and Path(output_path).exists():
+            log_task_update(DEEP_RESEARCH_LABEL, f"Rendered flowchart via mmdc → {output_path}")
+            return True
+    except Exception:
+        pass
+
+    # --- attempt 2: graphviz Python package ---
+    try:
+        import graphviz  # type: ignore
+        dot_src = _mermaid_to_dot(mermaid_text)
+        if not dot_src:
+            return False
+        base = output_path[:-4] if output_path.endswith(".png") else output_path
+        src = graphviz.Source(dot_src, format="png")
+        rendered = src.render(filename=base, cleanup=True)
+        # graphviz appends format extension; rename if needed
+        rendered_path = Path(rendered)
+        target_path = Path(output_path)
+        if rendered_path != target_path and rendered_path.exists():
+            rendered_path.rename(target_path)
+        if target_path.exists():
+            log_task_update(DEEP_RESEARCH_LABEL, f"Rendered flowchart via graphviz → {output_path}")
+            return True
+    except Exception as exc:
+        log_task_update(DEEP_RESEARCH_LABEL, f"Flowchart PNG render failed: {exc}")
+
+    return False
+
+
+def _replace_mermaid_with_png(text: str, artifact_dir: str, section_index: int) -> tuple[str, list[str]]:
+    """Replace all ```mermaid...``` blocks in *text* with PNG image embeds.
+    Returns (updated_text, list_of_png_absolute_paths)."""
+    pattern = re.compile(r"```mermaid\s*(.*?)```", flags=re.IGNORECASE | re.DOTALL)
+    png_files: list[str] = []
+    counter = [0]
+
+    def _replace(match: re.Match) -> str:
+        mermaid_src = match.group(1).strip()
+        if not mermaid_src:
+            return match.group(0)
+        counter[0] += 1
+        png_rel = _artifact_file(artifact_dir, f"section_{section_index:02d}/flowchart_{counter[0]:02d}.png")
+        png_abs = resolve_output_path(png_rel)
+        os.makedirs(os.path.dirname(png_abs), exist_ok=True)
+        if _render_mermaid_png(mermaid_src, png_abs):
+            png_files.append(png_abs)
+            # Use a relative path from the artifact_dir root so it works in both MD and HTML
+            rel_from_report = f"section_{section_index:02d}/flowchart_{counter[0]:02d}.png"
+            return f"![Flowchart {counter[0]}]({rel_from_report})"
+        # Fallback: keep original Mermaid block
+        return match.group(0)
+
+    updated = pattern.sub(_replace, text)
+    return updated, png_files
+
+
 def _extract_markdown_tables(text: str) -> list[str]:
     lines = (text or "").splitlines()
     tables = []
@@ -1187,9 +1450,13 @@ def _render_visual_assets_md(visual_assets: dict) -> str:
         for item in flowcharts:
             lines.append(f"##### {item.get('title', 'Flowchart')}")
             lines.append("")
-            lines.append("```mermaid")
-            lines.append(str(item.get("mermaid", "")).strip())
-            lines.append("```")
+            png_path = str(item.get("png_path", "")).strip()
+            if png_path:
+                lines.append(f"![{item.get('title', 'Flowchart')}]({png_path})")
+            else:
+                lines.append("```mermaid")
+                lines.append(str(item.get("mermaid", "")).strip())
+                lines.append("```")
             lines.append("")
 
     return "\n".join(lines).strip()
@@ -1382,11 +1649,22 @@ def _deep_research_analysis_markdown(
     local_source_count: int,
     provided_url_count: int,
 ) -> str:
-    budget = analysis.get("budget", {}) if isinstance(analysis, dict) else {}
+    budget = analysis.get("execution_budget", analysis.get("budget", {})) if isinstance(analysis, dict) else {}
+    requested_target_pages = int(analysis.get("requested_target_pages", 0) or 0) if isinstance(analysis, dict) else 0
+
+    def _budget_value(key: str, *, suffix: str = "") -> str:
+        raw = 0
+        if isinstance(budget, dict):
+            raw = int(budget.get(key, 0) or 0)
+        if raw > 0:
+            return f"{raw}{suffix}"
+        return "not explicitly capped"
+
     lines = [
         "# Deep Research Analysis",
         "",
         f"- Tier: {analysis.get('tier', '?')}",
+        f"- Page target: {requested_target_pages or analysis.get('estimated_pages', '?')}",
         f"- Estimated pages: {analysis.get('estimated_pages', '?')}",
         f"- Estimated sources: {analysis.get('estimated_sources', '?')}",
         f"- Estimated duration: {analysis.get('estimated_duration_minutes', '?')} minutes",
@@ -1407,9 +1685,9 @@ def _deep_research_analysis_markdown(
             [
                 "",
                 "## Session Budget",
-                f"- Max tokens: {budget.get('max_tokens', 0) or 'unlimited'}",
-                f"- Max sources: {budget.get('max_sources', 0) or 'unlimited'}",
-                f"- Max duration: {budget.get('max_duration_minutes', 0) or 'multi-hour'} minutes",
+                f"- Max tokens: {_budget_value('max_tokens')}",
+                f"- Max sources: {_budget_value('max_sources')}",
+                f"- Max duration: {_budget_value('max_duration_minutes', suffix=' minutes')}",
             ]
         )
     if str(analysis.get("reason", "")).strip():
@@ -1417,11 +1695,228 @@ def _deep_research_analysis_markdown(
     return "\n".join(lines).strip() + "\n"
 
 
+def _compact_text(value: str, *, width: int = 120) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return ""
+    return textwrap.shorten(text, width=width, placeholder="...")
+
+
+def _deep_research_analysis_summary_prompt(
+    *,
+    title: str,
+    analysis: dict,
+    formats: list[str],
+    citation_style: str,
+    plagiarism_enabled: bool,
+    web_search_enabled: bool,
+    local_source_count: int,
+    provided_url_count: int,
+    analysis_storage_path: str,
+    version: int,
+) -> str:
+    requested_target_pages = int(analysis.get("requested_target_pages", 0) or 0) if isinstance(analysis, dict) else 0
+    lines = [
+        f"The deep research confirmation v{version} is ready for approval.",
+        "Review this compact summary before the expensive research phases begin.",
+        "",
+        "Summary",
+        f"- Title: {title}",
+        f"- Tier: {analysis.get('tier', '?')}",
+        f"- Page target: {requested_target_pages or analysis.get('estimated_pages', '?')}",
+        f"- Estimated pages: {analysis.get('estimated_pages', '?')}",
+        f"- Estimated sources: {analysis.get('estimated_sources', '?')}",
+        f"- Estimated duration: {analysis.get('estimated_duration_minutes', '?')} minutes",
+        f"- Citation style: {citation_style.upper()}",
+        f"- Output formats: {', '.join(fmt.upper() for fmt in formats)}",
+        f"- Plagiarism check: {'enabled' if plagiarism_enabled else 'disabled'}",
+        f"- Web search: {'enabled' if web_search_enabled else 'disabled'}",
+        f"- Local file sources detected: {local_source_count}",
+        f"- User-provided URLs: {provided_url_count}",
+    ]
+    subtopics = analysis.get("subtopics", []) if isinstance(analysis.get("subtopics", []), list) else []
+    if subtopics:
+        lines.extend(["", "Key focus areas"])
+        for idx, topic in enumerate(subtopics[:6], start=1):
+            lines.append(f"- {idx}. {_compact_text(str(topic), width=110)}")
+    reason = _compact_text(str(analysis.get("reason", "")).strip(), width=160)
+    if reason:
+        lines.extend(["", "Why this tier", f"- {reason}"])
+    if analysis_storage_path:
+        lines.extend(["", f"Full analysis saved in {analysis_storage_path}."])
+    lines.extend(
+        [
+            "",
+            "Reply `approve` to continue, or describe the changes you want and I will regenerate the research setup before execution.",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+def _deep_research_subplan_summary_prompt(
+    *,
+    title: str,
+    analysis: dict,
+    outline: dict,
+    target_pages: int,
+    section_pages: int,
+    formats: list[str],
+    web_search_enabled: bool,
+    outline_storage_path: str,
+    subplan_storage_path: str,
+    version: int,
+) -> str:
+    sections = outline.get("sections", []) if isinstance(outline, dict) else []
+    lines = [
+        f"The deep research section plan v{version} is ready for approval.",
+        "Review this compact section outline before the long-running research and drafting phases begin.",
+        "",
+        "Plan summary",
+        f"- Title: {title}",
+        f"- Tier: {analysis.get('tier', '?')}",
+        f"- Total pages: {target_pages}",
+        f"- Sections: {len(sections)}",
+        f"- Approx pages per section: {section_pages}",
+        f"- Web search: {'enabled' if web_search_enabled else 'disabled'}",
+        f"- Output formats: {', '.join(fmt.upper() for fmt in formats)}",
+    ]
+    if sections:
+        lines.extend(["", "Section outline"])
+        for section in sections[:8]:
+            lines.append(
+                f"- {section.get('id')}. {_compact_text(str(section.get('title', 'Section')), width=70)}"
+                f": {_compact_text(str(section.get('objective', '')), width=130)}"
+            )
+    if outline_storage_path or subplan_storage_path:
+        lines.extend(["", "Full details"])
+        if outline_storage_path:
+            lines.append(f"- Outline: {outline_storage_path}")
+        if subplan_storage_path:
+            lines.append(f"- Step-by-step plan: {subplan_storage_path}")
+    lines.extend(
+        [
+            "",
+            "Reply `approve` to continue, or describe the changes you want and I will regenerate the section plan before execution.",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
 def _build_deep_research_confirmation_prompt(analysis_md: str, *, version: int) -> str:
     return build_plan_approval_prompt(
         analysis_md,
         scope_title=f"deep research confirmation v{version}",
         storage_note="Review the tier, subtopics, and output settings before the expensive research phases begin.",
+    )
+
+
+def _build_deep_research_analysis_request(
+    *,
+    title: str,
+    analysis: dict[str, Any],
+    formats: list[str],
+    citation_style: str,
+    plagiarism_enabled: bool,
+    web_search_enabled: bool,
+    local_source_count: int,
+    provided_url_count: int,
+    analysis_storage_path: str,
+    version: int,
+) -> dict[str, Any]:
+    budget = analysis.get("execution_budget", analysis.get("budget", {})) if isinstance(analysis, dict) else {}
+    requested_target_pages = int(analysis.get("requested_target_pages", 0) or 0) if isinstance(analysis, dict) else 0
+
+    def _budget_value(key: str, *, suffix: str = "") -> str:
+        raw = 0
+        if isinstance(budget, dict):
+            raw = int(budget.get(key, 0) or 0)
+        if raw > 0:
+            return f"{raw}{suffix}"
+        return "not explicitly capped"
+
+    overview_items = [
+        f"Tier {int(analysis.get('tier', 0) or 0)} deep research run.",
+        f"Page target: {requested_target_pages or int(analysis.get('estimated_pages', 0) or 0)}.",
+        f"Estimated pages: {int(analysis.get('estimated_pages', 0) or 0)}.",
+        f"Estimated sources: {int(analysis.get('estimated_sources', 0) or 0)}.",
+        f"Estimated duration: {int(analysis.get('estimated_duration_minutes', 0) or 0)} minutes.",
+        f"Citation style: {citation_style.upper()}.",
+        f"Output formats: {', '.join(fmt.upper() for fmt in formats) or 'MD'}.",
+        f"Plagiarism check: {'enabled' if plagiarism_enabled else 'disabled'}.",
+        f"Web search: {'enabled' if web_search_enabled else 'disabled'}.",
+        f"Local file sources detected: {local_source_count}.",
+        f"User-provided URLs: {provided_url_count}.",
+        f"Date range: {str(analysis.get('date_range', 'all_time') or 'all_time')}.",
+    ]
+    detected_subtopics = [str(topic).strip() for topic in (analysis.get("subtopics", []) or []) if str(topic).strip()]
+    budget_items = [
+        f"Max tokens: {_budget_value('max_tokens')}.",
+        f"Max sources: {_budget_value('max_sources')}.",
+        f"Max duration: {_budget_value('max_duration_minutes', suffix=' minutes')}.",
+    ]
+    rationale_items = [part.strip() for part in str(analysis.get("reason", "") or "").split(";") if part.strip()]
+    return build_approval_request(
+        scope="deep_research_confirmation",
+        title="Deep Research Analysis",
+        summary="The deep research confirmation is ready for approval. Review the tier, subtopics, and output settings before the expensive research phases begin.",
+        sections=[
+            {"title": "Overview", "items": overview_items},
+            {"title": "Detected Subtopics", "items": detected_subtopics},
+            {"title": "Session Budget", "items": budget_items},
+            {"title": "Why This Tier", "items": rationale_items},
+        ],
+        accept_label="Start Deep Research",
+        reject_label="Revise Scope",
+        suggest_label="Suggestion",
+        help_text="Accept starts the expensive research pipeline. Reject or Suggestion sends changes back into the paused run.",
+        artifact_paths=[analysis_storage_path] if analysis_storage_path else [],
+        metadata={"version": version, "report_title": title},
+    )
+
+
+def _build_deep_research_subplan_request(
+    *,
+    title: str,
+    analysis: dict[str, Any],
+    outline: dict[str, Any],
+    target_pages: int,
+    section_pages: int,
+    formats: list[str],
+    web_search_enabled: bool,
+    outline_storage_path: str,
+    subplan_storage_path: str,
+    version: int,
+) -> dict[str, Any]:
+    sections = outline.get("sections", []) if isinstance(outline.get("sections"), list) else []
+    section_titles = []
+    for index, section in enumerate(sections, start=1):
+        section_title = str((section or {}).get("title", f"Section {index}") or f"Section {index}").strip()
+        target = int((section or {}).get("target_pages", section_pages) or section_pages)
+        questions = (section or {}).get("key_questions", []) if isinstance(section, dict) else []
+        q_count = len(questions) if isinstance(questions, list) else 0
+        section_titles.append(f"{index}. {section_title} | target_pages={target} | questions={q_count or 'n/a'}")
+    execution_items = [
+        f"Deliver a {target_pages}-page deep research report through approved section-by-section research, drafting, and final merge.",
+        f"Section count: {len(sections)}.",
+        f"Default section size: {section_pages} pages.",
+        f"Web search: {'enabled' if web_search_enabled else 'disabled'}.",
+        f"Output formats: {', '.join(fmt.upper() for fmt in formats) or 'MD'}.",
+        f"Research tier: {int(analysis.get('tier', 0) or 0)}.",
+    ]
+    return build_approval_request(
+        scope="long_document_plan",
+        title=f"{title or 'Deep Research Report'} ({target_pages} pages)",
+        summary="The deep research section plan is ready for approval.",
+        sections=[
+            {"title": "Section Outline", "items": section_titles},
+            {"title": "Execution Plan", "items": execution_items},
+        ],
+        accept_label="Approve Plan",
+        reject_label="Revise Plan",
+        suggest_label="Suggestion",
+        help_text="Accept keeps the same workflow and starts the section research and drafting stages. Reject or Suggestion regenerates the plan before execution.",
+        artifact_paths=[path for path in [outline_storage_path, subplan_storage_path] if path],
+        metadata={"version": version, "section_count": len(sections)},
     )
 
 
@@ -1800,6 +2295,7 @@ def _run_research_pass(
     heartbeat_interval_seconds: int | None = None,
     heartbeat_label: str = "Research pass in progress",
     heartbeat_callback: Any | None = None,
+    cancel_check: Any | None = None,
 ) -> dict:
     create_kwargs = {
         "model": model,
@@ -1822,6 +2318,8 @@ def _run_research_pass(
     last_heartbeat = 0
 
     while status not in terminal:
+        if callable(cancel_check):
+            cancel_check()
         if elapsed_seconds >= max_wait_seconds:
             return {
                 "response_id": response_id,
@@ -1841,6 +2339,8 @@ def _run_research_pass(
                     heartbeat_callback(elapsed_seconds)
                 except Exception:
                     pass
+        if callable(cancel_check):
+            cancel_check()
         response = client.responses.retrieve(response_id)
         status = str(getattr(response, "status", "unknown"))
 
@@ -1882,6 +2382,7 @@ def _collect_section_research_package(
     max_wait_seconds: int,
     heartbeat_seconds: int,
     max_sources: int,
+    cancel_check: Any | None = None,
 ) -> dict[str, Any]:
     section_title = str(section.get("title", f"Section {section_index}")).strip() or f"Section {section_index}"
     section_objective = str(section.get("objective", objective)).strip() or objective
@@ -1895,6 +2396,8 @@ def _collect_section_research_package(
     section_search_sources: list[dict] = []
     section_search_text = ""
     if use_section_search:
+        if callable(cancel_check):
+            cancel_check()
         search_query = f"{section_title} {section_objective}"
         section_search_results = _collect_google_search_evidence(search_query, num=section_search_results_count)
         section_search_sources = _sources_from_search_results(section_search_results.get("results", []))
@@ -1926,6 +2429,8 @@ def _collect_section_research_package(
         section_sources = _merge_sources(list(evidence_sources), section_search_sources)
     else:
         if web_search_enabled:
+            if callable(cancel_check):
+                cancel_check()
             query_lines = [
                 f"Global objective: {objective}",
                 f"Section {section_index} title: {section_title}",
@@ -1948,6 +2453,7 @@ def _collect_section_research_package(
                 max_wait_seconds=max_wait_seconds,
                 heartbeat_interval_seconds=heartbeat_seconds,
                 heartbeat_label=f"Section {section_index} research in progress",
+                cancel_check=cancel_check,
             )
             research_output = str(research_pass.get("output_text", "")).strip()
         else:
@@ -2599,6 +3105,7 @@ def long_document_agent(state):
     active_task, task_content, _ = begin_agent_session(state, "long_document_agent")
     state["long_document_calls"] = state.get("long_document_calls", 0) + 1
     call_number = state["long_document_calls"]
+    _raise_if_cancelled(state, phase="startup")
 
     objective = str(state.get("current_objective") or task_content or state.get("user_query", "")).strip()
     if not objective:
@@ -2620,7 +3127,14 @@ def long_document_agent(state):
     section_count = _safe_int(state.get("long_document_sections"), section_count_default, 1, 40)
     title = _normalize_title(state.get("long_document_title", ""), f"Deep Research Report ({target_pages} pages)")
 
-    research_model = str(state.get("research_model", DEFAULT_DEEP_RESEARCH_MODEL)).strip() or DEFAULT_DEEP_RESEARCH_MODEL
+    _raw_research_model = str(state.get("research_model", "")).strip()
+    _PROVIDER_NAMES = {"openai", "anthropic", "google", "xai", "ollama", "openrouter", "custom", "minimax", "qwen", "glm"}
+    if not _raw_research_model or _raw_research_model in _PROVIDER_NAMES:
+        if _raw_research_model in _PROVIDER_NAMES:
+            log_task_update(DEEP_RESEARCH_LABEL, f"state.research_model='{_raw_research_model}' looks like a provider name, not a model ID — ignoring and using OPENAI_DEEP_RESEARCH_MODEL default.")
+        research_model = DEFAULT_DEEP_RESEARCH_MODEL
+    else:
+        research_model = _raw_research_model
     max_tool_calls = _safe_int(state.get("research_max_tool_calls"), 8, 1, 64)
     max_output_tokens = state.get("research_max_output_tokens")
     max_output_tokens_int = _safe_int(max_output_tokens, 0, 0, 200000) if max_output_tokens is not None else None
@@ -2683,6 +3197,7 @@ def long_document_agent(state):
 
     state["deep_research_mode"] = deep_research_mode
     state["long_document_mode"] = True
+    state["workflow_type"] = "deep_research" if deep_research_mode else "long_document"
     state["research_output_formats"] = output_formats
     state["research_citation_style"] = citation_style
     state["research_enable_plagiarism_check"] = plagiarism_enabled
@@ -2693,7 +3208,7 @@ def long_document_agent(state):
         state["research_max_sources"] = max_sources
     state["deep_research_source_urls"] = _normalize_research_urls(state.get("deep_research_source_urls", []))
 
-    collect_sources_first = bool(state.get("long_document_collect_sources_first", True))
+    collect_sources_first = bool(state.get("long_document_collect_sources_first", False))
     artifact_dir = f"deep_research_runs/deep_research_run_{call_number}"
 
     if bool(state.get("long_document_addendum_requested", False)):
@@ -2705,12 +3220,22 @@ def long_document_agent(state):
         )
 
     analysis = state.get("deep_research_analysis", {})
-    if not isinstance(analysis, dict) or not analysis:
+    analysis_signature = {
+        "objective": objective,
+        "target_pages": target_pages,
+        "requested_sources": list(requested_sources),
+        "date_range": date_range or "all_time",
+        "max_sources": max_sources,
+    }
+    existing_signature = analysis.get("request_signature", {}) if isinstance(analysis, dict) else {}
+    if not isinstance(analysis, dict) or not analysis or existing_signature != analysis_signature:
+        _raise_if_cancelled(state, phase="analysis")
         analysis = _research_depth_analysis(
             objective,
             target_pages=target_pages,
             requested_sources=requested_sources,
             date_range=date_range,
+            max_sources=max_sources,
         )
         state["deep_research_analysis"] = analysis
         state["deep_research_tier"] = int(analysis.get("tier", 0) or 0)
@@ -2731,12 +3256,40 @@ def long_document_agent(state):
             provided_url_count=len(_normalize_research_urls(state.get("deep_research_source_urls", []))) if web_search_enabled else 0,
         )
         version = int(state.get("deep_research_confirmation_version", 0) or 0) + 1
-        prompt = _build_deep_research_confirmation_prompt(analysis_md, version=version)
+        analysis_json_path = _artifact_file(artifact_dir, "deep_research_analysis.json")
+        analysis_md_path = _artifact_file(artifact_dir, "deep_research_analysis.md")
+        write_text_file(analysis_json_path, json.dumps(analysis, indent=2, ensure_ascii=False))
+        write_text_file(analysis_md_path, analysis_md)
+        prompt = _deep_research_analysis_summary_prompt(
+            title=title,
+            analysis=analysis,
+            formats=output_formats,
+            citation_style=citation_style,
+            plagiarism_enabled=plagiarism_enabled,
+            web_search_enabled=web_search_enabled,
+            local_source_count=len(_collect_local_drive_evidence(state)),
+            provided_url_count=len(_normalize_research_urls(state.get("deep_research_source_urls", []))) if web_search_enabled else 0,
+            analysis_storage_path=resolve_output_path(analysis_md_path),
+            version=version,
+        )
+        approval_request = _build_deep_research_analysis_request(
+            title=title,
+            analysis=analysis,
+            formats=output_formats,
+            citation_style=citation_style,
+            plagiarism_enabled=plagiarism_enabled,
+            web_search_enabled=web_search_enabled,
+            local_source_count=len(_collect_local_drive_evidence(state)),
+            provided_url_count=len(_normalize_research_urls(state.get("deep_research_source_urls", []))) if web_search_enabled else 0,
+            analysis_storage_path=resolve_output_path(analysis_md_path),
+            version=version,
+        )
         state["deep_research_confirmation_version"] = version
         state["pending_user_input_kind"] = "deep_research_confirmation"
         state["approval_pending_scope"] = "deep_research_confirmation"
-        state["pending_user_question"] = prompt
-        state["draft_response"] = prompt
+        state["approval_request"] = approval_request
+        state["pending_user_question"] = approval_request_to_text(approval_request) or prompt
+        state["draft_response"] = state["pending_user_question"]
         state["deep_research_result_card"] = {
             "kind": "analysis",
             "title": title,
@@ -2773,13 +3326,15 @@ def long_document_agent(state):
         return publish_agent_output(
             state,
             "long_document_agent",
-            analysis_md,
+            state["draft_response"],
             f"deep_research_analysis_{version}",
             recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
         )
 
     if deep_research_mode:
         state["deep_research_confirmed"] = True
+        if str(state.get("approval_pending_scope", "") or "").strip() == "deep_research_confirmation":
+            state["approval_request"] = {}
 
     approved_outline = state.get("long_document_outline", {})
     if not isinstance(approved_outline, dict):
@@ -2791,6 +3346,7 @@ def long_document_agent(state):
     )
 
     if needs_outline_approval:
+        _raise_if_cancelled(state, phase="outline_generation")
         outline_objective = objective
         feedback = str(state.get("long_document_plan_feedback", "") or "").strip()
         if feedback:
@@ -2816,10 +3372,29 @@ def long_document_agent(state):
 
         outline_storage_path = resolve_output_path(_artifact_file(artifact_dir, "deep_research_outline.md"))
         subplan_storage_path = resolve_output_path(_artifact_file(artifact_dir, "deep_research_subplan.md"))
-        approval_prompt = build_plan_approval_prompt(
-            subplan_md,
-            scope_title=f"deep research section plan v{subplan_version}",
-            storage_note=f"Stored in {outline_storage_path} and {subplan_storage_path}.",
+        approval_prompt = _deep_research_subplan_summary_prompt(
+            title=title,
+            analysis=analysis,
+            outline=outline,
+            target_pages=target_pages,
+            section_pages=section_pages,
+            formats=output_formats,
+            web_search_enabled=web_search_enabled,
+            outline_storage_path=outline_storage_path,
+            subplan_storage_path=subplan_storage_path,
+            version=subplan_version,
+        )
+        approval_request = _build_deep_research_subplan_request(
+            title=title,
+            analysis=analysis,
+            outline=outline,
+            target_pages=target_pages,
+            section_pages=section_pages,
+            formats=output_formats,
+            web_search_enabled=web_search_enabled,
+            outline_storage_path=outline_storage_path,
+            subplan_storage_path=subplan_storage_path,
+            version=subplan_version,
         )
 
         state["long_document_outline"] = outline
@@ -2830,8 +3405,9 @@ def long_document_agent(state):
         state["long_document_plan_status"] = "pending"
         state["pending_user_input_kind"] = "subplan_approval"
         state["approval_pending_scope"] = "long_document_plan"
-        state["pending_user_question"] = approval_prompt
-        state["draft_response"] = approval_prompt
+        state["approval_request"] = approval_request
+        state["pending_user_question"] = approval_request_to_text(approval_request) or approval_prompt
+        state["draft_response"] = state["pending_user_question"]
         state["_skip_review_once"] = True
         state["_hold_planned_step_completion_once"] = True
         state["long_document_replan_requested"] = False
@@ -2865,10 +3441,12 @@ def long_document_agent(state):
         return publish_agent_output(
             state,
             "long_document_agent",
-            subplan_md,
+            state["draft_response"],
             f"deep_research_subplan_{subplan_version}",
             recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
         )
+    if str(state.get("approval_pending_scope", "") or "").strip() == "long_document_plan":
+        state["approval_request"] = {}
 
     client = OpenAI(api_key=api_key)
     evidence_bank_md = ""
@@ -2947,6 +3525,7 @@ def long_document_agent(state):
                         metadata={"phase": "evidence_bank", "elapsed_seconds": elapsed},
                         subtask="Build cross-report evidence bank",
                     ),
+                    cancel_check=lambda: _raise_if_cancelled(state, phase="evidence_bank"),
                 )
                 evidence_sources = _merge_sources(
                     explicit_source_entries,
@@ -3134,6 +3713,7 @@ def long_document_agent(state):
                         max_wait_seconds=max_wait_seconds,
                         heartbeat_seconds=heartbeat_seconds,
                         max_sources=max_sources,
+                        cancel_check=lambda idx=index: _raise_if_cancelled(state, phase=f"section_{idx}_research"),
                     )
                 )
         else:
@@ -3189,12 +3769,15 @@ def long_document_agent(state):
                         max_wait_seconds=max_wait_seconds,
                         heartbeat_seconds=heartbeat_seconds,
                         max_sources=max_sources,
+                        cancel_check=lambda idx=index: _raise_if_cancelled(state, phase=f"section_{idx}_research"),
                     )
                     future_map[future] = index
 
                 for future in as_completed(future_map):
+                    _raise_if_cancelled(state, phase="section_research")
                     _finalize_section_package(future.result())
 
+        _raise_if_cancelled(state, phase="section_research_complete")
         section_packages = [completed_section_packages[index] for index in sorted(completed_section_packages)]
 
     sections: list[dict[str, Any]] = []
@@ -3313,6 +3896,7 @@ def long_document_agent(state):
                         metadata={"phase": "section_research", "section_index": idx, "section_title": name, "elapsed_seconds": elapsed},
                         subtask=f"Gather evidence for {name}",
                     ),
+                    cancel_check=lambda idx=index: _raise_if_cancelled(state, phase=f"section_{idx}_research"),
                 )
 
                 if str(research_pass.get("status", "")).strip() not in {"completed", ""}:
@@ -3398,6 +3982,7 @@ def long_document_agent(state):
         )
 
     log_task_update(DEEP_RESEARCH_LABEL, "Phase 2/4 - correlating subtopics and section dependencies.")
+    _raise_if_cancelled(state, phase="correlation")
     correlation_started_at = _trace_now()
     _trace_research_event(
         state,
@@ -3439,6 +4024,7 @@ def long_document_agent(state):
         ordered_packages = section_packages
 
     for write_index, package in enumerate(ordered_packages, start=1):
+        _raise_if_cancelled(state, phase=f"section_{write_index}_draft")
         section_title = str(package.get("title", f"Section {write_index}")).strip() or f"Section {write_index}"
         words_target = max(500, int(package.get("target_pages", section_pages) or section_pages) * words_per_page)
         log_task_update(
@@ -3482,6 +4068,27 @@ def long_document_agent(state):
         elif not (existing_tables and existing_flowcharts):
             generated_visuals = _generate_visual_assets(section_title, section_text, package.get("research_text", ""))
         visual_assets = _normalize_visual_assets(existing_tables, existing_flowcharts, generated_visuals)
+        # Replace inline Mermaid blocks in section text with rendered PNGs
+        section_text, inline_png_files = _replace_mermaid_with_png(section_text, artifact_dir, write_index)
+
+        # Render visual_assets flowcharts to PNG and store the relative path on the chart dict
+        flowchart_files: list[str] = []
+        for chart_index, chart in enumerate(visual_assets.get("flowcharts", []), start=1):
+            flowchart_text = str(chart.get("mermaid", "")).strip()
+            if not flowchart_text:
+                continue
+            mmd_filename = _artifact_file(artifact_dir, f"section_{write_index:02d}/flowchart_va_{chart_index:02d}.mmd")
+            write_text_file(mmd_filename, flowchart_text + "\n")
+            png_filename = _artifact_file(artifact_dir, f"section_{write_index:02d}/flowchart_va_{chart_index:02d}.png")
+            png_abs = resolve_output_path(png_filename)
+            os.makedirs(os.path.dirname(png_abs), exist_ok=True)
+            if _render_mermaid_png(flowchart_text, png_abs):
+                chart["png_path"] = f"section_{write_index:02d}/flowchart_va_{chart_index:02d}.png"
+                flowchart_files.append(png_abs)
+            else:
+                flowchart_files.append(resolve_output_path(mmd_filename))
+        flowchart_files.extend(inline_png_files)
+
         section_text = _append_generated_visuals(section_text, visual_assets)
         if include_section_references:
             section_text = _append_verified_references(section_text, package.get("sources", []))
@@ -3495,14 +4102,6 @@ def long_document_agent(state):
         write_text_file(section_md_filename, section_text)
         write_text_file(visual_assets_json_filename, json.dumps(visual_assets, indent=2, ensure_ascii=False))
         write_text_file(visual_assets_md_filename, _render_visual_assets_md(visual_assets) + "\n")
-        flowchart_files: list[str] = []
-        for chart_index, chart in enumerate(visual_assets.get("flowcharts", []), start=1):
-            flowchart_filename = _artifact_file(artifact_dir, f"section_{write_index:02d}/flowchart_{chart_index:02d}.mmd")
-            flowchart_text = str(chart.get("mermaid", "")).strip()
-            if not flowchart_text:
-                continue
-            write_text_file(flowchart_filename, flowchart_text + "\n")
-            flowchart_files.append(f"{OUTPUT_DIR}/{flowchart_filename}")
 
         note = _section_continuity_note(section_title, section_text)
         continuity_notes.append(f"{section_title}:\n{note}")

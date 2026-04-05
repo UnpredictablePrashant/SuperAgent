@@ -7,7 +7,12 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from kendr.discovery import build_registry
 from kendr.runtime import AgentRuntime
-from tasks.long_document_tasks import _build_compiled_markdown, long_document_agent
+from tasks.long_document_tasks import (
+    _build_compiled_markdown,
+    _build_deep_research_analysis_request,
+    _default_subtopics,
+    long_document_agent,
+)
 
 
 class LongDocumentPlanningTests(unittest.TestCase):
@@ -64,6 +69,7 @@ class LongDocumentPlanningTests(unittest.TestCase):
             }
 
             with (
+                patch("tasks.long_document_tasks.llm_json", side_effect=lambda *_args, **_kwargs: {}),
                 patch("tasks.long_document_tasks._build_outline", return_value=fake_outline),
                 patch("tasks.long_document_tasks.write_text_file"),
                 patch("tasks.long_document_tasks.update_planning_file"),
@@ -76,6 +82,132 @@ class LongDocumentPlanningTests(unittest.TestCase):
         self.assertEqual(result["pending_user_input_kind"], "subplan_approval")
         self.assertEqual(result["approval_pending_scope"], "long_document_plan")
         self.assertIn("approve", result["draft_response"].lower())
+        self.assertIn("Section Outline", result["draft_response"])
+        self.assertIn("Execution Plan", result["draft_response"])
+        self.assertNotIn("**Steps", result["draft_response"])
+        self.assertIn("approval_request", result)
+        self.assertEqual(result["approval_request"]["scope"], "long_document_plan")
+
+    def test_default_subtopics_extracts_clean_numbered_research_questions(self):
+        objective = (
+            "So I am looking to research all the data that social media platforms like Facebook, Instagram, WhatsApp, "
+            "or TikTok capture pertaining to the users. Now what I'm trying to figure out is 1. What data are they capturing, "
+            "2. What are they using the data sets for? 3. Who are they directly or indirectly selling the data to? "
+            "4. What services a new microOTT or platform can capture in India, what to do with the data, and where we can sell the data directly or insights?"
+        )
+
+        topics = _default_subtopics(objective)
+
+        self.assertGreaterEqual(len(topics), 4)
+        self.assertIn("What data are they capturing", topics)
+        self.assertIn("What are they using the data sets for", topics)
+        self.assertIn("Who are they directly or indirectly selling the data to", topics)
+        self.assertTrue(any("microOTT" in topic or "India" in topic for topic in topics))
+        self.assertFalse(any(topic.lower().startswith("so i am looking") for topic in topics))
+
+    def test_long_document_agent_uses_compact_deep_research_confirmation_prompt(self):
+        fake_setup_snapshot = {
+            "available_agents": [str(card.get("agent_name", "")) for card in build_registry().agent_cards()],
+            "disabled_agents": {},
+            "setup_actions": [],
+            "summary_text": "",
+        }
+        with patch("kendr.runtime.build_setup_snapshot", return_value=fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Do exhaustive research on social-platform data collection and monetisation.")
+            state["current_objective"] = state["user_query"]
+            state["deep_research_mode"] = True
+            state["long_document_mode"] = True
+            state["long_document_pages"] = 25
+
+            with (
+                patch("tasks.long_document_tasks.llm_json", side_effect=lambda *_args, **_kwargs: {}),
+                patch("tasks.long_document_tasks.write_text_file"),
+                patch("tasks.long_document_tasks.update_planning_file"),
+                patch("tasks.long_document_tasks.log_task_update"),
+            ):
+                result = long_document_agent(state)
+
+        self.assertEqual(result["approval_pending_scope"], "deep_research_confirmation")
+        self.assertIn("Deep Research Analysis", result["draft_response"])
+        self.assertIn("Artifacts", result["draft_response"])
+        self.assertNotIn("## Detected Subtopics", result["draft_response"])
+        self.assertIn("approval_request", result)
+        self.assertEqual(result["approval_request"]["scope"], "deep_research_confirmation")
+
+    def test_deep_research_analysis_request_reflects_requested_scope_and_caps(self):
+        request = _build_deep_research_analysis_request(
+            title="Social Platform Data Study",
+            analysis={
+                "tier": 5,
+                "reason": "query length suggests broad scope; explicit deep-analysis wording",
+                "estimated_pages": 10,
+                "estimated_sources": 50,
+                "estimated_duration_minutes": 120,
+                "requested_target_pages": 10,
+                "subtopics": ["What data is captured"],
+                "date_range": "all_time",
+                "execution_budget": {"max_tokens": 0, "max_sources": 50, "max_duration_minutes": 0},
+            },
+            formats=["pdf", "md"],
+            citation_style="apa",
+            plagiarism_enabled=True,
+            web_search_enabled=True,
+            local_source_count=0,
+            provided_url_count=0,
+            analysis_storage_path="D:/tmp/analysis.md",
+            version=1,
+        )
+
+        sections = {section["title"]: section["items"] for section in request["sections"]}
+        self.assertIn("Page target: 10.", sections["Overview"])
+        self.assertIn("Max sources: 50.", sections["Session Budget"])
+        self.assertIn("Max tokens: not explicitly capped.", sections["Session Budget"])
+        self.assertIn("query length suggests broad scope", sections["Why This Tier"][0])
+
+    def test_long_document_agent_recomputes_analysis_when_requested_scope_changes(self):
+        state = {
+            "current_objective": "Create a deep research report on social platform data collection.",
+            "user_query": "Create a deep research report on social platform data collection.",
+            "memory_soul_file": __file__,
+            "deep_research_mode": True,
+            "long_document_mode": True,
+            "long_document_pages": 10,
+            "research_max_sources": 50,
+            "research_date_range": "all_time",
+            "research_output_formats": ["md"],
+            "research_citation_style": "apa",
+            "research_enable_plagiarism_check": True,
+            "research_web_search_enabled": True,
+            "deep_research_analysis": {
+                "tier": 5,
+                "estimated_pages": 25,
+                "estimated_sources": 200,
+                "estimated_duration_minutes": 120,
+                "subtopics": ["stale analysis"],
+                "requires_deep_research": True,
+                "request_signature": {
+                    "objective": "older objective",
+                    "target_pages": 25,
+                    "requested_sources": ["web"],
+                    "date_range": "all_time",
+                    "max_sources": 0,
+                },
+            },
+        }
+
+        with (
+            patch("tasks.long_document_tasks.llm_json", side_effect=lambda *_args, **_kwargs: {}),
+            patch("tasks.long_document_tasks.write_text_file"),
+            patch("tasks.long_document_tasks.update_planning_file"),
+            patch("tasks.long_document_tasks.log_task_update"),
+        ):
+            result = long_document_agent(state)
+
+        sections = {section["title"]: section["items"] for section in result["approval_request"]["sections"]}
+        self.assertIn("Page target: 10.", sections["Overview"])
+        self.assertIn("Estimated pages: 10.", sections["Overview"])
+        self.assertIn("Max sources: 50.", sections["Session Budget"])
 
     def test_long_document_agent_local_only_skips_web_research_and_uses_local_sources(self):
         state = {

@@ -25,6 +25,11 @@ from kendr.persistence import (
 )
 from kendr.setup import build_setup_snapshot
 from kendr.skill_registry import build_skill_registry, SkillRegistry
+from kendr.workflow_contract import (
+    approval_request_to_text,
+    is_deep_research_workflow_type,
+    normalize_approval_request,
+)
 
 from tasks.a2a_protocol import (
     append_artifact,
@@ -326,6 +331,9 @@ class AgentRuntime:
         if not isinstance(task, dict):
             task = {}
         if self._awaiting_user_input(state):
+            approval_summary = str((normalize_approval_request(state.get("approval_request", {})) or {}).get("summary", "") or "").strip()
+            if approval_summary:
+                return self._truncate(approval_summary, 240)
             pending = " ".join(str(state.get("pending_user_question", "") or "").split())
             if pending:
                 return self._truncate(pending, 240)
@@ -412,6 +420,8 @@ class AgentRuntime:
         return any(fw in text for fw in framework_signals) and any(i in text for i in build_intents)
 
     def _is_project_audit_request(self, state: dict) -> bool:
+        if self._is_deep_research_workflow(state):
+            return False
         text = " ".join(
             [
                 str(state.get("user_query", "")),
@@ -430,6 +440,50 @@ class AgentRuntime:
             "fixation required",
         )
         return any(marker in text for marker in markers)
+
+    def _is_deep_research_workflow(self, state: dict) -> bool:
+        workflow_type = str(state.get("workflow_type", "") or "").strip().lower()
+        if is_deep_research_workflow_type(workflow_type):
+            return True
+        pending_scope = str(state.get("approval_pending_scope", "") or "").strip().lower()
+        pending_kind = str(state.get("pending_user_input_kind", "") or "").strip().lower()
+        if pending_scope in {"deep_research_confirmation", "long_document_plan"}:
+            return True
+        if pending_kind in {"deep_research_confirmation", "subplan_approval"}:
+            return True
+        if bool(state.get("deep_research_mode", False)) or bool(state.get("long_document_mode", False)):
+            return True
+        if state.get("deep_research_analysis") or state.get("long_document_outline"):
+            return True
+        if self._is_long_document_request(state):
+            return True
+        return self._is_deep_research_request(state)
+
+    def _infer_workflow_type(self, state: Mapping[str, Any]) -> str:
+        explicit = str(state.get("workflow_type", "") or "").strip().lower()
+        if explicit and explicit not in {"general"}:
+            return explicit
+        if bool(state.get("deep_research_mode", False)) or self._is_deep_research_request(dict(state)):
+            return "deep_research"
+        if bool(state.get("long_document_mode", False)) or self._is_long_document_request(dict(state)):
+            return "long_document"
+        if bool(state.get("project_build_mode", False)) or self._is_project_build_request(dict(state)):
+            return "project_build"
+        if self._is_project_workbench_request(dict(state)):
+            return "project_workbench"
+        if self._is_project_audit_request(dict(state)):
+            return "project_audit"
+        if self._is_local_command_request(dict(state)):
+            return "local_command"
+        if self._is_github_request(dict(state)):
+            return "github"
+        return explicit or "general"
+
+    def _ensure_workflow_type(self, state: RuntimeState) -> str:
+        workflow_type = self._infer_workflow_type(state)
+        if workflow_type:
+            state["workflow_type"] = workflow_type
+        return workflow_type
 
     _PROJECT_WORKBENCH_RE = re.compile(
         r"(?:"  # explicit codebase inspection / modification requests from the project workbench
@@ -475,6 +529,8 @@ class AgentRuntime:
         if self._is_document_generation_request(state):
             return False
         if self._is_superrag_request(state):
+            return False
+        if self._is_deep_research_workflow(state):
             return False
 
         text = " ".join(
@@ -659,6 +715,7 @@ class AgentRuntime:
             "run_id": state.get("run_id", ""),
             "workflow_id": state.get("workflow_id", state.get("run_id", "")),
             "attempt_id": state.get("attempt_id", state.get("run_id", "")),
+            "workflow_type": state.get("workflow_type", ""),
             "channel": state.get("incoming_channel", ""),
             "session_key": channel_session.get("session_key", ""),
             "started_at": state.get("session_started_at", ""),
@@ -671,6 +728,7 @@ class AgentRuntime:
                 "objective": state.get("current_objective", ""),
                 "workflow_id": state.get("workflow_id", state.get("run_id", "")),
                 "attempt_id": state.get("attempt_id", state.get("run_id", "")),
+                "workflow_type": state.get("workflow_type", ""),
                 "last_agent": state.get("last_agent", ""),
                 "last_status": state.get("last_agent_status", ""),
                 "last_error": state.get("last_error", ""),
@@ -679,6 +737,7 @@ class AgentRuntime:
                 "pending_user_input_kind": state.get("pending_user_input_kind", ""),
                 "approval_pending_scope": state.get("approval_pending_scope", ""),
                 "pending_user_question": state.get("pending_user_question", ""),
+                "approval_request": normalize_approval_request(state.get("approval_request", {})),
                 "plan_approval_status": state.get("plan_approval_status", ""),
                 "plan_steps": plan_summary.get("plan_steps", []),
                 "plan_step_index": plan_summary.get("plan_step_index", 0),
@@ -764,6 +823,7 @@ class AgentRuntime:
                 "last_run_id": state.get("run_id", ""),
                 "last_workflow_id": state.get("workflow_id", state.get("run_id", "")),
                 "last_attempt_id": state.get("attempt_id", state.get("run_id", "")),
+                "workflow_type": state.get("workflow_type", ""),
                 "last_objective": state.get("current_objective", state.get("user_query", "")),
                 "last_plan": state.get("plan", ""),
                 "last_plan_data": state.get("plan_data", {}),
@@ -801,6 +861,7 @@ class AgentRuntime:
                 "pending_user_input_kind": state.get("pending_user_input_kind", ""),
                 "approval_pending_scope": state.get("approval_pending_scope", ""),
                 "pending_user_question": state.get("pending_user_question", ""),
+                "approval_request": normalize_approval_request(state.get("approval_request", {})),
                 "long_document_plan_waiting_for_approval": bool(state.get("long_document_plan_waiting_for_approval", False)),
                 "long_document_plan_status": state.get("long_document_plan_status", ""),
                 "long_document_plan_feedback": state.get("long_document_plan_feedback", ""),
@@ -910,6 +971,8 @@ class AgentRuntime:
         return json.loads(self._strip_code_fences(raw_output))
 
     def _is_deep_research_request(self, state: dict) -> bool:
+        if str(state.get("workflow_type", "") or "").strip().lower() == "deep_research":
+            return True
         if bool(state.get("deep_research_mode", False)):
             return True
         text = " ".join(
@@ -1315,6 +1378,9 @@ class AgentRuntime:
         return False
 
     def _is_long_document_request(self, state: dict) -> bool:
+        workflow_type = str(state.get("workflow_type", "") or "").strip().lower()
+        if workflow_type in {"deep_research", "long_document"}:
+            return True
         if bool(state.get("deep_research_mode", False)):
             return True
         if bool(state.get("long_document_mode", False)):
@@ -1771,6 +1837,7 @@ class AgentRuntime:
         return state
 
     def orchestrator_agent(self, state: dict) -> dict:
+        self._ensure_workflow_type(state)
         state["orchestrator_calls"] = state.get("orchestrator_calls", 0) + 1
         max_steps = state.get("max_steps", 20)
         # effective_steps counts only successful agent completions (the real work budget).
@@ -1886,6 +1953,67 @@ class AgentRuntime:
                     state_updates={},
                 ),
             )
+            return state
+
+        # Guard: when any approval/clarification is pending, pause before any
+        # additional routing so deep-research/document fast-paths cannot skip it.
+        if self._awaiting_user_input(state):
+            pending_scope = str(state.get("approval_pending_scope", "") or "").strip().lower()
+            pending_kind = str(state.get("pending_user_input_kind", "") or "").strip().lower()
+            approval_message = (
+                state.get("pending_user_question")
+                or approval_request_to_text(normalize_approval_request(state.get("approval_request", {})))
+                or "Review the pending approval request before execution can continue."
+            )
+            message_role = "approval"
+            if bool(state.get("plan_needs_clarification", False)):
+                message_role = "clarification"
+            elif pending_scope == "project_blueprint" or bool(state.get("blueprint_waiting_for_approval", False)):
+                message_role = "blueprint-approval"
+            elif pending_scope == "root_plan" or bool(state.get("plan_waiting_for_approval", False)):
+                message_role = "plan-approval"
+            elif (
+                pending_scope == "long_document_plan"
+                or pending_kind == "subplan_approval"
+                or bool(state.get("long_document_plan_waiting_for_approval", False))
+            ):
+                message_role = "subplan-approval"
+            elif pending_scope == "deep_research_confirmation" or pending_kind == "deep_research_confirmation":
+                message_role = "deep-research-approval"
+            state["next_agent"] = "__finish__"
+            state["final_output"] = approval_message
+            state = append_message(state, make_message("orchestrator_agent", "user", message_role, approval_message))
+            return state
+
+        # --- Deep-research resume: re-dispatch to long_document_agent after user confirms ---
+        # After the user clicks Accept on the deep-research analysis card, the resumed run
+        # arrives here with deep_research_confirmed=True but long_document_mode still False
+        # (the actual research hasn't run yet). The normal fast-path is blocked because
+        # long_document_job_started=True and last_agent="long_document_agent" were both set
+        # during the analysis-card phase. This guard re-dispatches deterministically without
+        # calling the LLM, preventing the orchestrator from treating the analysis card text
+        # as a "good final answer" and finishing prematurely.
+        if (
+            bool(state.get("deep_research_confirmed", False))
+            and not bool(state.get("long_document_mode", False))
+            and self._is_agent_available(state, "long_document_agent")
+        ):
+            reason = "Deep research confirmed by user — resuming long_document_agent to run the full research pipeline."
+            state["orchestrator_reason"] = reason
+            state["next_agent"] = "long_document_agent"
+            state["long_document_mode"] = True
+            state["long_document_job_started"] = True
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="long_document_agent",
+                    intent="long-document-resume",
+                    content=str(state.get("current_objective") or state.get("user_query", "")).strip(),
+                    state_updates={"long_document_mode": True},
+                ),
+            )
+            log_task_update("Orchestrator", reason)
             return state
 
         # --- Conversational shortcut: bypass planner for simple social/meta messages ---
@@ -2130,6 +2258,7 @@ class AgentRuntime:
 
         # Long-document workflows should bypass the generic planner to avoid unrelated plan reuse.
         if self._is_long_document_request(state):
+            state["workflow_type"] = state.get("workflow_type") or ("deep_research" if self._is_deep_research_request(state) else "long_document")
             if state.get("plan_steps"):
                 state["plan_steps"] = []
                 state["plan_step_index"] = 0
@@ -2187,6 +2316,7 @@ class AgentRuntime:
             state["orchestrator_reason"] = reason
             state["next_agent"] = "long_document_agent"
             state["long_document_mode"] = True
+            state["workflow_type"] = state.get("workflow_type") or "long_document"
             state["long_document_job_started"] = True
             state["long_document_collect_sources_first"] = True
             state = append_task(
@@ -2290,6 +2420,21 @@ class AgentRuntime:
             state["next_agent"] = "__finish__"
             state["final_output"] = approval_message
             state = append_message(state, make_message("orchestrator_agent", "user", "plan-approval", approval_message))
+            return state
+
+        pending_input_kind = str(state.get("pending_user_input_kind", "") or "").strip().lower()
+        if pending_input_kind and not bool(state.get("long_document_plan_waiting_for_approval", False)):
+            approval_message = (
+                state.get("pending_user_question")
+                or approval_request_to_text(normalize_approval_request(state.get("approval_request", {})))
+                or "Review the pending approval request before execution can continue."
+            )
+            message_role = "approval"
+            if pending_input_kind == "deep_research_confirmation":
+                message_role = "deep-research-approval"
+            state["next_agent"] = "__finish__"
+            state["final_output"] = approval_message
+            state = append_message(state, make_message("orchestrator_agent", "user", message_role, approval_message))
             return state
 
         if bool(state.get("long_document_plan_waiting_for_approval", False)):
@@ -2783,6 +2928,7 @@ class AgentRuntime:
             research_query = state.get("current_objective") or state.get("user_query", "")
             state["orchestrator_reason"] = reason
             state["next_agent"] = "deep_research_agent"
+            state["workflow_type"] = state.get("workflow_type") or "deep_research"
             state = append_task(
                 state,
                 make_task(
@@ -2819,6 +2965,7 @@ class AgentRuntime:
             }
             state["orchestrator_reason"] = reason
             state["next_agent"] = "long_document_agent"
+            state["workflow_type"] = state.get("workflow_type") or ("deep_research" if self._is_deep_research_request(state) else "long_document")
             state = append_task(
                 state,
                 make_task(
@@ -2962,25 +3109,46 @@ Return ONLY valid JSON in this exact schema:
 }}
 """.strip()
 
-        try:
-            with agent_model_context("orchestrator_agent"):
-                response = llm.invoke(prompt)
-            raw_output = response.content.strip() if hasattr(response, "content") else str(response).strip()
-        except Exception as llm_exc:
-            logger.warning("Orchestrator LLM call failed: %s", llm_exc)
+        _MAX_RETRIES = 2
+        _RETRY_DELAY = 1.0
+        raw_output = None
+        last_llm_exc = None
+        for _attempt in range(_MAX_RETRIES + 1):
+            try:
+                with agent_model_context("orchestrator_agent"):
+                    response = llm.invoke(prompt)
+                raw_output = response.content.strip() if hasattr(response, "content") else str(response).strip()
+                last_llm_exc = None
+                break
+            except Exception as llm_exc:
+                last_llm_exc = llm_exc
+                exc_name = type(llm_exc).__name__.lower()
+                is_transient = any(kw in exc_name for kw in ("connection", "timeout", "network", "unavailable"))
+                if is_transient and _attempt < _MAX_RETRIES:
+                    _delay = _RETRY_DELAY * (2 ** _attempt)
+                    logger.warning(
+                        "Orchestrator LLM call failed (attempt %d/%d): %s — retrying in %.1fs",
+                        _attempt + 1, _MAX_RETRIES + 1, llm_exc, _delay,
+                    )
+                    time.sleep(_delay)
+                else:
+                    logger.warning("Orchestrator LLM call failed: %s", llm_exc)
+                    break
+
+        if last_llm_exc is not None:
             decision = {
                 "agent": "finish",
-                "reason": f"Orchestrator LLM call failed ({type(llm_exc).__name__}: {llm_exc}). "
+                "reason": f"Orchestrator LLM call failed ({type(last_llm_exc).__name__}: {last_llm_exc}). "
                           "This is likely a network or API provider issue.",
                 "state_updates": {},
                 "final_response": (
                     state.get("draft_response")
                     or state.get("last_agent_output")
-                    or f"The orchestrator could not reach the LLM provider: {llm_exc}. "
+                    or f"The orchestrator could not reach the LLM provider: {last_llm_exc}. "
                        "Check your network connection and API keys, then retry."
                 ),
             }
-            state["last_error"] = f"orchestrator_llm_failed: {llm_exc}"
+            state["last_error"] = f"orchestrator_llm_failed: {last_llm_exc}"
             raw_output = None
 
         if raw_output is not None:
@@ -3066,6 +3234,18 @@ Return ONLY valid JSON in this exact schema:
 
     def _restore_pending_user_input(self, initial_state: RuntimeState, prior_channel_state: Mapping[str, Any], user_query: str) -> None:
         pending_kind = str(prior_channel_state.get("pending_user_input_kind", "") or "").strip()
+        scope = str(prior_channel_state.get("approval_pending_scope", "") or "").strip()
+        approval_request = normalize_approval_request(prior_channel_state.get("approval_request", {}))
+        request_scope = str(approval_request.get("scope", "") or "").strip()
+        resolved_scope = scope or request_scope
+        if not pending_kind and resolved_scope:
+            scope_map = {
+                "deep_research_confirmation": "deep_research_confirmation",
+                "long_document_plan": "subplan_approval",
+                "root_plan": "plan_approval",
+                "project_blueprint": "blueprint_approval",
+            }
+            pending_kind = scope_map.get(str(resolved_scope).strip().lower(), "approval")
         if not pending_kind and prior_channel_state.get("awaiting_user_input"):
             pending_kind = "clarification"
         if not pending_kind:
@@ -3097,8 +3277,8 @@ Return ONLY valid JSON in this exact schema:
             initial_state["plan_ready"] = False
             return
 
-        scope = str(prior_channel_state.get("approval_pending_scope", "") or "").strip()
         prompt = str(prior_channel_state.get("pending_user_question", "") or "").strip()
+        scope = resolved_scope
         if previous_objective:
             initial_state["current_objective"] = previous_objective
         response = self._interpret_user_input_response(user_query)
@@ -3108,6 +3288,7 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["pending_user_input_kind"] = ""
                 initial_state["approval_pending_scope"] = ""
                 initial_state["pending_user_question"] = ""
+                initial_state["approval_request"] = {}
                 initial_state["local_drive_insufficient_approved"] = True
                 initial_state["local_drive_insufficient_response"] = response.get("feedback", "")
                 return
@@ -3115,6 +3296,7 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["pending_user_input_kind"] = ""
                 initial_state["approval_pending_scope"] = ""
                 initial_state["pending_user_question"] = ""
+                initial_state["approval_request"] = {}
                 initial_state["user_cancelled"] = True
                 initial_state["final_output"] = (
                     "Run cancelled per your response. Add more source files and re-run when ready, "
@@ -3127,16 +3309,20 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["pending_user_input_kind"] = ""
                 initial_state["approval_pending_scope"] = ""
                 initial_state["pending_user_question"] = ""
+                initial_state["approval_request"] = {}
                 initial_state["deep_research_confirmed"] = True
                 initial_state["deep_research_mode"] = True
+                initial_state["workflow_type"] = "deep_research"
                 return
             if response["action"] == "quick_summary":
                 initial_state["pending_user_input_kind"] = ""
                 initial_state["approval_pending_scope"] = ""
                 initial_state["pending_user_question"] = ""
+                initial_state["approval_request"] = {}
                 initial_state["deep_research_confirmed"] = True
                 initial_state["deep_research_mode"] = False
                 initial_state["long_document_mode"] = False
+                initial_state["workflow_type"] = "research_pipeline"
                 initial_state["research_pipeline_enabled"] = True
                 initial_state["research_pipeline_completed"] = False
                 initial_state["research_query"] = previous_objective or user_query
@@ -3145,6 +3331,7 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["pending_user_input_kind"] = ""
                 initial_state["approval_pending_scope"] = ""
                 initial_state["pending_user_question"] = ""
+                initial_state["approval_request"] = {}
                 initial_state["deep_research_confirmed"] = False
                 initial_state["deep_research_analysis"] = {}
                 if previous_objective:
@@ -3157,6 +3344,7 @@ Return ONLY valid JSON in this exact schema:
             initial_state["pending_user_input_kind"] = ""
             initial_state["approval_pending_scope"] = ""
             initial_state["pending_user_question"] = ""
+            initial_state["approval_request"] = {}
             if scope == "project_blueprint":
                 initial_state["blueprint_waiting_for_approval"] = False
                 initial_state["blueprint_status"] = "approved"
@@ -3177,6 +3365,7 @@ Return ONLY valid JSON in this exact schema:
             initial_state["pending_user_input_kind"] = ""
             initial_state["approval_pending_scope"] = ""
             initial_state["pending_user_question"] = ""
+            initial_state["approval_request"] = {}
             if scope == "project_blueprint":
                 initial_state["blueprint_waiting_for_approval"] = False
                 initial_state["blueprint_status"] = "revision_requested"
@@ -3212,6 +3401,7 @@ Return ONLY valid JSON in this exact schema:
             explicit_instruction = "Reply `approve` to start deep research, `quick summary` to avoid the full run, or describe the scope changes you want."
         initial_state["pending_user_input_kind"] = pending_kind
         initial_state["approval_pending_scope"] = scope
+        initial_state["approval_request"] = approval_request
         if prompt:
             initial_state["pending_user_question"] = prompt if explicit_instruction in prompt else f"{prompt}\n\n{explicit_instruction}"
         else:
@@ -3348,7 +3538,11 @@ Return ONLY valid JSON in this exact schema:
         prior_state_like = dict(snapshot)
         prior_state_like.setdefault("last_objective", last_objective)
         prior_state_like.setdefault("last_status", source_status)
-        if bool(summary.get("awaiting_user_input", False)) or str(snapshot.get("pending_user_input_kind", "")).strip():
+        if (
+            bool(summary.get("awaiting_user_input", False))
+            or str(snapshot.get("pending_user_input_kind", "")).strip()
+            or state_awaiting_user_input(snapshot)
+        ):
             prior_state_like["awaiting_user_input"] = True
             self._restore_pending_user_input(initial_state, prior_state_like, user_query)
             return
@@ -3422,6 +3616,7 @@ Return ONLY valid JSON in this exact schema:
             "pending_user_question": "",
             "pending_user_input_kind": "",
             "approval_pending_scope": "",
+            "approval_request": {},
             "planning_notes": [],
             "long_document_plan_waiting_for_approval": False,
             "long_document_plan_status": "",
@@ -3443,6 +3638,7 @@ Return ONLY valid JSON in this exact schema:
             "deep_research_analysis": {},
             "deep_research_result_card": {},
             "deep_research_source_urls": [],
+            "workflow_type": "",
             "research_output_formats": ["pdf", "docx", "html", "md"],
             "research_citation_style": "apa",
             "research_enable_plagiarism_check": True,
@@ -3508,7 +3704,7 @@ Return ONLY valid JSON in this exact schema:
         prior_channel_session = initial_state.get("channel_session", {})
         prior_channel_state = prior_channel_session.get("state", {}) if isinstance(prior_channel_session, dict) else {}
         resume_requested = self._looks_like_resume_request(user_query)
-        has_pending_session_input = bool(prior_channel_state.get("awaiting_user_input")) if isinstance(prior_channel_state, dict) else False
+        has_pending_session_input = state_awaiting_user_input(prior_channel_state) if isinstance(prior_channel_state, dict) else False
         reuse_session_plan = resume_requested or has_pending_session_input
         if isinstance(prior_channel_state, dict):
             if reuse_session_plan and prior_channel_state.get("last_plan") and not initial_state.get("plan"):
@@ -3530,6 +3726,7 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["pending_user_input_kind"] = str(prior_channel_state.get("pending_user_input_kind", "") or "")
                 initial_state["approval_pending_scope"] = str(prior_channel_state.get("approval_pending_scope", "") or "")
                 initial_state["pending_user_question"] = str(prior_channel_state.get("pending_user_question", "") or "")
+                initial_state["approval_request"] = normalize_approval_request(prior_channel_state.get("approval_request", {}))
                 initial_state["long_document_plan_waiting_for_approval"] = bool(prior_channel_state.get("long_document_plan_waiting_for_approval", False))
                 initial_state["long_document_plan_status"] = str(prior_channel_state.get("long_document_plan_status", "") or "")
                 initial_state["long_document_plan_feedback"] = str(prior_channel_state.get("long_document_plan_feedback", "") or "")
@@ -3550,6 +3747,7 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["research_date_range"] = str(prior_channel_state.get("research_date_range", initial_state.get("research_date_range", "")) or initial_state.get("research_date_range", ""))
                 initial_state["research_max_sources"] = int(prior_channel_state.get("research_max_sources", 0) or 0)
                 initial_state["research_checkpoint_enabled"] = bool(prior_channel_state.get("research_checkpoint_enabled", False))
+                initial_state["workflow_type"] = str(prior_channel_state.get("workflow_type", initial_state.get("workflow_type", "")) or initial_state.get("workflow_type", ""))
                 if prior_channel_state.get("long_document_outline"):
                     initial_state["long_document_outline"] = prior_channel_state.get("long_document_outline", {})
                 if initial_state.get("plan_steps") and initial_state.get("plan_approval_status") == "approved" and not initial_state.get("plan_waiting_for_approval", False):
@@ -3595,7 +3793,7 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["session_history"] = prior_channel_state.get("history", [])
             if prior_channel_state.get("failure_checkpoint"):
                 initial_state["failure_checkpoint"] = prior_channel_state.get("failure_checkpoint", {})
-            if prior_channel_state.get("awaiting_user_input"):
+            if state_awaiting_user_input(prior_channel_state):
                 self._restore_pending_user_input(initial_state, prior_channel_state, user_query)
             previous_failed = str(prior_channel_state.get("last_status", "")).strip().lower() == "failed"
             resume_checkpoint = initial_state.get("failure_checkpoint", {})
@@ -3637,6 +3835,7 @@ Return ONLY valid JSON in this exact schema:
             or bool(initial_state.get("codebase_mode", False))
             or bool(project_root)
         )
+        self._ensure_workflow_type(initial_state)
         if do_scan:
             try:
                 scan_dir = project_root or str(initial_state.get("working_directory", "")).strip()
@@ -3775,8 +3974,13 @@ Return ONLY valid JSON in this exact schema:
                 detail={"run_id": run_id, "final_output_excerpt": self._truncate(final_output, 400)},
             )
             return result
-        except Exception:
-            update_run(run_id, status="failed", completed_at=datetime.now(timezone.utc).isoformat(), final_output="workflow failed")
+        except Exception as exc:
+            error_text = str(initial_state.get("last_error", "") or str(exc) or "")
+            cancelled = bool(initial_state.get("user_cancelled", False)) or "kill switch triggered" in error_text.lower()
+            final_status = "cancelled" if cancelled else "failed"
+            final_output = "Run stopped by user." if cancelled else "workflow failed"
+            completed_at = datetime.now(timezone.utc).isoformat()
+            update_run(run_id, status=final_status, completed_at=completed_at, final_output=final_output)
             if not initial_state.get("failure_checkpoint"):
                 fallback_error = initial_state.get("last_error", "workflow failed")
                 initial_state["failure_checkpoint"] = self._build_failure_checkpoint(
@@ -3785,23 +3989,32 @@ Return ONLY valid JSON in this exact schema:
                     error_message=fallback_error,
                     active_task=initial_state.get("active_task"),
                 )
-            append_daily_memory_note(initial_state, "system", "run_failed", initial_state.get("last_error", "workflow failed"))
-            self._write_session_record(initial_state, status="failed", completed_at=datetime.now(timezone.utc).isoformat())
+            append_daily_memory_note(
+                initial_state,
+                "system",
+                "run_cancelled" if cancelled else "run_failed",
+                initial_state.get("last_error", final_output),
+            )
+            self._write_session_record(initial_state, status=final_status, completed_at=completed_at)
             update_planning_file(
                 initial_state,
-                status="failed",
+                status=final_status,
                 objective=initial_state.get("current_objective", initial_state.get("user_query", "")),
                 plan_text=initial_state.get("plan", ""),
                 clarifications=initial_state.get("plan_clarification_questions", []),
-                execution_note=f"Run failed: {initial_state.get('last_error', 'workflow failed')}",
+                execution_note=(
+                    "Run stopped by user."
+                    if cancelled
+                    else f"Run failed: {initial_state.get('last_error', 'workflow failed')}"
+                ),
             )
-            close_session_memory(initial_state, status="failed", final_output=initial_state.get("last_error", "workflow failed"))
+            close_session_memory(initial_state, status=final_status, final_output=initial_state.get("last_error", final_output))
             append_privileged_audit_event(
                 initial_state,
                 actor="runtime",
-                action="run_failed",
-                status="error",
-                detail={"run_id": run_id, "error": initial_state.get("last_error", "workflow failed")},
+                action="run_cancelled" if cancelled else "run_failed",
+                status="ok" if cancelled else "error",
+                detail={"run_id": run_id, "error": initial_state.get("last_error", final_output)},
             )
             raise
         finally:

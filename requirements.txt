@@ -1,16 +1,24 @@
 # Runtime dependencies for Docker/base installs.
 # For local development and verification use: pip install -e ".[dev]"
-langgraph 
-langchain 
-langchain-openai 
+langgraph
+langchain
+langchain-openai
 openai
 python-dotenv
 beautifulsoup4
 pypdf
 python-docx
 sqlalchemy
+chromadb
 qdrant-client
 fastmcp
 telethon
 boto3
 playwright
+# Document export: styled PDF generation
+weasyprint
+# Flowchart PNG rendering (Python wrapper — also requires Graphviz binary)
+# Windows: choco install graphviz  (run as Administrator)
+# macOS:   brew install graphviz
+# Linux:   apt-get install graphviz
+graphviz

@@ -257,6 +257,228 @@ class TestChatHtmlExecutionLens(unittest.TestCase):
         self.assertIn("workflow_id: workflowId", ui_server._CHAT_HTML)
         self.assertIn("currentWorkflowId", ui_server._CHAT_HTML)
         self.assertIn("Approval reply submitted", ui_server._CHAT_HTML)
+        self.assertIn("chatApprovalAcceptBtn", ui_server._CHAT_HTML)
+        self.assertIn("_renderApprovalRequestHtml", ui_server._CHAT_HTML)
+        self.assertIn("_chatResumePathFromRun", ui_server._CHAT_HTML)
+
+    def test_chat_html_includes_stop_run_controls(self):
+        import kendr.ui_server as ui_server
+
+        self.assertIn("handleSendButton()", ui_server._CHAT_HTML)
+        self.assertIn("stopCurrentRun()", ui_server._CHAT_HTML)
+        self.assertIn("/api/runs/stop", ui_server._CHAT_HTML)
+        self.assertIn("Stop active run", ui_server._CHAT_HTML)
+        self.assertIn(".send-btn.stop-mode", ui_server._CHAT_HTML)
+
+
+class TestRunCancellationHelpers(unittest.TestCase):
+    def test_terminal_run_status_handles_cancelling_and_cancelled(self):
+        import kendr.ui_server as ui_server
+
+        self.assertEqual(
+            ui_server._terminal_run_status(result={"status": "cancelling"}, default="completed"),
+            "cancelling",
+        )
+        self.assertEqual(
+            ui_server._terminal_run_status(error="Kill switch triggered. Refusing further execution.", default="failed"),
+            "cancelled",
+        )
+
+    def test_terminal_run_status_marks_approval_payload_as_awaiting_input(self):
+        import kendr.ui_server as ui_server
+
+        self.assertEqual(
+            ui_server._terminal_run_status(
+                result={
+                    "status": "completed",
+                    "approval_pending_scope": "deep_research_confirmation",
+                    "approval_request": {"scope": "deep_research_confirmation", "summary": "Review scope"},
+                    "pending_user_question": "Reply approve to continue.",
+                },
+                default="completed",
+            ),
+            "awaiting_user_input",
+        )
+
+    def test_pending_run_state_keeps_cancelling_open(self):
+        import kendr.ui_server as ui_server
+
+        state = ui_server._pending_run_state(
+            "run-123",
+            payload={"text": "Research"},
+            status="cancelling",
+        )
+
+        self.assertEqual(state["status"], "cancelling")
+        self.assertEqual(state["completed_at"], "")
+
+    def test_handle_stop_run_marks_pending_run_cancelling(self):
+        import kendr.ui_server as ui_server
+
+        handler = object.__new__(ui_server.KendrUIHandler)
+        responses: list[tuple[int, dict]] = []
+
+        def _json(code, payload):
+            responses.append((code, payload))
+
+        handler._json = _json
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kill_switch_path = os.path.join(tmpdir, "run-123.stop")
+            pending = {
+                "run_id": "run-123",
+                "status": "running",
+                "payload": {"text": "Research", "kill_switch_file": kill_switch_path},
+                "started_at": "2026-04-03T10:00:00+00:00",
+                "updated_at": "2026-04-03T10:00:00+00:00",
+                "completed_at": "",
+            }
+            with patch.dict("kendr.ui_server._pending_runs", {"run-123": pending}, clear=True):
+                with patch("kendr.ui_server._push_event") as mock_push:
+                    handler._handle_stop_run({"run_id": "run-123"})
+                    updated = ui_server._pending_runs["run-123"]
+
+            self.assertTrue(os.path.exists(kill_switch_path))
+            self.assertEqual(responses[0][0], 200)
+            self.assertEqual(responses[0][1]["status"], "cancelling")
+            self.assertEqual(updated["status"], "cancelling")
+            self.assertEqual(updated["completed_at"], "")
+            mock_push.assert_called_once()
+
+    def test_handle_chat_assigns_kill_switch_file_and_returns_streaming(self):
+        import kendr.ui_server as ui_server
+
+        handler = object.__new__(ui_server.KendrUIHandler)
+        responses: list[tuple[int, dict]] = []
+
+        def _json(code, payload):
+            responses.append((code, payload))
+
+        handler._json = _json
+        body = {
+            "text": "Research social platform data collection",
+            "channel": "webchat",
+            "sender_id": "ui_user",
+            "chat_id": "chat-test",
+            "run_id": "run-chat-1",
+            "workflow_id": "workflow-chat-1",
+            "attempt_id": "run-chat-1",
+            "workflow_type": "deep_research",
+        }
+
+        captured: dict[str, object] = {}
+
+        def _start(run_id, payload):
+            captured["run_id"] = run_id
+            captured["payload"] = dict(payload)
+
+        with patch("kendr.ui_server._gateway_ready", return_value=True), patch("kendr.ui_server._start_run_background", side_effect=_start):
+            handler._handle_chat(body)
+
+        self.assertEqual(responses[0][0], 200)
+        self.assertTrue(responses[0][1]["streaming"])
+        self.assertEqual(captured["run_id"], "run-chat-1")
+        self.assertTrue(str((captured["payload"] or {}).get("kill_switch_file", "")).endswith("run-chat-1.stop"))
+
+    def test_handle_chat_resume_prefers_run_output_dir_for_resume_lookup(self):
+        import kendr.ui_server as ui_server
+
+        handler = object.__new__(ui_server.KendrUIHandler)
+        responses: list[tuple[int, dict]] = []
+
+        def _json(code, payload):
+            responses.append((code, payload))
+
+        handler._json = _json
+        done = threading.Event()
+        captured: dict[str, str] = {}
+
+        def _resume(payload):
+            captured["output_folder"] = str(payload.get("output_folder") or "")
+            captured["working_directory"] = str(payload.get("working_directory") or "")
+            done.set()
+            return {
+                "run_id": "run-resume-1",
+                "workflow_id": "workflow-resume-1",
+                "attempt_id": "run-resume-1",
+                "status": "awaiting_user_input",
+                "awaiting_user_input": True,
+                "pending_user_input_kind": "subplan_approval",
+                "approval_pending_scope": "long_document_plan",
+            }
+
+        body = {
+            "text": "approve",
+            "run_id": "run-resume-1",
+            "workflow_id": "workflow-resume-1",
+            "attempt_id": "run-resume-1",
+            "working_directory": "D:\\superagentTasks",
+            "channel": "webchat",
+            "sender_id": "ui_user",
+            "chat_id": "chat-test",
+        }
+
+        with (
+            patch("kendr.ui_server._gateway_ready", return_value=True),
+            patch("kendr.ui_server._db_get_run", return_value={"run_id": "run-resume-1", "run_output_dir": "D:\\superagentTasks\\runs\\run-resume-1", "working_directory": "D:\\superagentTasks"}),
+            patch("kendr.ui_server._gateway_resume", side_effect=_resume),
+        ):
+            handler._handle_chat_resume(body)
+            self.assertTrue(done.wait(1.0))
+
+        self.assertEqual(responses[0][0], 200)
+        self.assertEqual(captured["output_folder"], "D:\\superagentTasks\\runs\\run-resume-1")
+        self.assertEqual(captured["working_directory"], "D:\\superagentTasks")
+
+
+class TestSseReplayBehavior(unittest.TestCase):
+    def test_chat_html_done_handler_uses_done_awaiting_payload(self):
+        import kendr.ui_server as ui_server
+
+        self.assertIn("if (d.awaiting_user_input || doneStatus === 'awaiting_user_input')", ui_server._CHAT_HTML)
+        self.assertIn("_chatRunState.status = 'awaiting_user_input';", ui_server._CHAT_HTML)
+
+    def test_handle_sse_replays_awaiting_status_when_queue_missing(self):
+        import kendr.ui_server as ui_server
+
+        handler = object.__new__(ui_server.KendrUIHandler)
+        handler.send_response = lambda code: None
+        handler.send_header = lambda *args, **kwargs: None
+        handler.end_headers = lambda: None
+
+        class _Writer:
+            def __init__(self):
+                self.parts: list[str] = []
+
+            def write(self, data):
+                self.parts.append(data.decode("utf-8"))
+
+            def flush(self):
+                pass
+
+        writer = _Writer()
+        handler.wfile = writer
+
+        pending = {
+            "run_id": "run-await",
+            "status": "awaiting_user_input",
+            "awaiting_user_input": True,
+            "result": {
+                "run_id": "run-await",
+                "status": "awaiting_user_input",
+                "pending_user_input_kind": "deep_research_confirmation",
+                "approval_pending_scope": "deep_research_confirmation",
+                "approval_request": {"scope": "deep_research_confirmation", "summary": "Review scope"},
+            },
+        }
+
+        with patch.dict("kendr.ui_server._run_event_queues", {}, clear=True), patch.dict("kendr.ui_server._pending_runs", {"run-await": pending}, clear=True):
+            handler._handle_sse("run-await")
+
+        stream = "".join(writer.parts)
+        self.assertIn('event: result', stream)
+        self.assertIn('"status": "awaiting_user_input"', stream)
+        self.assertIn('"awaiting_user_input": true', stream)
+        self.assertIn('event: done', stream)
 
 
 class TestProjectsHtmlApprovalModal(unittest.TestCase):
@@ -345,6 +567,53 @@ class TestLiveRunOverlay(unittest.TestCase):
         self.assertEqual(merged[0]["attempt_id"], "attempt-2")
         self.assertEqual(merged[0]["status"], "awaiting_user_input")
 
+    def test_live_recent_chat_threads_collapse_session_and_keep_main_prompt(self):
+        import kendr.ui_server as ui_server
+
+        runs = [
+            {
+                "run_id": "run-1",
+                "workflow_id": "workflow-1",
+                "attempt_id": "run-1",
+                "session_id": "webchat:default:chat-1:main",
+                "user_query": "Research what data Facebook, Instagram, WhatsApp, and TikTok capture.",
+                "status": "completed",
+                "started_at": "2026-04-03T10:00:00+00:00",
+                "updated_at": "2026-04-03T10:02:00+00:00",
+                "completed_at": "2026-04-03T10:02:00+00:00",
+            },
+            {
+                "run_id": "run-2",
+                "workflow_id": "workflow-2",
+                "attempt_id": "run-2",
+                "session_id": "webchat:default:chat-1:main",
+                "user_query": "approve",
+                "status": "awaiting_user_input",
+                "started_at": "2026-04-03T10:03:00+00:00",
+                "updated_at": "2026-04-03T10:05:00+00:00",
+                "completed_at": "",
+            },
+        ]
+
+        threads = ui_server._live_recent_chat_threads(runs)
+
+        self.assertEqual(len(threads), 1)
+        self.assertEqual(threads[0]["chat_session_id"], "chat-1")
+        self.assertEqual(threads[0]["latest_run_id"], "run-2")
+        self.assertEqual(threads[0]["status"], "awaiting_user_input")
+        self.assertEqual(
+            threads[0]["user_query"],
+            "Research what data Facebook, Instagram, WhatsApp, and TikTok capture.",
+        )
+
+    def test_extract_chat_session_id_from_webchat_session_key(self):
+        import kendr.ui_server as ui_server
+
+        self.assertEqual(
+            ui_server._extract_chat_session_id("webchat:default:chat-abc123:main"),
+            "chat-abc123",
+        )
+
     def test_live_run_marks_awaiting_input_from_pending_result(self):
         import kendr.ui_server as ui_server
 
@@ -371,6 +640,77 @@ class TestLiveRunOverlay(unittest.TestCase):
 
         self.assertEqual(merged["status"], "awaiting_user_input")
         self.assertTrue(merged["awaiting_user_input"])
+
+    def test_live_run_marks_awaiting_input_from_top_level_fields(self):
+        import kendr.ui_server as ui_server
+
+        run_row = {
+            "run_id": "run-3",
+            "user_query": "Need approval",
+            "status": "completed",
+            "started_at": "2026-04-03T10:00:00+00:00",
+            "updated_at": "2026-04-03T10:01:00+00:00",
+            "completed_at": "2026-04-03T10:01:00+00:00",
+            "pending_user_input_kind": "deep_research_confirmation",
+            "approval_pending_scope": "deep_research_confirmation",
+            "approval_request": {"scope": "deep_research_confirmation", "summary": "Review scope"},
+        }
+
+        merged = ui_server._live_run(run_row)
+
+        self.assertEqual(merged["status"], "awaiting_user_input")
+        self.assertTrue(merged["awaiting_user_input"])
+
+    def test_live_run_marks_awaiting_from_task_session_summary_payload(self):
+        import kendr.ui_server as ui_server
+
+        run_row = {
+            "run_id": "run-3b",
+            "user_query": "approve",
+            "status": "completed",
+            "started_at": "2026-04-03T10:00:00+00:00",
+            "updated_at": "2026-04-03T10:01:00+00:00",
+            "completed_at": "2026-04-03T10:01:00+00:00",
+            "task_session": {
+                "summary_json": json.dumps({
+                    "approval_pending_scope": "deep_research_confirmation",
+                    "pending_user_question": "Reply approve to continue.",
+                    "approval_request": {"scope": "deep_research_confirmation", "summary": "Review scope"},
+                })
+            },
+        }
+
+        merged = ui_server._live_run(run_row)
+
+        self.assertEqual(merged["status"], "awaiting_user_input")
+        self.assertTrue(merged["awaiting_user_input"])
+        self.assertEqual(merged["approval_pending_scope"], "deep_research_confirmation")
+
+    def test_live_run_exposes_resume_output_dir_from_pending_payload(self):
+        import kendr.ui_server as ui_server
+
+        run_row = {
+            "run_id": "run-4",
+            "user_query": "Need approval",
+            "status": "running",
+            "started_at": "2026-04-03T10:00:00+00:00",
+            "updated_at": "2026-04-03T10:01:00+00:00",
+            "completed_at": "",
+        }
+        pending = {
+            "run_id": "run-4",
+            "status": "running",
+            "payload": {
+                "text": "Need approval",
+                "working_directory": "D:\\superagentTasks",
+                "output_folder": "D:\\superagentTasks\\runs\\run-4",
+            },
+        }
+
+        with patch.dict("kendr.ui_server._pending_runs", {"run-4": pending}, clear=True):
+            merged = ui_server._live_run(run_row)
+
+        self.assertEqual(merged["resume_output_dir"], "D:\\superagentTasks\\runs\\run-4")
 
 
 class TestUIServerRawValuesStripped(unittest.TestCase):
@@ -870,7 +1210,16 @@ class TestDeepResearchChatPayload(unittest.TestCase):
         ):
             handler._handle_chat(body)
 
-        handler._json.assert_called_once_with(200, {"run_id": "ui-test-run", "streaming": True, "status": "started"})
+        handler._json.assert_called_once_with(
+            200,
+            {
+                "run_id": "ui-test-run",
+                "workflow_id": "ui-test-run",
+                "attempt_id": "ui-test-run",
+                "streaming": True,
+                "status": "started",
+            },
+        )
         forwarded = start_run.call_args.args[1]
         self.assertTrue(forwarded["deep_research_mode"])
         self.assertTrue(forwarded["long_document_mode"])

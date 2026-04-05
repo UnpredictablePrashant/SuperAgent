@@ -35,6 +35,7 @@ from kendr.setup import (
     build_setup_snapshot,
     build_slack_oauth_config,
 )
+from kendr.workflow_contract import approval_request_to_text, normalize_approval_request
 
 from .recovery import discover_resume_candidates, load_resume_candidate, render_resume_candidate
 from .discovery import build_registry
@@ -555,6 +556,14 @@ def _task_session_summary(session: dict) -> dict:
         if isinstance(decoded, dict):
             return decoded
     return {}
+
+
+def _approval_prompt_text(payload: dict) -> str:
+    request = normalize_approval_request(payload.get("approval_request", {}))
+    structured = approval_request_to_text(request)
+    if structured:
+        return structured
+    return str(payload.get("pending_user_question") or payload.get("final_output") or "").strip()
 
 
 def _build_run_progress_message(session: dict) -> str:
@@ -4029,7 +4038,7 @@ def _cmd_generate(args: argparse.Namespace) -> int:
         )
         if not is_paused:
             break
-        pending_prompt = str(result.get("pending_user_question") or result.get("final_output") or "").strip()
+        pending_prompt = _approval_prompt_text(result)
         if not pending_prompt:
             break
 
@@ -4124,7 +4133,7 @@ def _cmd_generate(args: argparse.Namespace) -> int:
             return 0
 
     final = str(result.get("final_output") or result.get("draft_response") or "").strip()
-    pending = str(result.get("pending_user_question") or "").strip()
+    pending = _approval_prompt_text(result)
     built_root = str(result.get("project_root") or "").strip()
 
     if final:
@@ -4686,6 +4695,7 @@ def _cmd_research(args: argparse.Namespace) -> int:
         "working_directory": resolved_working_dir,
         "deep_research_mode": True,
         "long_document_mode": True,
+        "workflow_type": "deep_research",
     }
 
     raw_sources = str(args.sources or "").strip()
@@ -4852,7 +4862,7 @@ def _cmd_research(args: argparse.Namespace) -> int:
         return 0
 
     final = str(result.get("final_output") or result.get("draft_response") or "").strip()
-    pending = str(result.get("pending_user_question") or "").strip()
+    pending = _approval_prompt_text(result)
     compiled = str(result.get("long_document_compiled_path") or "").strip()
 
     if final:
@@ -5367,6 +5377,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     def _build_ingest_payload(run_id: str, text: str, *, include_new_session: bool) -> dict:
         payload = dict(base_ingest_payload)
+        if not str(payload.get("workflow_type", "")).strip():
+            if bool(payload.get("deep_research_mode")):
+                payload["workflow_type"] = "deep_research"
+            elif bool(payload.get("long_document_mode")):
+                payload["workflow_type"] = "long_document"
         payload["run_id"] = run_id
         payload["workflow_id"] = active_workflow_id or run_id
         payload["attempt_id"] = run_id
@@ -5396,7 +5411,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return {key: value for key, value in payload.items() if value not in ("", None)}
 
     def _pending_question(result: dict) -> str:
-        return str(result.get("pending_user_question") or result.get("final_output") or "").strip()
+        return _approval_prompt_text(result)
 
     def _fetch_task_session(run_id: str) -> dict:
         try:
@@ -5636,6 +5651,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                         if status == "awaiting_user_input":
                             task_session = _fetch_task_session(client_run_id)
                             summary = _task_session_summary(task_session)
+                            result["approval_request"] = summary.get("approval_request", {})
                             result["pending_user_input_kind"] = summary.get("pending_user_input_kind", "")
                             result["pending_user_question"] = summary.get("pending_user_question", "")
                         break
@@ -5725,6 +5741,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                         if status == "awaiting_user_input":
                             task_session = _fetch_task_session(target_run_id)
                             summary = _task_session_summary(task_session)
+                            result["approval_request"] = summary.get("approval_request", {})
                             result["pending_user_input_kind"] = summary.get("pending_user_input_kind", "")
                             result["pending_user_question"] = summary.get("pending_user_question", "")
                         break

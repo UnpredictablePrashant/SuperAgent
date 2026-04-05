@@ -1,0 +1,34 @@
+digraph {
+	rankdir=TB size="10,10"
+	node [fillcolor=lightblue fontname=Arial shape=box style="rounded,filled"]
+	edge [fontname=Arial]
+	A [label="User-supplied data, device telemetry, content, partner signals"]
+	B [label="Capture and logging"]
+	C [label="Processing and classification"]
+	D1 [label="Ranking and recommendations"]
+	D2 [label=Personalization]
+	D3 [label="Safety and integrity"]
+	D4 [label="Measurement and ad delivery"]
+	D5 [label="Product development"]
+	E [label="Higher engagement"]
+	F [label="Advertiser value and revenue"]
+	G [label="Feature optimization"]
+	H [label="Platform monetization"]
+	I [label="Sharing with advertisers, partners, processors, regulators"]
+	A -> B
+	B -> C
+	C -> D1
+	C -> D2
+	C -> D3
+	C -> D4
+	C -> D5
+	D1 -> E
+	D2 -> E
+	D3 -> E
+	D4 -> F
+	D5 -> G
+	E -> F
+	F -> H
+	B -> I
+	I -> C
+}

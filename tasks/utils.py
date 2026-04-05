@@ -2,6 +2,7 @@ import os
 import logging
 import sys
 import tempfile
+import time as _time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -113,13 +114,96 @@ def agent_model_context(agent_name: str):
         _ACTIVE_AGENT_NAME.reset(token)
 
 
+def _mask_api_key(key: str) -> str:
+    if not key:
+        return "<not set>"
+    if len(key) <= 8:
+        return "*" * len(key)
+    return key[:6] + "..." + key[-4:]
+
+
+def _prompt_summary(prompt) -> tuple[str, int]:
+    """Return (preview_str, total_char_count) for any LangChain prompt shape."""
+    if isinstance(prompt, str):
+        return prompt, len(prompt)
+    if isinstance(prompt, list):
+        lines: list[str] = []
+        for msg in prompt:
+            if hasattr(msg, "type") and hasattr(msg, "content"):
+                lines.append(f"[{msg.type}] {str(msg.content)}")
+            elif isinstance(msg, (list, tuple)) and len(msg) == 2:
+                lines.append(f"[{msg[0]}] {msg[1]}")
+            else:
+                lines.append(str(msg))
+        combined = "\n".join(lines)
+        return combined, len(combined)
+    text = str(prompt)
+    return text, len(text)
+
+
+def _usage_str(response) -> str:
+    usage = getattr(response, "usage_metadata", None)
+    if usage is None:
+        meta = getattr(response, "response_metadata", {}) or {}
+        usage = meta.get("token_usage") or meta.get("usage")
+    if usage is None:
+        return ""
+    if isinstance(usage, dict):
+        in_t = usage.get("input_tokens") or usage.get("prompt_tokens", "?")
+        out_t = usage.get("output_tokens") or usage.get("completion_tokens", "?")
+        total = usage.get("total_tokens", "")
+        total_str = f"/total:{total}" if total else ""
+        return f" | tokens in:{in_t} out:{out_t}{total_str}"
+    in_t = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None)
+    out_t = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None)
+    if in_t is not None or out_t is not None:
+        return f" | tokens in:{in_t} out:{out_t}"
+    return ""
+
+
 class RoutedLLM:
     def invoke(self, prompt, *args, **kwargs):
+        from kendr.llm_router import get_active_provider, get_api_key, get_base_url
+
         forced_agent = kwargs.pop("agent_name", "")
         agent_name = forced_agent or _ACTIVE_AGENT_NAME.get("")
         role = _agent_role(agent_name)
         model = model_for_agent(agent_name)
-        return _client_for_model(model, role).invoke(prompt, *args, **kwargs)
+
+        provider = (_ACTIVE_PROVIDER_OVERRIDE.get("") or get_active_provider()).strip().lower()
+        base_url = get_base_url(provider) or {
+            "openai": "https://api.openai.com/v1",
+            "anthropic": "https://api.anthropic.com/v1",
+            "google": "https://generativelanguage.googleapis.com/v1beta",
+        }.get(provider, f"<{provider} default>")
+        raw_key = get_api_key(provider)
+
+        prompt_text, prompt_chars = _prompt_summary(prompt)
+
+        logger.info(
+            "[LLM Call] agent=%s | role=%s | provider=%s | model=%s | endpoint=%s | key=%s | prompt_chars=%d",
+            agent_name or "<none>", role, provider, model, base_url,
+            _mask_api_key(raw_key), prompt_chars,
+        )
+        logger.info("[LLM Prompt]\n%s", prompt_text)
+
+        t0 = _time.monotonic()
+        try:
+            response = _client_for_model(model, role).invoke(prompt, *args, **kwargs)
+            elapsed_ms = int((_time.monotonic() - t0) * 1000)
+            logger.info(
+                "[LLM OK] agent=%s | model=%s | elapsed_ms=%d%s",
+                agent_name or "<none>", model, elapsed_ms, _usage_str(response),
+            )
+            return response
+        except Exception as exc:
+            elapsed_ms = int((_time.monotonic() - t0) * 1000)
+            logger.error(
+                "[LLM Error] agent=%s | provider=%s | model=%s | endpoint=%s | elapsed_ms=%d | %s: %s",
+                agent_name or "<none>", provider, model, base_url,
+                elapsed_ms, type(exc).__name__, exc,
+            )
+            raise
 
 
 llm = RoutedLLM()

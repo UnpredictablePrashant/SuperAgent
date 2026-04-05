@@ -36,6 +36,21 @@ RUNTIME = AgentRuntime(REGISTRY)
 SKILL_REGISTRY = RUNTIME.skill_registry
 
 
+def _is_cancelled_error(exc: Exception) -> bool:
+    lowered = str(exc or "").strip().lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "kill switch triggered",
+            "run stopped by user",
+            "stopped by user",
+            "cancelled by user",
+            "run cancelled",
+            "run canceled",
+        )
+    )
+
+
 def _html_page(title: str, body: str) -> bytes:
     return f"""<!doctype html>
 <html lang="en">
@@ -307,6 +322,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "run_id": str(payload.get("run_id", "")).strip(),
                 "workflow_id": str(payload.get("workflow_id", "")).strip() or str(payload.get("run_id", "")).strip(),
                 "attempt_id": str(payload.get("attempt_id", "")).strip() or str(payload.get("run_id", "")).strip(),
+                "workflow_type": str(payload.get("workflow_type", "")).strip(),
                 "max_steps": int(payload.get("max_steps", 20)),
                 "incoming_channel": payload.get("channel", "webchat"),
                 "incoming_sender_id": payload.get("sender_id", ""),
@@ -339,6 +355,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 state_overrides["attempt_id"] = explicit_run_id
             if explicit_run_id:
                 state_overrides["run_id"] = explicit_run_id
+            explicit_workflow_type = str(payload.get("workflow_type", "")).strip()
+            if explicit_workflow_type:
+                state_overrides["workflow_type"] = explicit_workflow_type
         normalized_channel = normalize_incoming_message(
             payload,
             channel=str(state_overrides.get("incoming_channel") or payload.get("channel") or "webchat"),
@@ -461,6 +480,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 result.get("plan_needs_clarification", False)
                 or result.get("plan_waiting_for_approval", False)
                 or result.get("long_document_plan_waiting_for_approval", False)
+                or result.get("blueprint_waiting_for_approval", False)
+                or str(result.get("approval_pending_scope", "")).strip()
+                or (
+                    isinstance(result.get("approval_request"), dict)
+                    and bool(result.get("approval_request"))
+                )
+                or str(result.get("pending_user_question", "")).strip()
                 or str(result.get("pending_user_input_kind", "")).strip()
             )
             self._send_json(
@@ -469,6 +495,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "run_id": result.get("run_id"),
                     "output_dir": result.get("run_output_dir", ""),
                     "working_directory": result.get("working_directory", ""),
+                    "workflow_id": result.get("workflow_id") or result.get("run_id"),
+                    "attempt_id": result.get("attempt_id") or result.get("run_id"),
+                    "workflow_type": result.get("workflow_type", ""),
                     "final_output": result.get("final_output") or result.get("draft_response", ""),
                     "last_agent": result.get("last_agent", ""),
                     "status": "awaiting_user_input" if awaiting_user_input else "completed",
@@ -476,10 +505,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "pending_user_input_kind": result.get("pending_user_input_kind", ""),
                     "approval_pending_scope": result.get("approval_pending_scope", ""),
                     "pending_user_question": result.get("pending_user_question", ""),
+                    "approval_request": result.get("approval_request", {}),
                     "resume_candidate": candidate if self.path == "/resume" else {},
+                    # Long-document / deep-research export paths
+                    "long_document_compiled_path": result.get("long_document_compiled_path", ""),
+                    "long_document_compiled_html_path": result.get("long_document_compiled_html_path", ""),
+                    "long_document_compiled_pdf_path": result.get("long_document_compiled_pdf_path", ""),
+                    "long_document_compiled_docx_path": result.get("long_document_compiled_docx_path", ""),
                 },
             )
         except Exception as exc:
+            if _is_cancelled_error(exc):
+                self._send_json(409, {"error": "run_cancelled", "detail": str(exc), "status": "cancelled"})
+                return
             self._send_json(500, {"error": "workflow_failed", "detail": str(exc)})
 
     def _handle_home(self):
