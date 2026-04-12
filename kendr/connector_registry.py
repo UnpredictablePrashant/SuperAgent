@@ -223,7 +223,7 @@ def _skill_spec(agent_name: str, agent_def: Any, meta: dict) -> ConnectorSpec:
     display_name = slug
 
     try:
-        from kendr.persistence import get_user_skill as _get_skill
+        from kendr.skill_manager import resolve_runtime_skill as _get_skill
         row = _get_skill(slug=slug)
         if row:
             display_name = row.get("name") or slug

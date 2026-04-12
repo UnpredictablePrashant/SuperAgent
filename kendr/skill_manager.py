@@ -50,10 +50,13 @@ def get_marketplace(q: str = "", category: str = "") -> dict:
     for item in catalog:
         slug = item["id"]
         installed_row = installed_rows.get(slug)
-        item["is_installed"] = installed_row is not None
-        item["skill_id"] = installed_row["skill_id"] if installed_row else None
+        core_row = _build_core_skill_row(slug)
+        effective_row = installed_row or core_row
+        item["is_core"] = bool(item.get("is_core", False))
+        item["is_installed"] = installed_row is not None or core_row is not None
+        item["skill_id"] = effective_row["skill_id"] if effective_row else None
         item["permission_manifest"] = permission_manifest_from_metadata(
-            {},
+            effective_row.get("metadata", {}) if isinstance(effective_row, dict) else {},
             skill_type="catalog",
             catalog_id=slug,
             cwd=_default_execution_cwd(),
@@ -65,12 +68,94 @@ def get_marketplace(q: str = "", category: str = "") -> dict:
         if r["skill_type"] in ("python", "prompt")
     ]
 
+    core_count = sum(
+        1
+        for item in catalog
+        if bool(item.get("is_core")) and not installed_rows.get(str(item.get("id", "")).strip())
+    )
+
     return {
         "catalog": catalog,
         "custom": custom,
         "categories": catalog_categories(),
-        "installed_count": len(installed_rows) + len([c for c in custom if c["is_installed"]]),
+        "installed_count": len(installed_rows) + core_count + len([c for c in custom if c["is_installed"]]),
     }
+
+
+def _catalog_metadata(entry, *, existing_metadata: dict | None = None) -> dict:
+    base = dict(existing_metadata or {})
+    existing_permissions = base.pop("permissions", None) if isinstance(base.get("permissions"), dict) else None
+    if entry.requires_config:
+        base.setdefault("requires_config", list(entry.requires_config))
+    if getattr(entry, "core", False):
+        base.setdefault("core_skill", True)
+    return merge_permissions_into_metadata(
+        base,
+        existing_permissions
+        if isinstance(existing_permissions, dict)
+        else getattr(entry, "default_permissions", {}) if isinstance(getattr(entry, "default_permissions", {}), dict) else {},
+        skill_type="catalog",
+        catalog_id=entry.id,
+        cwd=_default_execution_cwd(),
+    )
+
+
+def _build_core_skill_row(catalog_id: str) -> dict | None:
+    entry = CATALOG_BY_ID.get(catalog_id)
+    if not entry or not bool(getattr(entry, "core", False)):
+        return None
+    return {
+        "skill_id": f"core:{entry.id}",
+        "name": entry.name,
+        "slug": entry.id,
+        "description": entry.description,
+        "category": entry.category,
+        "icon": entry.icon,
+        "skill_type": "catalog",
+        "catalog_id": entry.id,
+        "code": "",
+        "input_schema": dict(entry.input_schema),
+        "output_schema": dict(entry.output_schema),
+        "tags": list(entry.tags),
+        "metadata": _catalog_metadata(entry),
+        "is_installed": True,
+        "status": "active",
+    }
+
+
+def resolve_runtime_skill(*, skill_id: str = "", slug: str = "") -> dict | None:
+    row = None
+    catalog_id = ""
+    if skill_id:
+        if skill_id.startswith("core:"):
+            return _build_core_skill_row(skill_id.split("core:", 1)[1].strip())
+        row = get_user_skill(skill_id=skill_id)
+    elif slug:
+        row = get_user_skill(slug=slug)
+    if row:
+        if row.get("skill_type") == "catalog":
+            catalog_id = str(row.get("catalog_id", "") or str(row.get("slug", ""))).strip()
+            entry = CATALOG_BY_ID.get(catalog_id)
+            if entry:
+                if not bool(row.get("is_installed", False)) and bool(getattr(entry, "core", False)):
+                    return _build_core_skill_row(catalog_id)
+                row = dict(row)
+                row["metadata"] = _catalog_metadata(entry, existing_metadata=row.get("metadata", {}))
+        return row
+    if slug:
+        return _build_core_skill_row(slug)
+    return None
+
+
+def list_runtime_skills() -> list[dict]:
+    rows = list_user_skills(is_installed=True)
+    by_slug = {str(row.get("slug", "")).strip(): dict(row) for row in rows if str(row.get("slug", "")).strip()}
+    for catalog_id, entry in CATALOG_BY_ID.items():
+        if bool(getattr(entry, "core", False)) and catalog_id not in by_slug:
+            core_row = _build_core_skill_row(catalog_id)
+            if core_row:
+                by_slug[catalog_id] = core_row
+    return sorted(by_slug.values(), key=lambda item: str(item.get("name", item.get("slug", ""))).lower())
 
 
 # ---------------------------------------------------------------------------
@@ -83,13 +168,7 @@ def install_catalog_skill(catalog_id: str) -> dict:
     if not entry:
         raise ValueError(f"No catalog skill with id {catalog_id!r}")
 
-    metadata = merge_permissions_into_metadata(
-        {"requires_config": list(entry.requires_config)},
-        None,
-        skill_type="catalog",
-        catalog_id=entry.id,
-        cwd=_default_execution_cwd(),
-    )
+    metadata = _catalog_metadata(entry)
 
     existing = get_user_skill(slug=catalog_id)
     if existing and existing["is_installed"]:
@@ -123,7 +202,7 @@ def uninstall_catalog_skill(catalog_id: str) -> bool:
     """Mark a catalog skill as uninstalled (does not delete custom skills)."""
     existing = get_user_skill(slug=catalog_id)
     if not existing:
-        return False
+        return bool(_build_core_skill_row(catalog_id))
     if existing["skill_type"] != "catalog":
         raise ValueError("Use delete_custom_skill for non-catalog skills.")
     set_skill_installed(existing["skill_id"], False)
@@ -193,7 +272,7 @@ def create_custom_skill(
 
 def edit_custom_skill(skill_id: str, **kwargs) -> dict | None:
     if "permissions" in kwargs:
-        current = get_user_skill(skill_id=skill_id)
+        current = resolve_runtime_skill(skill_id=skill_id)
         if current:
             kwargs["metadata"] = merge_permissions_into_metadata(
                 kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else current.get("metadata", {}),
@@ -206,7 +285,7 @@ def edit_custom_skill(skill_id: str, **kwargs) -> dict | None:
 
 
 def remove_custom_skill(skill_id: str) -> bool:
-    row = get_user_skill(skill_id=skill_id)
+    row = resolve_runtime_skill(skill_id=skill_id)
     if not row:
         return False
     if row["skill_type"] == "catalog":
@@ -416,7 +495,7 @@ def _run_catalog_skill(catalog_id: str, inputs: dict, *, permission_manifest: di
 
 def test_skill(skill_id: str, inputs: dict, *, approval: dict | None = None) -> dict:
     """Run a skill with the provided inputs and return the execution result."""
-    row = get_user_skill(skill_id=skill_id)
+    row = resolve_runtime_skill(skill_id=skill_id)
     if not row:
         return {"success": False, "error": f"Skill {skill_id!r} not found."}
 
@@ -462,7 +541,7 @@ def test_skill(skill_id: str, inputs: dict, *, approval: dict | None = None) -> 
 
 def execute_skill_by_slug(slug: str, inputs: dict, *, approval: dict | None = None) -> dict:
     """Public API for agents to call a skill by its slug."""
-    row = get_user_skill(slug=slug)
+    row = resolve_runtime_skill(slug=slug)
     if not row:
         return {"success": False, "error": f"Skill '{slug}' not found or not installed."}
     if not row.get("is_installed"):
@@ -485,27 +564,35 @@ def _catalog_handlers() -> dict[str, Any]:
     }
 
 
-def _handle_web_search(inputs: dict, **_kwargs) -> dict:
+def _handle_web_search(inputs: dict, *, permission_manifest: dict | None = None, approval: dict | None = None) -> dict:
     query = str(inputs.get("query", "")).strip()
     num_results = int(inputs.get("num_results", 5))
     if not query:
         raise ValueError("'query' is required")
-    try:
-        import requests
-        # DuckDuckGo instant answer API (no key required)
-        r = requests.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json", "no_redirect": 1},
-            timeout=10,
+    result = _run_extension_host(
+        "web-search",
+        {
+            "query": query,
+            "num_results": num_results,
+            "permissions": permission_manifest or {},
+            "approval": normalize_approval(approval),
+        },
+        timeout=max(10, _EXEC_TIMEOUT),
+    )
+    if not result.get("success"):
+        _record_permission_event(
+            "catalog:web-search",
+            action="web_search_execution",
+            status="blocked" if "network" in str(result.get("error", "")).lower() or "approval" in str(result.get("error", "")).lower() else "error",
+            detail={
+                "query": query,
+                "error": str(result.get("error", "") or ""),
+                "permissions": summarize_permission_manifest(permission_manifest or {}),
+            },
         )
-        data = r.json()
-        results = []
-        for topic in (data.get("RelatedTopics") or [])[:num_results]:
-            if isinstance(topic, dict) and topic.get("Text"):
-                results.append({"title": topic.get("Text", ""), "url": topic.get("FirstURL", ""), "snippet": topic.get("Text", "")})
-        return {"query": query, "results": results}
-    except ImportError:
-        return {"query": query, "results": [], "error": "requests library not installed"}
+        raise RuntimeError(str(result.get("error", "Web search execution failed")))
+    output = result.get("output")
+    return output if isinstance(output, dict) else {"query": query, "results": []}
 
 
 def _handle_code_executor(inputs: dict, *, permission_manifest: dict | None = None, approval: dict | None = None) -> dict:
@@ -580,20 +667,50 @@ def _handle_shell_command(inputs: dict, *, permission_manifest: dict | None = No
     return output if isinstance(output, dict) else {"stdout": "", "stderr": "", "returncode": 1}
 
 
-def _handle_api_caller(inputs: dict, **_kwargs) -> dict:
+def _handle_api_caller(inputs: dict, *, permission_manifest: dict | None = None, approval: dict | None = None) -> dict:
     url = str(inputs.get("url", "")).strip()
     method = str(inputs.get("method", "GET")).upper()
     headers = dict(inputs.get("headers") or {})
     body = inputs.get("body")
     if not url:
         raise ValueError("'url' is required")
-    try:
-        import requests
-        resp = requests.request(method, url, headers=headers, json=body, timeout=15)
-        try:
-            body_data = resp.json()
-        except Exception:
-            body_data = resp.text
-        return {"status_code": resp.status_code, "body": body_data, "headers": dict(resp.headers)}
-    except ImportError:
-        return {"status_code": 0, "body": None, "error": "requests library not installed"}
+    result = _run_extension_host(
+        "http-request",
+        {
+            "url": url,
+            "method": method,
+            "headers": headers,
+            "body": body,
+            "timeout": int(inputs.get("timeout", 15) or 15),
+            "permissions": permission_manifest or {},
+            "approval": normalize_approval(approval),
+        },
+        timeout=max(15, int(inputs.get("timeout", 15) or 15)),
+    )
+    if not result.get("success"):
+        _record_permission_event(
+            "catalog:api-caller",
+            action="api_request_execution",
+            status="blocked" if "network" in str(result.get("error", "")).lower() or "approval" in str(result.get("error", "")).lower() else "error",
+            detail={
+                "url": url,
+                "method": method,
+                "error": str(result.get("error", "") or ""),
+                "permissions": summarize_permission_manifest(permission_manifest or {}),
+            },
+        )
+        raise RuntimeError(str(result.get("error", "API caller execution failed")))
+    if permission_manifest and permission_manifest.get("requires_approval", False):
+        _record_permission_event(
+            "catalog:api-caller",
+            action="api_request_execution",
+            status="approved",
+            detail={
+                "url": url,
+                "method": method,
+                "approval": normalize_approval(approval),
+                "permissions": summarize_permission_manifest(permission_manifest),
+            },
+        )
+    output = result.get("output")
+    return output if isinstance(output, dict) else {"status_code": 0, "body": None, "headers": {}}

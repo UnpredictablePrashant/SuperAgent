@@ -30,6 +30,8 @@ class CatalogSkill:
     requires_config: tuple[str, ...] = ()  # env vars needed
     example_input: dict = field(default_factory=dict)
     example_output: str = ""
+    core: bool = False
+    default_permissions: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -37,6 +39,7 @@ class CatalogSkill:
         d["requires_config"] = list(d["requires_config"])
         d["skill_type"] = "catalog"
         d["catalog_id"] = self.id
+        d["is_core"] = bool(self.core)
         return d
 
 
@@ -72,6 +75,14 @@ CATALOG: tuple[CatalogSkill, ...] = (
         },
         example_input={"query": "latest AI news 2025"},
         example_output='{"results": [{"title": "...", "url": "...", "snippet": "..."}]}',
+        core=True,
+        default_permissions={
+            "requires_approval": False,
+            "network": {
+                "allow": True,
+                "domains": ["api.duckduckgo.com"],
+            },
+        },
     ),
 
     CatalogSkill(
@@ -215,6 +226,13 @@ CATALOG: tuple[CatalogSkill, ...] = (
         },
         example_input={"url": "https://api.example.com/data", "method": "GET"},
         example_output='{"status_code": 200, "body": {...}}',
+        default_permissions={
+            "requires_approval": True,
+            "network": {
+                "allow": True,
+                "domains": [],
+            },
+        },
     ),
 
     # ── Research ──────────────────────────────────────────────────────────────

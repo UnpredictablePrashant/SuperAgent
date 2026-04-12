@@ -10,6 +10,9 @@ import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
 from kendr.extension_permissions import ensure_manifest_approval, normalize_permission_manifest, normalize_approval
 from tasks.privileged_control import classify_command, ensure_command_allowed
@@ -212,6 +215,20 @@ def _host_allowed(host: str, allowed_domains: list[str]) -> bool:
     return any(lowered == item or lowered.endswith("." + item) for item in allowed_domains)
 
 
+def _ensure_network_allowed(manifest: dict, approval: dict | None, *, url: str, capability: str) -> dict:
+    normalized_approval = ensure_manifest_approval(manifest, approval, capability=capability)
+    network_manifest = manifest.get("network", {}) if isinstance(manifest.get("network"), dict) else {}
+    if not network_manifest.get("allow", False):
+        raise PermissionError("Network access is disabled by the permission manifest.")
+    parsed = urllib_parse.urlparse(str(url or ""))
+    host = str(parsed.hostname or "").strip().lower()
+    if not host:
+        raise PermissionError("A valid network host is required.")
+    if not _host_allowed(host, list(network_manifest.get("domains", []))):
+        raise PermissionError(f"Network host is outside the allowed domain scope: {host}")
+    return normalized_approval
+
+
 def _run_shell_command(command: str, cwd: str | None, timeout_seconds: int, *, permissions: dict | None = None, approval: dict | None = None) -> dict:
     exec_cwd = str(cwd or os.getcwd())
     manifest = normalize_permission_manifest(permissions, skill_type="catalog", catalog_id="shell-command", cwd=exec_cwd)
@@ -253,6 +270,95 @@ def _run_shell_command(command: str, cwd: str | None, timeout_seconds: int, *, p
         "stderr": result.stderr,
         "returncode": result.returncode,
     }
+
+
+def _perform_http_request(
+    *,
+    url: str,
+    method: str,
+    headers: dict,
+    body,
+    timeout_seconds: int,
+    permissions: dict | None = None,
+    approval: dict | None = None,
+    capability: str,
+) -> dict:
+    manifest = normalize_permission_manifest(permissions, skill_type="catalog", catalog_id="api-caller")
+    _ensure_network_allowed(manifest, approval, url=url, capability=capability)
+    body_bytes = None
+    request_headers = {str(key): str(value) for key, value in (headers or {}).items()}
+    if body is not None:
+        body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+    request = urllib_request.Request(
+        str(url or "").strip(),
+        data=body_bytes,
+        headers=request_headers,
+        method=str(method or "GET").upper(),
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read()
+            text = raw.decode("utf-8", errors="replace")
+            content_type = str(response.headers.get("Content-Type", "") or "")
+            if "json" in content_type.lower():
+                try:
+                    payload_body = json.loads(text)
+                except Exception:
+                    payload_body = text
+            else:
+                try:
+                    payload_body = json.loads(text)
+                except Exception:
+                    payload_body = text
+            return {
+                "status_code": int(getattr(response, "status", 200) or 200),
+                "body": payload_body,
+                "headers": dict(response.headers.items()),
+            }
+    except urllib_error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            payload_body = json.loads(raw)
+        except Exception:
+            payload_body = raw
+        return {
+            "status_code": int(exc.code),
+            "body": payload_body,
+            "headers": dict(exc.headers.items()) if exc.headers else {},
+        }
+
+
+def _run_web_search(query: str, num_results: int, *, permissions: dict | None = None, approval: dict | None = None) -> dict:
+    manifest = normalize_permission_manifest(permissions, skill_type="catalog", catalog_id="web-search")
+    _ensure_network_allowed(
+        manifest,
+        approval,
+        url="https://api.duckduckgo.com/",
+        capability="Web search skill",
+    )
+    params = urllib_parse.urlencode(
+        {
+            "q": str(query or "").strip(),
+            "format": "json",
+            "no_redirect": 1,
+        }
+    )
+    url = f"https://api.duckduckgo.com/?{params}"
+    request = urllib_request.Request(url, headers={"Accept": "application/json"}, method="GET")
+    with urllib_request.urlopen(request, timeout=10) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    results = []
+    for topic in (payload.get("RelatedTopics") or [])[: max(1, int(num_results or 5))]:
+        if isinstance(topic, dict) and topic.get("Text"):
+            results.append(
+                {
+                    "title": topic.get("Text", ""),
+                    "url": topic.get("FirstURL", ""),
+                    "snippet": topic.get("Text", ""),
+                }
+            )
+    return {"query": str(query or "").strip(), "results": results}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -297,6 +403,46 @@ def main(argv: list[str] | None = None) -> int:
                 "success": False,
                 "error": str(exc),
             }
+    elif mode == "web-search":
+        try:
+            result = {
+                "output": _run_web_search(
+                    str(payload.get("query", "") or ""),
+                    int(payload.get("num_results", 5) or 5),
+                    permissions=payload.get("permissions") if isinstance(payload.get("permissions"), dict) else None,
+                    approval=normalize_approval(payload.get("approval") if isinstance(payload.get("approval"), dict) else None),
+                ),
+                "stdout": "",
+                "stderr": "",
+                "success": True,
+                "error": None,
+            }
+        except PermissionError as exc:
+            result = {"output": None, "stdout": "", "stderr": "", "success": False, "error": str(exc)}
+        except Exception:
+            result = {"output": None, "stdout": "", "stderr": "", "success": False, "error": traceback.format_exc()}
+    elif mode == "http-request":
+        try:
+            result = {
+                "output": _perform_http_request(
+                    url=str(payload.get("url", "") or ""),
+                    method=str(payload.get("method", "GET") or "GET"),
+                    headers=payload.get("headers", {}) if isinstance(payload.get("headers"), dict) else {},
+                    body=payload.get("body"),
+                    timeout_seconds=max(1, int(payload.get("timeout", 15) or 15)),
+                    permissions=payload.get("permissions") if isinstance(payload.get("permissions"), dict) else None,
+                    approval=normalize_approval(payload.get("approval") if isinstance(payload.get("approval"), dict) else None),
+                    capability="API caller skill",
+                ),
+                "stdout": "",
+                "stderr": "",
+                "success": True,
+                "error": None,
+            }
+        except PermissionError as exc:
+            result = {"output": None, "stdout": "", "stderr": "", "success": False, "error": str(exc)}
+        except Exception:
+            result = {"output": None, "stdout": "", "stderr": "", "success": False, "error": traceback.format_exc()}
     else:
         result = {
             "output": None,

@@ -16,7 +16,7 @@ from kendr.persistence.setup_store import (
     set_setup_provider_tokens,
     upsert_setup_config_value,
 )
-from kendr.skill_manager import _run_python_skill, test_skill
+from kendr.skill_manager import _run_python_skill, execute_skill_by_slug, get_marketplace, test_skill
 
 
 class SecretStorageTests(unittest.TestCase):
@@ -186,6 +186,56 @@ class ExtensionHostIsolationTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertIn("requires explicit approval", str(result["error"]))
+
+    def test_api_caller_blocks_hosts_outside_manifest_scope(self):
+        skill_row = {
+            "skill_id": "skill-5",
+            "slug": "api-caller",
+            "skill_type": "catalog",
+            "catalog_id": "api-caller",
+            "code": "",
+            "metadata": {
+                "permissions": {
+                    "network": {
+                        "allow": True,
+                        "domains": ["allowed.example"],
+                    }
+                }
+            },
+            "is_installed": True,
+        }
+        with patch("kendr.skill_manager.get_user_skill", return_value=skill_row):
+            result = test_skill(
+                "skill-5",
+                {"url": "https://blocked.example/api", "method": "GET"},
+                approval={"approved": True, "note": "API smoke"},
+            )
+
+        self.assertFalse(result["success"])
+        self.assertIn("outside the allowed domain scope", str(result["error"]))
+
+    def test_web_search_is_available_as_core_skill_without_install(self):
+        with patch("kendr.skill_manager.get_user_skill", return_value=None):
+            with patch(
+                "kendr.skill_manager._run_extension_host",
+                return_value={"success": True, "output": {"query": "cats", "results": [{"title": "Cats"}]}, "stdout": "", "stderr": "", "error": None},
+            ) as host:
+                result = execute_skill_by_slug("web-search", {"query": "cats"})
+
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertEqual(result["output"]["query"], "cats")
+        payload = host.call_args.args[1]
+        self.assertEqual(host.call_args.args[0], "web-search")
+        self.assertEqual(payload["permissions"]["network"]["domains"], ["api.duckduckgo.com"])
+
+    def test_marketplace_marks_web_search_as_core_installed(self):
+        with patch("kendr.skill_manager.list_user_skills", return_value=[]):
+            marketplace = get_marketplace()
+
+        web_search = next(item for item in marketplace["catalog"] if item["id"] == "web-search")
+        self.assertTrue(web_search["is_core"])
+        self.assertTrue(web_search["is_installed"])
+        self.assertEqual(web_search["skill_id"], "core:web-search")
 
 
 if __name__ == "__main__":

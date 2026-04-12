@@ -268,7 +268,7 @@ class AgentRoutingIndex:
         for c in self._cards:
             if c.is_active and not c.needs_config:
                 by_cat[c.category] = by_cat.get(c.category, 0) + 1
-        user_skills = _get_installed_user_skills()
+        user_skills = _get_runtime_skills()
         return {
             "total": len(self._cards),
             "active": active,
@@ -279,12 +279,12 @@ class AgentRoutingIndex:
         }
 
     def user_skills_prompt_block(self) -> str:
-        """Return a text block describing installed user skills for injection into agent prompts."""
-        skills = _get_installed_user_skills()
+        """Return a text block describing installed and core skills for prompts."""
+        skills = _get_runtime_skills()
         if not skills:
             return ""
         lines = [
-            "## Installed Custom Skills\n",
+            "## Installed and Core Skills\n",
             "Route to the corresponding `skill_<slug>_agent` to invoke a skill:\n",
         ]
         for s in skills:
@@ -292,17 +292,18 @@ class AgentRoutingIndex:
             icon = s.get("icon", "⚡")
             desc = (s.get("description", "") or "").strip()
             slug = s.get("slug", "")
+            core_note = " [core]" if bool(s.get("metadata", {}).get("core_skill", False)) else ""
             safe_slug = "".join(c if c.isalnum() else "_" for c in slug.lower()).strip("_")
             agent_name = f"skill_{safe_slug}_agent"
-            lines.append(f"- {icon} **{s['name']}** → `{agent_name}` (type={kind}): {desc}")
+            lines.append(f"- {icon} **{s['name']}**{core_note} → `{agent_name}` (type={kind}): {desc}")
         return "\n".join(lines)
 
 
-def _get_installed_user_skills() -> list[dict]:
-    """Fetch installed user skills from persistence (fails silently if DB not ready)."""
+def _get_runtime_skills() -> list[dict]:
+    """Fetch active runtime skills, including core catalog skills."""
     try:
-        from kendr.persistence.skill_store import list_user_skills
-        return list_user_skills(is_installed=True)
+        from kendr.skill_manager import list_runtime_skills
+        return list_runtime_skills()
     except Exception:
         return []
 

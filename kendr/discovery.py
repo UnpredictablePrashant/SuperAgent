@@ -441,24 +441,24 @@ def _register_skill_agents(registry: Registry, *, strict: bool = False) -> None:
     The function is silent on errors — skills are best-effort at registry time.
     """
     try:
-        from kendr.persistence import list_user_skills as _list_skills
+        from kendr.skill_manager import list_runtime_skills as _list_skills
     except Exception as exc:
         _handle_discovery_error(
             registry,
             source="skill_registry",
-            target="kendr.persistence.list_user_skills",
+            target="kendr.skill_manager.list_runtime_skills",
             exc=exc,
             strict=strict,
         )
         return
 
     try:
-        skills = _list_skills(is_installed=True)
+        skills = _list_skills()
     except Exception as exc:
         _handle_discovery_error(
             registry,
             source="skill_registry",
-            target="kendr.persistence.list_user_skills()",
+            target="kendr.skill_manager.list_runtime_skills()",
             exc=exc,
             strict=strict,
         )

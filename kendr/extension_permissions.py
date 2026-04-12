@@ -66,11 +66,17 @@ def default_permission_manifest(*, skill_type: str = "", catalog_id: str = "", c
         manifest["requires_approval"] = True
     elif kind == "catalog" and catalog == "code-executor":
         manifest["requires_approval"] = True
+    elif kind == "catalog" and catalog == "web-search":
+        manifest["network"]["allow"] = True
+        manifest["network"]["domains"] = ["api.duckduckgo.com"]
     elif kind == "catalog" and catalog == "shell-command":
         manifest["requires_approval"] = True
         manifest["shell"]["allow"] = True
         manifest["filesystem"]["read"] = _normalize_paths(["."], cwd=cwd)
         manifest["filesystem"]["write"] = _normalize_paths(["."], cwd=cwd)
+    elif kind == "catalog" and catalog == "api-caller":
+        manifest["requires_approval"] = True
+        manifest["network"]["allow"] = True
     return manifest
 
 
@@ -181,4 +187,3 @@ def summarize_permission_manifest(manifest: dict) -> dict:
         "network_allowed": bool(network.get("allow", False)),
         "network_domains": _string_list(network.get("domains")),
     }
-

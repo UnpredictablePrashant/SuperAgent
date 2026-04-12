@@ -69,6 +69,18 @@ class DiscoveryResilienceTests(unittest.TestCase):
             if original_module is not None:
                 sys.modules["tasks.utils"] = original_module
 
+    def test_build_registry_includes_core_web_search_skill_without_install(self):
+        with patch("kendr.skill_manager.list_user_skills", return_value=[]):
+            registry = build_registry(
+                DiscoveryOptions(
+                    discover_external_plugins=False,
+                    discover_mcp_tools=False,
+                    discover_skill_agents=True,
+                )
+            )
+
+        self.assertIn("skill_web_search_agent", registry.agents)
+
 
 if __name__ == "__main__":
     unittest.main()

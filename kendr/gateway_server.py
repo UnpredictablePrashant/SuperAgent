@@ -40,10 +40,11 @@ from kendr.skill_manager import (
     uninstall_catalog_skill,
     create_custom_skill,
     edit_custom_skill,
+    list_runtime_skills,
     remove_custom_skill,
+    resolve_runtime_skill,
     test_skill,
 )
-from kendr.persistence import get_user_skill, list_user_skills
 
 
 REGISTRY = build_registry()
@@ -552,7 +553,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/marketplace/skills/installed":
             try:
-                rows = list_user_skills(is_installed=True)
+                rows = list_runtime_skills()
                 self._send_json(200, {"items": rows, "count": len(rows)})
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
@@ -560,7 +561,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/marketplace/skills/"):
             skill_id = parsed.path.split("/api/marketplace/skills/", 1)[1].strip()
             if skill_id:
-                row = get_user_skill(skill_id=skill_id)
+                row = resolve_runtime_skill(skill_id=skill_id)
                 if row:
                     self._send_json(200, row)
                 else:
