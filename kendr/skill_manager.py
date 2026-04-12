@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import traceback
@@ -572,29 +573,86 @@ def _extension_host_env() -> dict[str, str]:
     }
 
 
-def _run_extension_host(mode: str, payload: dict, *, timeout: int) -> dict:
+def _extension_host_popen_kwargs() -> dict[str, object]:
+    if os.name == "nt":
+        flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        return {"creationflags": flag} if flag else {}
+    return {"start_new_session": True}
+
+
+def _extension_host_injected_env(payload: dict) -> dict[str, str]:
+    permissions = payload.get("permissions") if isinstance(payload.get("permissions"), dict) else {}
+    environment = permissions.get("environment", {}) if isinstance(permissions.get("environment"), dict) else {}
+    requested = environment.get("read", []) if isinstance(environment.get("read", []), list) else []
+    injected: dict[str, str] = {}
+    for item in requested:
+        key = str(item or "").strip()
+        value = str(os.environ.get(key, "") or "").strip()
+        if key and value:
+            injected[key] = value
+    return injected
+
+
+def _terminate_extension_host(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
     try:
-        completed = subprocess.run(
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/F", "/T"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        else:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def _run_extension_host(mode: str, payload: dict, *, timeout: int) -> dict:
+    host_payload = dict(payload or {})
+    injected_env = _extension_host_injected_env(host_payload)
+    if injected_env:
+        host_payload["injected_env"] = injected_env
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
             [sys.executable, "-m", "kendr.extension_host", mode],
-            input=json.dumps(payload, ensure_ascii=False),
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=max(1, timeout) + 2,
             env=_extension_host_env(),
+            **_extension_host_popen_kwargs(),
+        )
+        stdout, stderr = process.communicate(
+            input=json.dumps(host_payload, ensure_ascii=False),
+            timeout=max(1, timeout) + 2,
         )
     except subprocess.TimeoutExpired:
-        return {"output": None, "stdout": "", "stderr": "", "success": False, "error": f"Extension host timed out after {timeout}s"}
+        if process is not None:
+            _terminate_extension_host(process)
+        try:
+            stdout, stderr = process.communicate(timeout=2) if process is not None else ("", "")
+        except Exception:
+            stdout, stderr = "", ""
+        return {"output": None, "stdout": stdout, "stderr": stderr, "success": False, "error": f"Extension host timed out after {timeout}s"}
     except Exception:
         return {"output": None, "stdout": "", "stderr": "", "success": False, "error": traceback.format_exc()}
 
-    raw_output = completed.stdout.strip()
-    if completed.returncode != 0:
+    raw_output = stdout.strip()
+    if process.returncode != 0:
         return {
             "output": None,
             "stdout": raw_output,
-            "stderr": completed.stderr,
+            "stderr": stderr,
             "success": False,
-            "error": completed.stderr or f"Extension host exited with code {completed.returncode}",
+            "error": stderr or f"Extension host exited with code {process.returncode}",
         }
     try:
         payload_out = json.loads(raw_output or "{}")
@@ -602,14 +660,14 @@ def _run_extension_host(mode: str, payload: dict, *, timeout: int) -> dict:
         return {
             "output": None,
             "stdout": raw_output,
-            "stderr": completed.stderr,
+            "stderr": stderr,
             "success": False,
             "error": "Extension host returned invalid JSON",
         }
     return payload_out if isinstance(payload_out, dict) else {
         "output": None,
         "stdout": raw_output,
-        "stderr": completed.stderr,
+        "stderr": stderr,
         "success": False,
         "error": "Extension host returned an invalid payload",
     }
@@ -626,7 +684,7 @@ def _run_python_skill(code: str, inputs: dict, *, permission_manifest: dict | No
             "timeout": _EXEC_TIMEOUT,
             "permissions": effective_manifest,
             "approval": normalize_approval(approval),
-            "cwd": _default_execution_cwd(),
+            "workspace_root": _default_execution_cwd(),
         },
         timeout=_EXEC_TIMEOUT,
     )
@@ -846,6 +904,7 @@ def _handle_shell_command(inputs: dict, *, permission_manifest: dict | None = No
         {
             "command": command,
             "cwd": cwd,
+            "workspace_root": _default_execution_cwd(),
             "timeout": timeout,
             "permissions": permission_manifest or {},
             "approval": normalize_approval(approval),

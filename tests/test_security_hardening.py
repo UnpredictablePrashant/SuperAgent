@@ -152,6 +152,32 @@ class ExtensionHostIsolationTests(unittest.TestCase):
         self.assertEqual(result["output"], "1")
         self.assertNotIn("KENDR_CHILD_ONLY", os.environ)
 
+    def test_python_skill_defaults_to_isolated_workspace(self):
+        result = _run_python_skill(
+            'output = os.getcwd()',
+            {},
+            permission_manifest={},
+            approval={"approved": True, "note": "Run in isolated workspace"},
+        )
+
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertIsInstance(result["output"], str)
+        self.assertIn("kendr-extension-", str(result["output"]))
+        self.assertNotEqual(str(result["output"]), os.getcwd())
+
+    def test_python_skill_only_exposes_explicit_environment_keys(self):
+        with patch.dict(os.environ, {"KENDR_ALLOWED_ENV": "visible-value"}, clear=False):
+            result = _run_python_skill(
+                'output = {"allowed": os.getenv("KENDR_ALLOWED_ENV"), "path": os.getenv("PATH")}',
+                {},
+                permission_manifest={"environment": {"read": ["KENDR_ALLOWED_ENV"]}},
+                approval={"approved": True, "note": "Allow named env key"},
+            )
+
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertEqual(result["output"]["allowed"], "visible-value")
+        self.assertIsNone(result["output"]["path"])
+
     def test_custom_python_skill_requires_explicit_approval(self):
         skill_row = {
             "skill_id": "skill-1",
@@ -167,6 +193,34 @@ class ExtensionHostIsolationTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertIn("requires explicit approval", str(result["error"]))
+
+    def test_shell_command_blocks_requested_cwd_outside_manifest_scope(self):
+        with tempfile.TemporaryDirectory() as allowed_root, tempfile.TemporaryDirectory() as blocked_root:
+            skill_row = {
+                "skill_id": "skill-shell-cwd",
+                "slug": "shell-command",
+                "skill_type": "catalog",
+                "catalog_id": "shell-command",
+                "code": "",
+                "metadata": {
+                    "permissions": {
+                        "filesystem": {
+                            "read": [allowed_root],
+                            "write": [allowed_root],
+                        }
+                    }
+                },
+                "is_installed": True,
+            }
+            with patch("kendr.skill_manager.get_user_skill", return_value=skill_row):
+                result = test_skill(
+                    "skill-shell-cwd",
+                    {"command": "pwd", "cwd": blocked_root},
+                    approval={"approved": True, "note": "Attempt blocked cwd"},
+                )
+
+        self.assertFalse(result["success"])
+        self.assertIn("outside the allowed filesystem scope", str(result["error"]))
 
     def test_python_skill_respects_filesystem_permission_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
