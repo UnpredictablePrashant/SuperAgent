@@ -33,7 +33,7 @@ dependencies = [
   "langchain>=0.3",
   "langchain-core>=0.3",
   "langchain-openai>=0.2",
-  "openai>=1.40",
+  "openai>=2.31.0",
   # HTTP and parsing
   "requests>=2.31",
   "charset-normalizer>=3,<4",
