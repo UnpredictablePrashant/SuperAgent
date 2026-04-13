@@ -4,6 +4,19 @@ from unittest.mock import patch
 
 
 class LlmRouterTests(unittest.TestCase):
+    def test_local_models_not_agent_capable(self):
+        from kendr.llm_router import is_agent_capable_model
+
+        self.assertFalse(is_agent_capable_model("llama3.2", "ollama"))
+        self.assertTrue(is_agent_capable_model("gpt-5.1", "openai"))
+
+    def test_context_window_tracks_newer_openai_models(self):
+        from kendr.llm_router import get_context_window
+
+        self.assertEqual(get_context_window("gpt-5.1"), 400000)
+        self.assertEqual(get_context_window("gpt-5.4-mini"), 400000)
+        self.assertEqual(get_context_window("gpt-4.1"), 1047576)
+
     def test_provider_specific_model_beats_legacy_global_override(self):
         from kendr.llm_router import get_model_for_provider
 

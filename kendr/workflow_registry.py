@@ -33,6 +33,12 @@ def explicit_workflow_routes() -> list[WorkflowRouteDefinition]:
             build_plan=_build_project_build_blueprint_plan,
         ),
         WorkflowRouteDefinition(
+            workflow_id="shell_plan",
+            stage="early",
+            matches=_match_shell_plan,
+            build_plan=_build_shell_plan_plan,
+        ),
+        WorkflowRouteDefinition(
             workflow_id="local_command",
             stage="early",
             matches=_match_local_command,
@@ -55,6 +61,12 @@ def explicit_workflow_routes() -> list[WorkflowRouteDefinition]:
             stage="early",
             matches=_match_project_workbench,
             build_plan=_build_project_workbench_plan,
+        ),
+        WorkflowRouteDefinition(
+            workflow_id="deep_research_resume",
+            stage="resume",
+            matches=_match_deep_research_resume,
+            build_plan=_build_deep_research_resume_plan,
         ),
         WorkflowRouteDefinition(
             workflow_id="document_generation",
@@ -156,10 +168,34 @@ def _build_project_build_blueprint_plan(runtime: Any, state: dict[str, Any]) -> 
 def _match_local_command(runtime: Any, state: dict[str, Any]) -> bool:
     return bool(
         not state.get("plan_steps")
-        and state.get("last_agent") != "os_agent"
         and runtime._is_agent_available(state, "os_agent")
         and runtime._is_local_command_request(state)
+        and not runtime._is_shell_plan_request(state)
         and not runtime._is_project_build_request(state)
+    )
+
+
+def _match_shell_plan(runtime: Any, state: dict[str, Any]) -> bool:
+    return bool(
+        not state.get("plan_steps")
+        and runtime._is_agent_available(state, "shell_plan_agent")
+        and runtime._is_shell_plan_request(state)
+        and not runtime._is_project_build_request(state)
+    )
+
+
+def _build_shell_plan_plan(runtime: Any, state: dict[str, Any]) -> WorkflowDispatchPlan:
+    objective = _current_objective(state)
+    return WorkflowDispatchPlan(
+        workflow_id="shell_plan",
+        agent_name="shell_plan_agent",
+        reason=(
+            "The request is a multi-step local setup/runtime workflow. "
+            "Route directly to shell_plan_agent for deterministic step planning and execution."
+        ),
+        intent="shell-plan-dispatch",
+        content=objective,
+        state_updates={"current_objective": objective},
     )
 
 
@@ -254,6 +290,46 @@ def _build_project_workbench_plan(runtime: Any, state: dict[str, Any]) -> Workfl
             "codebase_mode": True,
         },
         state_mutations={"codebase_mode": True},
+    )
+
+
+def _deep_research_pipeline_completed(state: dict[str, Any]) -> bool:
+    result_card = state.get("deep_research_result_card", {})
+    result_kind = str((result_card or {}).get("kind", "")).strip().lower() if isinstance(result_card, dict) else ""
+    return bool(
+        result_kind == "result"
+        or str(state.get("long_document_compiled_path", "")).strip()
+        or str(state.get("long_document_manifest_path", "")).strip()
+    )
+
+
+def _match_deep_research_resume(runtime: Any, state: dict[str, Any]) -> bool:
+    deep_research_workflow = bool(
+        bool(state.get("deep_research_mode", False))
+        or str(state.get("workflow_type", "")).strip().lower() == "deep_research"
+    )
+    return bool(
+        deep_research_workflow
+        and bool(state.get("deep_research_confirmed", False))
+        and not _deep_research_pipeline_completed(state)
+        and runtime._is_agent_available(state, "long_document_agent")
+    )
+
+
+def _build_deep_research_resume_plan(runtime: Any, state: dict[str, Any]) -> WorkflowDispatchPlan:
+    objective = _current_objective(state)
+    reason = "Deep research confirmed by user — resuming long_document_agent to run the full research pipeline."
+    return WorkflowDispatchPlan(
+        workflow_id="deep_research_resume",
+        agent_name="long_document_agent",
+        reason=reason,
+        intent="long-document-resume",
+        content=objective,
+        state_updates={"long_document_mode": True},
+        state_mutations={
+            "long_document_mode": True,
+            "long_document_job_started": True,
+        },
     )
 
 

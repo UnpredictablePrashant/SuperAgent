@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useApp } from '../contexts/AppContext'
 
 function formatBytes(value) {
@@ -18,11 +18,14 @@ function formatBytes(value) {
 export default function ModelManager() {
   const { state } = useApp()
   const [ollamaModels, setOllamaModels] = useState([])
+  const [guide, setGuide] = useState(null)
   const [loadingModels, setLoadingModels] = useState(true)
+  const [loadingGuide, setLoadingGuide] = useState(true)
   const [pullTag, setPullTag] = useState('')
   const [pullState, setPullState] = useState(null)
   const [pulling, setPulling] = useState(false)
-  const [pullStatus, setPullStatus] = useState(null)   // {ok, msg} or null
+  const [deletingModel, setDeletingModel] = useState('')
+  const [pullStatus, setPullStatus] = useState(null)
   const backendUrl = state.backendUrl || 'http://127.0.0.1:2151'
 
   const fetchModels = async () => {
@@ -31,11 +34,26 @@ export default function ModelManager() {
       const r = await fetch(`${backendUrl}/api/models/ollama`)
       if (r.ok) {
         const data = await r.json()
-        setOllamaModels(data.models || [])
+        setOllamaModels(Array.isArray(data.models) ? data.models : [])
       }
     } catch (_) {
     } finally {
       setLoadingModels(false)
+    }
+  }
+
+  const fetchGuide = async (force = false) => {
+    setLoadingGuide(true)
+    try {
+      const suffix = force ? '?refresh=1' : ''
+      const r = await fetch(`${backendUrl}/api/models/guide${suffix}`)
+      if (r.ok) {
+        const data = await r.json()
+        setGuide(data || null)
+      }
+    } catch (_) {
+    } finally {
+      setLoadingGuide(false)
     }
   }
 
@@ -49,12 +67,14 @@ export default function ModelManager() {
       setPulling(live)
       if (!live && data.status === 'completed') {
         fetchModels()
+        fetchGuide(true)
       }
     } catch (_) {}
   }
 
   useEffect(() => {
     fetchModels()
+    fetchGuide(false)
     fetchPullStatus()
   }, [backendUrl])
 
@@ -64,9 +84,15 @@ export default function ModelManager() {
     return () => clearInterval(timer)
   }, [backendUrl, pullState?.active, pullState?.status])
 
-  const pullModel = async () => {
-    if (!pullTag.trim() || pulling) return
-    const model = pullTag.trim()
+  useEffect(() => {
+    const timer = setInterval(() => { fetchGuide(true) }, 10 * 60 * 1000)
+    return () => clearInterval(timer)
+  }, [backendUrl])
+
+  const pullModelWithValue = async (modelName) => {
+    const model = String(modelName || '').trim()
+    if (!model || pulling) return
+    setPullTag(model)
     setPullStatus(null)
     try {
       const r = await fetch(`${backendUrl}/api/models/ollama/pull`, {
@@ -79,12 +105,17 @@ export default function ModelManager() {
         setPulling(true)
         setPullState(data.pull || null)
         setPullStatus(null)
+        fetchGuide(true)
       } else {
         setPullStatus({ ok: false, msg: data.error || `Pull failed (${r.status})` })
       }
     } catch (e) {
       setPullStatus({ ok: false, msg: `Network error: ${e.message}` })
     }
+  }
+
+  const pullModel = async () => {
+    await pullModelWithValue(pullTag)
   }
 
   const cancelPull = async () => {
@@ -106,19 +137,88 @@ export default function ModelManager() {
     }
   }
 
+  const deleteModel = async (modelName) => {
+    const model = String(modelName || '').trim()
+    if (!model || deletingModel) return
+    setDeletingModel(model)
+    setPullStatus(null)
+    try {
+      const r = await fetch(`${backendUrl}/api/models/ollama/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      })
+      const data = await r.json().catch(() => ({}))
+      if (r.ok && data.ok) {
+        setPullStatus({ ok: true, msg: `Deleted ${model}` })
+        fetchModels()
+        fetchGuide(true)
+      } else {
+        setPullStatus({ ok: false, msg: data.detail || data.error || `Delete failed (${r.status})` })
+      }
+    } catch (e) {
+      setPullStatus({ ok: false, msg: `Network error: ${e.message}` })
+    } finally {
+      setDeletingModel('')
+    }
+  }
+
   const activePull = pullState && (pullState.active || ['completed', 'failed', 'cancelled'].includes(pullState.status)) ? pullState : null
   const progressPercent = Number(activePull?.percent || 0)
   const hasDeterminateProgress = Number(activePull?.total || 0) > 0
   const progressWidth = hasDeterminateProgress ? `${Math.max(0, Math.min(100, progressPercent))}%` : '35%'
+  const recommendations = Array.isArray(guide?.recommendations) ? guide.recommendations : []
+  const cloudUsage = Array.isArray(guide?.cloud_usage) ? guide.cloud_usage : []
+  const rankings = Array.isArray(guide?.openrouter_rankings) ? guide.openrouter_rankings.slice(0, 5) : []
 
   return (
     <div className="model-manager">
+      <div className="sidebar-label">RECOMMENDED NEXT</div>
+      {loadingGuide && <div className="sidebar-empty">Building model guide…</div>}
+      {!loadingGuide && recommendations.length > 0 && (
+        <div className="model-reco-grid">
+          {recommendations.slice(0, 6).map(item => {
+            const isPulled = item.status === 'pulled'
+            const isCloud = item.access === 'cloud'
+            return (
+              <div key={item.id} className={`model-reco-card ${item.fits_system ? '' : 'model-reco-card--dim'}`}>
+                <div className="model-reco-top">
+                  <div>
+                    <div className="model-reco-name">{item.label}</div>
+                    <div className="model-reco-meta">
+                      <span className={`model-mini-chip ${isCloud ? 'cloud' : 'local'}`}>{isCloud ? 'cloud' : 'local'}</span>
+                      <span className="model-mini-chip">{item.speed}</span>
+                      <span className="model-mini-chip">{item.cost}</span>
+                    </div>
+                  </div>
+                  <div className="model-reco-size">{isCloud ? 'No local GB' : `${Number(item.size_gb || 0).toFixed(1)} GB`}</div>
+                </div>
+                <div className="model-reco-fit">{item.fit_label}</div>
+                <div className="model-reco-copy">{Array.isArray(item.best_for) ? item.best_for.join(' • ') : ''}</div>
+                <div className="model-reco-copy">{Array.isArray(item.agent_fit) ? `Agents: ${item.agent_fit.join(' • ')}` : ''}</div>
+                <div className="model-reco-note">{item.notes}</div>
+                <div className="model-reco-actions">
+                  <button className="btn-accent" disabled={pulling || isPulled} onClick={() => pullModelWithValue(item.id)}>
+                    {isPulled ? 'Pulled' : isCloud ? 'Add Alias' : 'Pull'}
+                  </button>
+                  {isPulled && (
+                    <button className="btn-danger" disabled={deletingModel === item.id} onClick={() => deleteModel(item.id)}>
+                      {deletingModel === item.id ? 'Deleting…' : 'Delete'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
       <div className="sidebar-label">OLLAMA MODELS</div>
 
       <div className="model-pull-row">
         <input
           className="model-input"
-          placeholder="e.g. llama3.2, mistral, deepseek-r1"
+          placeholder="e.g. llama3.2, mistral, deepseek-r1, kimi-k2.5:cloud"
           value={pullTag}
           onChange={e => { setPullTag(e.target.value); setPullStatus(null) }}
           onKeyDown={e => e.key === 'Enter' && pullModel()}
@@ -181,12 +281,53 @@ export default function ModelManager() {
       {!loadingModels && ollamaModels.length === 0 && !pulling && (
         <div className="sidebar-empty">No Ollama models found. Pull one above or start Ollama.</div>
       )}
-      {!loadingModels && ollamaModels.map(m => (
-        <div key={m.name || m} className="model-item">
-          <span className="model-name">{m.name || m}</span>
-          <span className="model-size">{m.size ? `${(m.size / 1e9).toFixed(1)} GB` : ''}</span>
-        </div>
-      ))}
+      {!loadingModels && ollamaModels.map(m => {
+        const name = m.name || m
+        const isCloud = String(name).includes(':cloud')
+        return (
+          <div key={name} className="model-item">
+            <div className="model-item-main">
+              <span className="model-name">{name}</span>
+              <span className={`model-mini-chip ${isCloud ? 'cloud' : 'local'}`}>{isCloud ? 'cloud alias' : 'local'}</span>
+            </div>
+            <div className="model-item-actions">
+              <span className="model-size">{m.size ? `${(m.size / 1e9).toFixed(1)} GB` : ''}</span>
+              <button className="btn-danger" disabled={deletingModel === name} onClick={() => deleteModel(name)}>
+                {deletingModel === name ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        )
+      })}
+
+      {cloudUsage.length > 0 && (
+        <>
+          <div className="sidebar-label" style={{ marginTop: 16 }}>CLOUD MODELS</div>
+          <div className="model-cloud-guide">
+            {cloudUsage.map(item => (
+              <div key={item.title} className="model-cloud-card">
+                <div className="model-cloud-title">{item.title}</div>
+                <div className="model-cloud-body">{item.body}</div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {rankings.length > 0 && (
+        <>
+          <div className="sidebar-label" style={{ marginTop: 16 }}>OPENROUTER TOP</div>
+          <div className="model-ranking-list">
+            {rankings.map(item => (
+              <div key={`${item.rank}:${item.name}`} className="model-ranking-row">
+                <span className="model-ranking-rank">#{item.rank}</span>
+                <span className="model-ranking-name">{item.name}</span>
+                <span className="model-ranking-meta">{item.tokens} • {item.share}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <div className="sidebar-label" style={{ marginTop: 16 }}>CONFIGURED PROVIDERS</div>
       <div className="model-providers">

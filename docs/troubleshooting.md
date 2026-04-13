@@ -96,6 +96,19 @@ If a security feature is missing, confirm both:
 - scope and authorization flags are present
 - local tooling is installed or auto-install is enabled
 
+For local one-command setup and preflight checks, use:
+
+```bash
+./scripts/setup-security-tools.sh --auto-install
+./scripts/preflight-security-tools.sh
+```
+
+Then set authorization in `config/security-tools.env` and run:
+
+```bash
+./scripts/scan-website.sh https://example.com
+```
+
 ## Communication Agent Dispatch Loop / Authorization Error
 
 If a run ends with:

@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: bootstrap install uninstall compile unit smoke docs-check docker-smoke test verify ci docker-build
+.PHONY: bootstrap install uninstall compile unit smoke docs-check docker-smoke test verify ci docker-build security-setup security-preflight security-scan
 
 bootstrap:
 	$(PYTHON) scripts/bootstrap_local_state.py
@@ -38,3 +38,13 @@ verify:
 
 ci:
 	$(PYTHON) scripts/verify.py compile unit smoke docs docker --strict-docker
+
+security-setup:
+	./scripts/setup-security-tools.sh
+
+security-preflight:
+	./scripts/preflight-security-tools.sh
+
+security-scan:
+	@if [ -z "$(TARGET)" ]; then echo "Usage: make security-scan TARGET=https://example.com"; exit 1; fi
+	./scripts/scan-website.sh "$(TARGET)"

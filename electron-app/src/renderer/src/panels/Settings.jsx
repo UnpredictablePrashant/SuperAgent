@@ -15,6 +15,8 @@ export default function Settings() {
   const [tab, setTab]       = useState('general')
   const [settings, setSettings] = useState({})
   const [saved, setSaved]   = useState(false)
+  const [machineStatus, setMachineStatus] = useState(null)
+  const [machineStatusLoading, setMachineStatusLoading] = useState(false)
   const api     = window.kendrAPI
   const apiBase = state.backendUrl || 'http://127.0.0.1:2151'
   const providerSettingKeys = ['anthropicKey', 'openaiKey', 'openaiOrgId', 'googleKey', 'xaiKey']
@@ -23,6 +25,49 @@ export default function Settings() {
   useEffect(() => {
     api?.settings.getAll().then(s => setSettings(s || {}))
   }, [])
+
+  const syncWorkingDirectory = (state.projectRoot || state.settings?.projectRoot || settings.projectRoot || '').trim()
+
+  const fetchMachineStatus = async () => {
+    setMachineStatusLoading(true)
+    try {
+      const q = syncWorkingDirectory ? `?working_directory=${encodeURIComponent(syncWorkingDirectory)}` : ''
+      const resp = await fetch(`${apiBase}/api/machine/status${q}`)
+      if (!resp.ok) return
+      const data = await resp.json().catch(() => ({}))
+      const status = data?.status && typeof data.status === 'object' ? data.status : null
+      if (status) setMachineStatus(status)
+    } catch (_) {
+    } finally {
+      setMachineStatusLoading(false)
+    }
+  }
+
+  const refreshMachineSync = async () => {
+    setMachineStatusLoading(true)
+    try {
+      const resp = await fetch(`${apiBase}/api/machine/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scope: 'machine',
+          working_directory: syncWorkingDirectory || undefined,
+        }),
+      })
+      const data = await resp.json().catch(() => ({}))
+      if (!resp.ok) return
+      const status = data?.status && typeof data.status === 'object' ? data.status : null
+      if (status) setMachineStatus(status)
+    } catch (_) {
+    } finally {
+      setMachineStatusLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (tab !== 'general') return
+    fetchMachineStatus()
+  }, [tab, apiBase, syncWorkingDirectory])
 
   const update = (key, value) => setSettings(s => ({ ...s, [key]: value }))
 
@@ -98,6 +143,52 @@ export default function Settings() {
               <Row label="Display Name"><input className="st-input" value={s.gitName || ''} onChange={e => update('gitName', e.target.value)} /></Row>
               <Row label="Email"><input className="st-input" value={s.gitEmail || ''} onChange={e => update('gitEmail', e.target.value)} /></Row>
               <Row label="GitHub PAT"><input className="st-input" type="password" value={s.githubPat || ''} onChange={e => update('githubPat', e.target.value)} placeholder="ghp_…" /></Row>
+            </Section>
+
+            <Section title="Machine Sync">
+              <Row label="Auto Sync Machine Index">
+                <input
+                  type="checkbox"
+                  className="st-check"
+                  checked={!!s.machineAutoSyncEnabled}
+                  onChange={e => update('machineAutoSyncEnabled', e.target.checked)}
+                />
+              </Row>
+              <Row label="Auto Sync Every (days)">
+                <input
+                  className="st-input st-input--sm"
+                  type="number"
+                  min="1"
+                  max="30"
+                  value={Number(s.machineAutoSyncIntervalDays || 7)}
+                  onChange={e => update('machineAutoSyncIntervalDays', Math.max(1, Math.min(30, Number(e.target.value || 7))))}
+                />
+              </Row>
+              <div className="st-actions">
+                <button className="st-btn" onClick={refreshMachineSync} disabled={machineStatusLoading}>
+                  {machineStatusLoading ? 'Refreshing…' : 'Refresh Machine Index'}
+                </button>
+              </div>
+              <div className="st-info-banner">
+                {machineStatus?.software_inventory_last_synced
+                  ? `Last machine sync: ${new Date(machineStatus.software_inventory_last_synced).toLocaleString()}`
+                  : 'No machine sync snapshot yet. Run machine sync once.'}
+              </div>
+              <div className="st-machine-apps">
+                {(Array.isArray(machineStatus?.discovered_apps) ? machineStatus.discovered_apps : []).length === 0 ? (
+                  <div className="st-machine-empty">No discovered apps yet.</div>
+                ) : (
+                  (machineStatus.discovered_apps || []).map((app) => (
+                    <div key={`${app.name}-${app.path || ''}`} className="st-machine-app">
+                      <div className="st-machine-app-name">{app.name}</div>
+                      <div className="st-machine-app-meta">
+                        {app.version || 'version unknown'}
+                        {app.path ? ` · ${app.path}` : ''}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </Section>
           </>
         )}

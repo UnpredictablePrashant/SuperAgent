@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useApp } from '../contexts/AppContext'
 import ChatPanel from './ChatPanel'
+import { resolveAgentCapability } from '../lib/modelSelection'
 
 // ─── Cloud model catalogue ────────────────────────────────────────────────────
 const PROVIDER_ORDER = ['anthropic', 'openai', 'google', 'xai']
@@ -260,6 +261,23 @@ function ModelPicker({ ollamaModels, onRefreshOllama, providerStatuses, getProvi
     return Array.isArray(status.model_badges?.[name]) ? status.model_badges[name] : []
   }
 
+  const isAgentCapable = (provider, modelName) => {
+    const status = providerStatuses[provider] || {}
+    const details = Array.isArray(status.selectable_model_details) ? status.selectable_model_details : []
+    const matched = details.find(item => String(item?.name || '') === String(modelName || ''))
+    if (matched && typeof matched.agent_capable === 'boolean') return matched.agent_capable
+    if (provider === 'ollama') return false
+    if (String(status.model || '') === String(modelName || '') && typeof status.agent_capable === 'boolean') return status.agent_capable
+    return false
+  }
+
+  useEffect(() => {
+    if (!state.selectedModel) return
+    if (!resolveAgentCapability(state.selectedModel, { providers: Object.values(providerStatuses) })) {
+      dispatch({ type: 'SET_MODEL', model: null })
+    }
+  }, [dispatch, providerStatuses, state.selectedModel])
+
   return (
     <div className="mp-root" ref={rootRef}>
       <button className={`mp-trigger ${selectedProviderLost ? 'mp-trigger--warn' : ''}`} onClick={() => setOpen(o => !o)}>
@@ -304,20 +322,28 @@ function ModelPicker({ ollamaModels, onRefreshOllama, providerStatuses, getProvi
                   {ui.kind === 'error'    && <span className="mp-key-badge error">error</span>}
                 </div>
                 {models.map(m => (
+                  (() => {
+                    const modelName = String(m.id || '').replace(`${provider}/`, '')
+                    const agentCapable = isAgentCapable(provider, modelName)
+                    const disabled = !isConfigured || !agentCapable
+                    return (
                   <button
                     key={m.id}
-                    className={`mp-option ${selected === m.id ? 'active' : ''} ${!isConfigured ? 'mp-option--dim' : ''}`}
-                    onClick={() => select(m.id, !isConfigured)}
-                    title={!isConfigured ? ui.title : m.label}
-                    disabled={!isConfigured}
+                    className={`mp-option ${selected === m.id ? 'active' : ''} ${disabled ? 'mp-option--dim' : ''}`}
+                    onClick={() => select(m.id, disabled)}
+                    title={!isConfigured ? ui.title : !agentCapable ? 'No agent capability: tool/function calls unavailable.' : m.label}
+                    disabled={disabled}
                   >
                     <span className="mp-option-name">{m.label}</span>
                     {getModelBadges(provider, m.id).map(badge => (
                       <span key={`${m.id}:${badge}`} className={`mp-model-badge ${badge}`}>{badge}</span>
                     ))}
-                    {!isConfigured && <span className="mp-lock">🔒</span>}
-                    {selected === m.id && isConfigured && <span className="mp-option-check">✓</span>}
+                    <span className={`mp-model-badge ${agentCapable ? 'agent' : 'noagent'}`}>{agentCapable ? 'agent' : 'no-agent'}</span>
+                    {disabled && <span className="mp-lock">🔒</span>}
+                    {selected === m.id && !disabled && <span className="mp-option-check">✓</span>}
                   </button>
+                    )
+                  })()
                 ))}
                 {!isConfigured && (
                   <button
@@ -350,15 +376,19 @@ function ModelPicker({ ollamaModels, onRefreshOllama, providerStatuses, getProvi
             ) : (
               ollamaModels.map(m => {
                 const id = `ollama/${m.name || m}`
+                const disabled = true
                 return (
                   <button
                     key={id}
-                    className={`mp-option ${selected === id ? 'active' : ''}`}
-                    onClick={() => select(id, false)}
+                    className={`mp-option ${selected === id ? 'active' : ''} mp-option--dim`}
+                    onClick={() => select(id, disabled)}
+                    title="Local models disabled for agent mode: no supported agent capability."
+                    disabled={disabled}
                   >
                     <span className="mp-option-name">{m.name || m}</span>
+                    <span className="mp-model-badge noagent">no-agent</span>
                     {m.size && <span className="mp-option-size">{(m.size / 1e9).toFixed(1)} GB</span>}
-                    {selected === id && <span className="mp-option-check">✓</span>}
+                    <span className="mp-lock">🔒</span>
                   </button>
                 )
               })

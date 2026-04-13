@@ -5,6 +5,8 @@ import shutil
 import subprocess
 
 from kendr.execution_trace import append_execution_event, now_iso
+from kendr.machine_index import machine_sync_status, run_file_index_sync, run_software_inventory_sync
+from kendr.software_inventory import update_inventory_from_command_result
 from kendr.workflow_contract import build_approval_request
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.privileged_control import (
@@ -120,6 +122,143 @@ def _resolve_shell(target_os: str, requested_shell: str | None = None) -> tuple[
             return shell_path, ["-lc"], shell_name
 
     return None, [], requested_shell or target_os
+
+
+def _shell_plan_rules(host_os: str, shell_name: str) -> str:
+    shell = str(shell_name or "").lower()
+    if host_os == "windows" and shell in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+        return (
+            "- Use PowerShell command syntax only.\n"
+            "- Do NOT use bash syntax like `which`, `command -v`, `||`, `&&`, subshells, `/dev/null`, or backtick-wrapped commands.\n"
+            "- Prefer `Get-Command`, `Get-Process`, `Test-Path`, `Start-Process`, `Stop-Process`, `Out-Null`, and `$null` redirection.\n"
+            "- Do NOT hardcode `C:\\Program Files\\...` paths unless there is no safer option.\n"
+            "- If an app may need manual GUI startup or installation, emit a clear prerequisite step instead of an invalid shell trick."
+        )
+    if host_os == "windows" and shell in {"cmd", "cmd.exe"}:
+        return (
+            "- Use cmd.exe syntax only.\n"
+            "- Do NOT use bash syntax, PowerShell cmdlets, or Unix paths.\n"
+            "- Prefer `where`, `if exist`, `start`, `sc query`, and simple `&&` chaining only when valid for cmd.exe."
+        )
+    return (
+        "- Use POSIX shell syntax only.\n"
+        "- Prefer `command -v`, `test`, `mkdir -p`, and plain shell redirects.\n"
+        "- Do NOT emit PowerShell cmdlets or Windows-only paths."
+    )
+
+
+def _parse_shell_plan_steps(raw: str) -> list[dict]:
+    steps = []
+    current: dict = {}
+    for line in str(raw or "").splitlines():
+        line = line.strip()
+        if line.upper().startswith("STEP ") and line.upper().replace("STEP ", "").strip().isdigit():
+            if current.get("command"):
+                steps.append(current)
+            current = {"description": "", "command": "", "optional": False, "check": ""}
+        elif line.lower().startswith("description:"):
+            current["description"] = line.split(":", 1)[1].strip()
+        elif line.lower().startswith("command:"):
+            current["command"] = line.split(":", 1)[1].strip()
+        elif line.lower().startswith("optional:"):
+            current["optional"] = line.split(":", 1)[1].strip().lower() in ("yes", "true", "1")
+        elif line.lower().startswith("check:"):
+            current["check"] = line.split(":", 1)[1].strip()
+    if current.get("command"):
+        steps.append(current)
+    return steps
+
+
+def _shell_step_issue(step: dict, host_os: str, shell_name: str) -> str:
+    shell = str(shell_name or "").lower()
+    command = str(step.get("command", "")).strip()
+    check = str(step.get("check", "")).strip()
+    joined = f"{command}\n{check}".lower()
+    if host_os == "windows" and shell in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+        if (command.startswith("`") and command.endswith("`")) or (check.startswith("`") and check.endswith("`")):
+            return "PowerShell command wrapped in backticks."
+        bad_markers = {
+            "||": "PowerShell plan uses bash `||` operator.",
+            "&&": "PowerShell plan uses `&&` chaining that is not safe here.",
+            "/dev/null": "PowerShell plan uses Unix `/dev/null` path.",
+            "command -v ": "PowerShell plan uses Unix `command -v`.",
+            "which ": "PowerShell plan uses Unix `which`.",
+        }
+        for marker, reason in bad_markers.items():
+            if marker in joined:
+                return reason
+    return ""
+
+
+def _plan_shell_steps(goal: str, host_os: str, shell_name: str = "", known_tools: str = "") -> list[dict]:
+    """Ask the LLM to decompose a goal into ordered shell steps."""
+    prompt = f"""
+You are a shell automation planner. The user wants to achieve this goal on a {host_os} system.
+Selected shell: {shell_name or host_os}
+
+GOAL: {goal}
+
+Known environment hints:
+{known_tools or "No extra tool inventory available."}
+
+Break this down into the minimum ordered shell steps needed.
+For each step, provide:
+- A short description of what the step does
+- The exact shell command to run
+- Whether the step is optional (can be skipped on failure)
+- A check command that can verify preconditions (use empty string if none needed)
+
+IMPORTANT RULES:
+- Use package managers appropriate for {host_os} (apt-get for Linux, brew for macOS, winget/choco/scoop for Windows only when appropriate).
+- Prefer checking if tools exist before installing.
+- Keep commands simple and idempotent where possible.
+- For long-running processes (servers), use detached/background flags when valid.
+- If an app may not exist or may need manual GUI startup, include a clear prerequisite step instead of guessing invalid commands.
+- Maximum 8 steps. Combine related actions.
+
+SHELL-SPECIFIC RULES:
+{_shell_plan_rules(host_os, shell_name)}
+
+Return EXACTLY this format, one step per block:
+STEP 1
+Description: <what this step does>
+Command: <exact shell command>
+Optional: yes|no
+Check: <command to verify precondition, or empty>
+
+STEP 2
+...
+"""
+    response = llm.invoke(prompt)
+    raw = normalize_llm_text(response.content if hasattr(response, "content") else response).strip()
+    steps = _parse_shell_plan_steps(raw)
+
+    issues = [f"Step {idx}: {issue}" for idx, step in enumerate(steps, 1) if (issue := _shell_step_issue(step, host_os, shell_name))]
+    if not issues:
+        return steps
+
+    repair_prompt = f"""
+Rewrite this shell plan for {host_os} using only valid syntax for shell `{shell_name or host_os}`.
+Do not explain. Return only the exact step format.
+
+GOAL: {goal}
+
+Environment hints:
+{known_tools or "No extra tool inventory available."}
+
+Problems to fix:
+{chr(10).join(issues)}
+
+Shell rules:
+{_shell_plan_rules(host_os, shell_name)}
+
+Existing plan:
+{raw}
+"""
+    repair = llm.invoke(repair_prompt)
+    repaired_raw = normalize_llm_text(repair.content if hasattr(repair, "content") else repair).strip()
+    repaired_steps = _parse_shell_plan_steps(repaired_raw)
+    return repaired_steps or steps
 
 
 def _build_command_from_request(user_query: str, target_os: str) -> tuple[str, str, str, int]:
@@ -261,6 +400,67 @@ def _publish_os_result(state: dict, report: str, call_number: int) -> dict:
         recipients=["orchestrator_agent", "worker_agent"],
     )
 
+
+def _record_command_visibility(state: dict, command: str, working_directory: str) -> None:
+    redacted = redact_sensitive_text(command)
+    state["last_shell_command"] = redacted
+    history = state.get("recent_shell_commands", [])
+    if not isinstance(history, list):
+        history = []
+    history.append(
+        {
+            "command": redacted,
+            "working_directory": working_directory,
+            "timestamp": now_iso(),
+        }
+    )
+    state["recent_shell_commands"] = history[-40:]
+
+
+def _run_machine_sync(state: dict, *, working_directory: str, scope: str) -> str:
+    lines = ["Machine sync started."]
+    software_result = {}
+    file_result = {}
+
+    if scope in {"machine", "software"}:
+        software_result = run_software_inventory_sync(working_directory)
+        state["software_inventory"] = dict(software_result.get("software", {}) or {})
+        state["software_inventory_last_synced"] = str(software_result.get("software_inventory_last_synced", "") or "")
+        state["software_inventory_stale"] = False
+        lines.append(
+            f"Software scan: installed {int(software_result.get('installed_count', 0) or 0)} tools."
+        )
+
+    if scope in {"machine", "files"}:
+        roots = state.get("local_drive_paths", [])
+        if not isinstance(roots, list):
+            roots = []
+        file_result = run_file_index_sync(
+            working_directory=working_directory,
+            roots=roots or [working_directory],
+            max_files=int(state.get("machine_index_max_files", 250000) or 250000),
+        )
+        state["file_index_last_synced"] = str(file_result.get("file_index_last_synced", "") or "")
+        state["indexed_files"] = int(file_result.get("scanned_files", 0) or 0)
+        state["recent_file_changes_24h"] = int(
+            machine_sync_status(working_directory).get("recent_changes_24h", 0) or 0
+        )
+        state["machine_sync_stale"] = False
+        lines.append(
+            "File scan: "
+            f"scanned={int(file_result.get('scanned_files', 0) or 0)}, "
+            f"created={int(file_result.get('created', 0) or 0)}, "
+            f"modified={int(file_result.get('modified', 0) or 0)}, "
+            f"deleted={int(file_result.get('deleted', 0) or 0)}, "
+            f"errors={int(file_result.get('errors', 0) or 0)}."
+        )
+
+    status = machine_sync_status(working_directory)
+    lines.append(f"Indexed files now: {int(status.get('indexed_files', 0) or 0)}")
+    lines.append(f"Recent file changes (24h): {int(status.get('recent_changes_24h', 0) or 0)}")
+    lines.append("Machine sync complete.")
+    return "\n".join(lines)
+
 def _set_shell_approval_request(
     state: dict,
     *,
@@ -337,6 +537,22 @@ def os_agent(state):
             target_os,
         )
 
+    resolved_working_directory = os.path.abspath(working_directory)
+    if str(command).strip() == "__KENDR_SYNC_MACHINE__":
+        sync_scope = str(state.get("machine_sync_scope", "machine") or "machine").strip().lower()
+        sync_scope = sync_scope if sync_scope in {"machine", "software", "files"} else "machine"
+        _record_command_visibility(state, command, resolved_working_directory)
+        report = _run_machine_sync(state, working_directory=resolved_working_directory, scope=sync_scope)
+        state["os_command"] = command
+        state["os_shell"] = "internal"
+        state["os_host"] = host_os
+        state["os_target"] = target_os
+        state["os_result"] = report
+        state["os_success"] = True
+        state["os_return_code"] = 0
+        state["draft_response"] = report
+        return _publish_os_result(state, report, state["os_agent_calls"])
+
     shell_path, shell_args, shell_name = _resolve_shell(target_os, requested_shell)
     if not shell_path:
         error_message = f"No supported shell was found for target OS '{target_os}'."
@@ -359,49 +575,92 @@ def os_agent(state):
 
     command = _unwrap_nested_shell_command(command, shell_name)
 
-    resolved_working_directory = os.path.abspath(working_directory)
     classification = classify_command(command)
+    _record_command_visibility(state, command, resolved_working_directory)
     try:
         ensure_command_allowed(command, resolved_working_directory, privileged_policy)
     except Exception as exc:
         reason = str(exc)
-        report = _format_execution_report(
-            host_os,
-            target_os,
-            shell_name,
-            command,
-            resolved_working_directory,
-            timeout_seconds,
-            thought=thought,
-            classification=classification,
-            error_message=f"policy_blocked: {reason}",
-        )
-        state["os_result"] = report
-        state["os_success"] = False
-        state["os_return_code"] = None
-        state["draft_response"] = report
-        append_privileged_audit_event(
-            state,
-            actor="os_agent",
-            action="command",
-            status="blocked",
-            detail={
-                "command": redact_sensitive_text(command),
-                "working_directory": resolved_working_directory,
-                "reason": reason,
-            },
-        )
-        if "approval_required" in reason:
-            _set_shell_approval_request(
-                state,
-                scope="shell_command",
-                command=command,
-                working_directory=resolved_working_directory,
-                reason=reason,
+        reason_lc = reason.lower()
+        # Safe fallback for read-only checks: retry once in a known allowed path.
+        # This prevents deterministic loops when LLM picks a blocked cwd (e.g., drive root).
+        if (
+            "outside the allowed path scope" in reason_lc
+            and not bool(classification.get("mutating"))
+            and not bool(classification.get("destructive"))
+            and not bool(classification.get("root_requested"))
+        ):
+            fallback_candidates: list[str] = []
+            preferred = str(state.get("working_directory", "") or "").strip()
+            if preferred:
+                fallback_candidates.append(preferred)
+            for path in privileged_policy.get("allowed_paths", []) or []:
+                if str(path or "").strip():
+                    fallback_candidates.append(str(path))
+            for candidate in fallback_candidates:
+                candidate_abs = os.path.abspath(candidate)
+                if candidate_abs == resolved_working_directory:
+                    continue
+                try:
+                    ensure_command_allowed(command, candidate_abs, privileged_policy)
+                    log_task_update(
+                        "OS Agent",
+                        f"Working directory '{resolved_working_directory}' blocked by policy; retrying in allowed path '{candidate_abs}'.",
+                    )
+                    resolved_working_directory = candidate_abs
+                    _record_command_visibility(state, command, resolved_working_directory)
+                    reason = ""
+                    break
+                except Exception:
+                    continue
+        if not reason:
+            pass
+        else:
+            report = _format_execution_report(
+                host_os,
+                target_os,
+                shell_name,
+                command,
+                resolved_working_directory,
+                timeout_seconds,
+                thought=thought,
                 classification=classification,
+                error_message=f"policy_blocked: {reason}",
             )
-        log_task_update("OS Agent", "Command blocked by privileged policy.", report)
-        return _publish_os_result(state, report, state["os_agent_calls"])
+            state["os_result"] = report
+            state["os_success"] = False
+            state["os_return_code"] = None
+            state["draft_response"] = report
+            state["last_error"] = f"policy_blocked: {reason}"
+            append_privileged_audit_event(
+                state,
+                actor="os_agent",
+                action="command",
+                status="blocked",
+                detail={
+                    "command": redact_sensitive_text(command),
+                    "working_directory": resolved_working_directory,
+                    "reason": reason,
+                },
+            )
+            if "approval_required" in reason:
+                _set_shell_approval_request(
+                    state,
+                    scope="shell_command",
+                    command=command,
+                    working_directory=resolved_working_directory,
+                    reason=reason,
+                    classification=classification,
+                )
+            elif "outside the allowed path scope" in reason.lower():
+                state["deterministic_failure"] = {
+                    "agent": "os_agent",
+                    "kind": "policy_blocked_outside_scope",
+                    "reason": reason,
+                    "working_directory": resolved_working_directory,
+                }
+            log_task_update("OS Agent", "Command blocked by privileged policy.", report)
+            return _publish_os_result(state, report, state["os_agent_calls"])
 
     backup_path = ""
     if privileged_policy.get("enable_backup", True) and classification.get("mutating", False):
@@ -554,70 +813,19 @@ def os_agent(state):
     state["os_target"] = target_os
     state["os_result"] = report
     state["draft_response"] = report
+    if completed is not None:
+        snapshot = update_inventory_from_command_result(
+            working_directory=resolved_working_directory,
+            command=command,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            return_code=completed.returncode,
+        )
+        state["software_inventory"] = dict(snapshot.get("software", {}) or {})
+        state["software_inventory_last_synced"] = str(snapshot.get("last_synced_at", "") or "")
+        state["software_inventory_stale"] = False
 
     return _publish_os_result(state, report, state["os_agent_calls"])
-
-
-# ---------------------------------------------------------------------------
-# shell_plan_agent — multi-step shell automation
-# ---------------------------------------------------------------------------
-
-def _plan_shell_steps(goal: str, host_os: str) -> list[dict]:
-    """Ask the LLM to decompose a goal into ordered shell steps."""
-    prompt = f"""
-You are a shell automation planner. The user wants to achieve this goal on a {host_os} system:
-
-GOAL: {goal}
-
-Break this down into the minimum ordered shell steps needed.
-For each step, provide:
-- A short description of what the step does
-- The exact shell command to run
-- Whether the step is optional (can be skipped on failure)
-- A check command that can verify preconditions (use empty string if none needed)
-
-IMPORTANT RULES:
-- Use package managers appropriate for {host_os} (apt-get for Linux, brew for macOS)
-- Prefer checking if tools exist before installing (e.g., "which docker || apt-get install docker.io -y")
-- For Docker: combine check + install in one command using || operator
-- For services: check status before starting
-- Keep commands simple and idempotent where possible
-- For long-running processes (servers), use -d (daemon/background) flags
-- Maximum 8 steps. Combine related actions.
-
-Return EXACTLY this format, one step per block:
-STEP 1
-Description: <what this step does>
-Command: <exact shell command>
-Optional: yes|no
-Check: <command to verify precondition, or empty>
-
-STEP 2
-...
-"""
-    response = llm.invoke(prompt)
-    raw = normalize_llm_text(response.content if hasattr(response, "content") else response).strip()
-
-    steps = []
-    current: dict = {}
-    for line in raw.splitlines():
-        line = line.strip()
-        if line.upper().startswith("STEP ") and line.upper().replace("STEP ", "").strip().isdigit():
-            if current.get("command"):
-                steps.append(current)
-            current = {"description": "", "command": "", "optional": False, "check": ""}
-        elif line.lower().startswith("description:"):
-            current["description"] = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("command:"):
-            current["command"] = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("optional:"):
-            current["optional"] = line.split(":", 1)[1].strip().lower() in ("yes", "true", "1")
-        elif line.lower().startswith("check:"):
-            current["check"] = line.split(":", 1)[1].strip()
-    if current.get("command"):
-        steps.append(current)
-
-    return steps
 
 
 def _run_step(
@@ -644,6 +852,86 @@ def _run_step(
         return -1, "", str(exc)
 
 
+def _build_shell_plan_checklist(steps: list[dict]) -> list[dict]:
+    checklist = []
+    for idx, step in enumerate(steps, 1):
+        description = str(step.get("description", f"Step {idx}")).strip() or f"Step {idx}"
+        checklist.append(
+            {
+                "step": idx,
+                "title": description,
+                "description": description,
+                "command": str(step.get("command", "")).strip(),
+                "check_command": str(step.get("check", "")).strip(),
+                "optional": bool(step.get("optional", False)),
+                "status": "pending",
+                "done": False,
+                "detail": "",
+                "stdout": "",
+                "stderr": "",
+                "reason": "",
+                "return_code": None,
+            }
+        )
+    return checklist
+
+
+def _update_shell_plan_step(checklist: list[dict], step_number: int, **patch) -> None:
+    idx = max(0, int(step_number) - 1)
+    if idx >= len(checklist):
+        return
+    current = dict(checklist[idx])
+    current.update(patch)
+    status = str(current.get("status", "") or "").strip().lower()
+    current["done"] = status in {"completed", "skipped"}
+    checklist[idx] = current
+
+
+def _shell_tool_hints(state: dict, goal: str, host_os: str) -> str:
+    hints: list[str] = []
+    inventory = state.get("software_inventory")
+    if isinstance(inventory, dict) and inventory:
+        installed = [name for name, value in inventory.items() if str(value or "").strip()]
+        if installed:
+            hints.append("Known installed tools from inventory: " + ", ".join(sorted(installed)[:25]))
+    if host_os == "windows":
+        for tool in ("docker", "git", "python", "node", "npm", "curl", "winget", "choco"):
+            path = shutil.which(tool)
+            if path:
+                hints.append(f"{tool} available at {path}")
+    query = str(goal or "").lower()
+    if "docker" in query:
+        hints.append("If Docker CLI exists but engine is not running, prefer a prerequisite/manual-start step over repeating pull/run failures.")
+    return "\n".join(hints)
+
+
+def _summarize_shell_plan_blockers(step_results: list[dict], host_os: str, shell_name: str) -> list[str]:
+    notes: list[str] = []
+    for item in step_results:
+        reason = str(item.get("reason", "")).strip()
+        stderr = str(item.get("stderr", "")).strip()
+        text = f"{reason}\n{stderr}".lower()
+        if not text.strip():
+            continue
+        if "not a valid statement separator" in text or "/dev/null" in text or "which " in text or "command -v" in text:
+            note = f"Planner emitted syntax for the wrong shell ({shell_name} on {host_os})."
+            if note not in notes:
+                notes.append(note)
+        if "cannot find the file specified" in text or "not recognized as the name of a cmdlet" in text or "get-command" in text and "not found" in text:
+            note = "A required app/tool was missing or not discoverable from this machine."
+            if note not in notes:
+                notes.append(note)
+        if "dockerdesktoplinuxengine" in text or "_ping" in text or "docker engine not responding" in text:
+            note = "Docker CLI was present but Docker Engine/Desktop was not actually running."
+            if note not in notes:
+                notes.append(note)
+        if "outside the allowed scope" in text:
+            note = "A command referenced paths outside the allowed execution scope."
+            if note not in notes:
+                notes.append(note)
+    return notes
+
+
 def shell_plan_agent(state: dict) -> dict:
     """Multi-step shell automation agent. Plans a sequence of shell commands and executes them."""
     active_task, task_content, _ = begin_agent_session(state, "shell_plan_agent")
@@ -666,7 +954,8 @@ def shell_plan_agent(state: dict) -> dict:
             recipients=["orchestrator_agent", "worker_agent"],
         )
 
-    steps = _plan_shell_steps(goal, host_os)
+    known_tools = _shell_tool_hints(state, goal, host_os)
+    steps = _plan_shell_steps(goal, host_os, shell_name=shell_name, known_tools=known_tools)
     if not steps:
         error_msg = "Could not decompose the goal into shell steps. Please be more specific."
         state["shell_plan_result"] = error_msg
@@ -680,6 +969,8 @@ def shell_plan_agent(state: dict) -> dict:
     log_task_update("Shell Plan Agent", f"Planned {len(steps)} step(s).")
 
     step_results = []
+    checklist = _build_shell_plan_checklist(steps)
+    state["shell_plan_steps"] = checklist
     overall_success = True
 
     for idx, step in enumerate(steps, 1):
@@ -687,6 +978,17 @@ def shell_plan_agent(state: dict) -> dict:
         command = step.get("command", "")
         optional = step.get("optional", False)
         check_cmd = step.get("check", "")
+        _update_shell_plan_step(
+            checklist,
+            idx,
+            status="running",
+            detail=f"Working on step {idx} of {len(steps)}.",
+            reason="",
+            stdout="",
+            stderr="",
+            return_code=None,
+        )
+        state["shell_plan_steps"] = checklist
 
         log_task_update("Shell Plan Agent", f"Step {idx}/{len(steps)}: {desc}", command)
 
@@ -695,7 +997,16 @@ def shell_plan_agent(state: dict) -> dict:
                 "step": idx, "description": desc, "command": command,
                 "skipped": True, "reason": "Empty command",
             })
+            _update_shell_plan_step(
+                checklist,
+                idx,
+                status="skipped",
+                detail="Skipped because no command was generated.",
+                reason="Empty command",
+            )
             continue
+
+        _record_command_visibility(state, command, working_directory)
 
         if check_cmd:
             chk_rc, chk_out, chk_err = _run_step(check_cmd, shell_path, shell_args, working_directory, timeout=30)
@@ -706,6 +1017,16 @@ def shell_plan_agent(state: dict) -> dict:
                     "skipped": True, "reason": "Precondition already met",
                     "check_output": chk_out,
                 })
+                _update_shell_plan_step(
+                    checklist,
+                    idx,
+                    status="skipped",
+                    detail=chk_out or "Already done. Skipped this step.",
+                    reason="Precondition already met",
+                    stdout=chk_out,
+                    stderr=chk_err,
+                    return_code=chk_rc,
+                )
                 log_task_update("Shell Plan Agent", f"Step {idx}: precondition already met, skipping.")
                 continue
 
@@ -729,6 +1050,14 @@ def shell_plan_agent(state: dict) -> dict:
                     f"Command: {redact_sensitive_text(command)}\n"
                     f"Reason: {reason}"
                 )
+                _update_shell_plan_step(
+                    checklist,
+                    idx,
+                    status="awaiting_approval",
+                    detail="Waiting for approval before running this command.",
+                    reason=reason,
+                )
+                state["shell_plan_steps"] = checklist
                 state["shell_plan_result"] = blocked_msg
                 state["shell_plan_success"] = False
                 state["draft_response"] = blocked_msg
@@ -744,6 +1073,13 @@ def shell_plan_agent(state: dict) -> dict:
                 "step": idx, "description": desc, "command": command,
                 "blocked": True, "reason": reason,
             })
+            _update_shell_plan_step(
+                checklist,
+                idx,
+                status="blocked",
+                detail="Blocked by execution policy.",
+                reason=reason,
+            )
             if not optional:
                 overall_success = False
             continue
@@ -763,6 +1099,16 @@ def shell_plan_agent(state: dict) -> dict:
 
         rc, stdout, stderr = _run_step(command, shell_path, shell_args, working_directory)
         success = rc == 0
+        snapshot = update_inventory_from_command_result(
+            working_directory=working_directory,
+            command=command,
+            stdout=stdout,
+            stderr=stderr,
+            return_code=rc,
+        )
+        state["software_inventory"] = dict(snapshot.get("software", {}) or {})
+        state["software_inventory_last_synced"] = str(snapshot.get("last_synced_at", "") or "")
+        state["software_inventory_stale"] = False
 
         append_privileged_audit_event(
             state, actor="shell_plan_agent", action="step",
@@ -782,6 +1128,15 @@ def shell_plan_agent(state: dict) -> dict:
         })
 
         if success:
+            _update_shell_plan_step(
+                checklist,
+                idx,
+                status="completed",
+                detail=stdout[:240] if stdout else "Command completed successfully.",
+                stdout=stdout,
+                stderr=stderr,
+                return_code=rc,
+            )
             log_task_update("Shell Plan Agent", f"Step {idx}: OK (rc=0)", stdout[:300] if stdout else "")
             if (
                 privileged_policy.get("approval_mode") == "per_command"
@@ -791,9 +1146,19 @@ def shell_plan_agent(state: dict) -> dict:
                 privileged_policy["approved"] = False
                 state["privileged_approved"] = False
         else:
+            _update_shell_plan_step(
+                checklist,
+                idx,
+                status="failed",
+                detail=stderr[:240] if stderr else f"Command failed with exit code {rc}.",
+                stdout=stdout,
+                stderr=stderr,
+                return_code=rc,
+            )
             log_task_update("Shell Plan Agent", f"Step {idx}: FAILED (rc={rc})", stderr[:300] if stderr else "")
             if not optional:
                 overall_success = False
+        state["shell_plan_steps"] = checklist
 
     lines = [f"Shell Automation: {goal}", f"Host OS: {host_os}", f"Shell: {shell_name}", ""]
     lines.append(f"Executed {len(step_results)} step(s):")
@@ -828,12 +1193,19 @@ def shell_plan_agent(state: dict) -> dict:
             lines.append("   STDERR: " + preview.replace("\n", "\n   "))
         lines.append("")
 
+    blockers = _summarize_shell_plan_blockers(step_results, host_os, shell_name)
+    if blockers:
+        lines.append("Observed blockers:")
+        for item in blockers:
+            lines.append(f"- {item}")
+        lines.append("")
+
     overall_label = "✅ All steps completed successfully." if overall_success else "⚠ Some required steps failed."
     lines.append(overall_label)
     result_text = "\n".join(lines)
 
     state["shell_plan_result"] = result_text
-    state["shell_plan_steps"] = step_results
+    state["shell_plan_steps"] = checklist
     state["shell_plan_success"] = overall_success
     state["draft_response"] = result_text
 

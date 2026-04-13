@@ -52,7 +52,11 @@ from kendr.workflow_contract import approval_request_to_text, build_approval_req
 
 def get_marketplace(q: str = "", category: str = "") -> dict:
     """Return catalog skills enriched with their installed state."""
-    catalog = list_catalog_skills(category=category, q=q)
+    catalog = [
+        item
+        for item in list_catalog_skills(category=category, q=q)
+        if _catalog_skill_is_marketplace_usable(item)
+    ]
 
     # Map slug → installed row
     installed_rows = {r["slug"]: r for r in list_user_skills(is_installed=True)}
@@ -95,10 +99,24 @@ def get_marketplace(q: str = "", category: str = "") -> dict:
     return {
         "catalog": catalog,
         "custom": custom,
-        "categories": catalog_categories(),
+        "categories": [name for name in catalog_categories() if any(item.get("category") == name for item in catalog)],
         "installed_count": len(installed_rows) + core_count + len([c for c in custom if c["is_installed"]]),
         "sandbox_runtime": extension_sandbox.describe_runtime_support(),
     }
+
+
+def _catalog_skill_is_marketplace_usable(item: dict) -> bool:
+    catalog_id = str(item.get("id", "") or "").strip()
+    if not catalog_id:
+        return False
+    if catalog_id not in _catalog_handlers():
+        return False
+    entry = CATALOG_BY_ID.get(catalog_id)
+    required_config = tuple(getattr(entry, "requires_config", ()) or ())
+    if required_config and any(not str(os.getenv(key, "")).strip() for key in required_config):
+        return False
+    sandbox = extension_sandbox.describe_skill_sandbox(skill_type="catalog", catalog_id=catalog_id)
+    return str(sandbox.get("mode", "") or "").strip().lower() != "blocked"
 
 
 def _catalog_metadata(entry, *, existing_metadata: dict | None = None) -> dict:

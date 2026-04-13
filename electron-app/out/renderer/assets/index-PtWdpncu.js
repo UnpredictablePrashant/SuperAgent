@@ -7340,6 +7340,8 @@ function StatusBar() {
   }, []);
   const { ui: ui2, gateway, pid, error } = state.backendServices;
   const activeTab = state.openTabs.find((t2) => t2.path === state.activeTabPath);
+  const activeRunId = String(state.activeRunId || "").trim();
+  const runLabel = activeRunId ? activeRunId.slice(-8) : "";
   const handleServiceClick = async () => {
     if (ui2 === "running" && gateway === "running") return;
     if (ui2 === "stopped" || gateway === "stopped" || ui2 === "error" || gateway === "error") {
@@ -7374,6 +7376,22 @@ Click to start if stopped`,
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "status-bar-center", children: [
+      activeRunId && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          className: "status-item status-bg-run",
+          title: `Background run active (${activeRunId}). Click to open Studio.`,
+          onClick: () => dispatch({ type: "SET_VIEW", view: "studio" }),
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pulse-dot" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Background run" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "status-bg-run-id", children: [
+              "#",
+              runLabel
+            ] })
+          ]
+        }
+      ),
       state.streaming && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "status-item status-streaming", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pulse-dot" }),
         " Agent running…"
@@ -7778,6 +7796,71 @@ function resolveSelectedModel(selectedModel) {
     label: `${providerLabel} · ${model || "default"}`
   };
 }
+const MODEL_CONTEXT_WINDOWS = [
+  ["gpt-5.4", 4e5],
+  ["gpt-5.3", 4e5],
+  ["gpt-5.2", 4e5],
+  ["gpt-5.1", 4e5],
+  ["gpt-5-mini", 4e5],
+  ["gpt-5-nano", 4e5],
+  ["gpt-5", 4e5],
+  ["gpt-4.1", 1047576],
+  ["o4-mini", 2e5],
+  ["o3", 2e5],
+  ["o1", 2e5],
+  ["gpt-4o", 128e3],
+  ["gpt-4-turbo", 128e3],
+  ["gpt-4", 8192],
+  ["gpt-3.5", 16385],
+  ["claude-sonnet-4", 2e5],
+  ["claude-opus-4", 2e5],
+  ["claude", 2e5],
+  ["gemini-2.5-pro", 1048576],
+  ["gemini-2.5-flash", 1048576],
+  ["gemini-2.0-flash", 1048576],
+  ["gemini-1.5-pro", 2097152],
+  ["gemini-1.5-flash", 1048576],
+  ["gemini", 1048576],
+  ["grok-4.20", 2e6],
+  ["grok-4", 2e6],
+  ["grok", 131072],
+  ["llama3", 131072],
+  ["llama", 131072],
+  ["mistral", 32768],
+  ["phi", 131072],
+  ["qwen", 131072],
+  ["glm", 131072],
+  ["minimax", 1e6]
+];
+function approximateContextWindow(model) {
+  const normalized = String(model || "").trim().toLowerCase();
+  if (!normalized) return 128e3;
+  for (const [needle, limit] of MODEL_CONTEXT_WINDOWS) {
+    if (normalized.includes(needle)) return limit;
+  }
+  return 128e3;
+}
+function resolveContextWindow(selectedModel, modelInventory) {
+  const selected = resolveSelectedModel(selectedModel);
+  const providers = Array.isArray(modelInventory?.providers) ? modelInventory.providers : [];
+  if (selected.provider && selected.model) {
+    const matched = providers.find((provider) => String(provider?.provider || "").trim().toLowerCase() === selected.provider && String(provider?.model || "").trim() === selected.model && Number(provider?.context_window || 0) > 0);
+    if (matched) return Number(matched.context_window);
+    return approximateContextWindow(selected.model);
+  }
+  return Number(modelInventory?.active_context_window || modelInventory?.context_window || 128e3) || 128e3;
+}
+function resolveAgentCapability(selectedModel, modelInventory) {
+  const selected = resolveSelectedModel(selectedModel);
+  if (!selected.provider || !selected.model) return true;
+  const providers = Array.isArray(modelInventory?.providers) ? modelInventory.providers : [];
+  const provider = providers.find((item) => String(item?.provider || "").trim().toLowerCase() === selected.provider);
+  const details = Array.isArray(provider?.selectable_model_details) ? provider.selectable_model_details : [];
+  const matched = details.find((item) => String(item?.name || "").trim() === selected.model);
+  if (matched && typeof matched.agent_capable === "boolean") return matched.agent_capable;
+  if (typeof provider?.agent_capable === "boolean" && String(provider?.model || "").trim() === selected.model) return provider.agent_capable;
+  return selected.provider !== "ollama";
+}
 function basename(path) {
   return String(path || "").split(/[\\/]/).pop() || "";
 }
@@ -7797,7 +7880,7 @@ function loadHistory() {
 }
 function saveHistory(messages) {
   try {
-    const toSave = messages.filter((m2) => m2.status === "done" || m2.status === "error" || m2.role === "user").slice(-MAX_STORED_MESSAGES);
+    const toSave = messages.filter((m2) => m2.role === "user" || m2.role === "assistant" && ["thinking", "streaming", "awaiting", "done", "error"].includes(String(m2.status || ""))).slice(-MAX_STORED_MESSAGES);
     localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(toSave));
   } catch (_2) {
   }
@@ -7837,7 +7920,7 @@ function formatRelTime(dateStr) {
 }
 const initChat = {
   messages: [],
-  // [{id,role,content,steps,status,runId,artifacts,ts}]
+  // [{id,role,content,steps,status,runId,artifacts,progress,ts}]
   streaming: false,
   activeRunId: null,
   mode: "chat",
@@ -7851,6 +7934,11 @@ function chatReducer(s, a) {
       return { ...s, messages: [...s.messages, a.msg] };
     case "UPD_MSG":
       return { ...s, messages: s.messages.map((m2) => m2.id === a.id ? { ...m2, ...a.patch } : m2) };
+    case "APPEND_MSG_CONTENT":
+      return {
+        ...s,
+        messages: s.messages.map((m2) => m2.id === a.id ? { ...m2, content: `${m2.content || ""}${a.delta || ""}` } : m2)
+      };
     case "ADD_STEP": {
       const msgs = s.messages.map((m2) => {
         if (m2.id !== a.msgId) return m2;
@@ -7860,6 +7948,31 @@ function chatReducer(s, a) {
           steps[idx] = { ...steps[idx], ...a.step };
         } else steps.push(a.step);
         return { ...m2, steps };
+      });
+      return { ...s, messages: msgs };
+    }
+    case "ADD_PROGRESS": {
+      const msgs = s.messages.map((m2) => {
+        if (m2.id !== a.msgId) return m2;
+        const item = {
+          id: String(a.item?.id || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+          ts: a.item?.ts || (/* @__PURE__ */ new Date()).toISOString(),
+          title: String(a.item?.title || "").trim(),
+          detail: String(a.item?.detail || "").trim(),
+          kind: String(a.item?.kind || "").trim(),
+          status: String(a.item?.status || "").trim(),
+          command: String(a.item?.command || "").trim(),
+          cwd: String(a.item?.cwd || "").trim(),
+          actor: String(a.item?.actor || "").trim(),
+          durationLabel: String(a.item?.durationLabel || "").trim(),
+          exitCode: a.item?.exitCode
+        };
+        if (!item.title && !item.detail) return m2;
+        const prev = Array.isArray(m2.progress) ? m2.progress : [];
+        const last = prev[0];
+        if (last && last.title === item.title && last.detail === item.detail) return m2;
+        const next = [item, ...prev].slice(0, 14);
+        return { ...m2, progress: next };
       });
       return { ...s, messages: msgs };
     }
@@ -7942,6 +8055,90 @@ function modeLabel(mode) {
   if (mode === "research") return "Deep Research";
   return "Chat";
 }
+function normalizeChecklistStatus(value) {
+  const status = String(value || "").trim().toLowerCase();
+  if (["completed", "done", "success", "ok"].includes(status)) return "completed";
+  if (["running", "in_progress", "started", "active"].includes(status)) return "running";
+  if (["awaiting_approval", "awaiting_input", "awaiting"].includes(status)) return "awaiting";
+  if (["failed", "error"].includes(status)) return "failed";
+  if (["blocked"].includes(status)) return "blocked";
+  if (["skipped"].includes(status)) return "skipped";
+  return status || "pending";
+}
+function sanitizeStatusMessage(message) {
+  const raw = String(message || "").trim();
+  const normalized = raw.toLowerCase();
+  if (!raw) return "";
+  if (normalized === "resuming run...") return "Continuing approved plan...";
+  if (normalized === "restoring context from the paused run...") return "Loading paused checklist...";
+  if (normalized === "executing queued tasks...") return "Running remaining checklist steps...";
+  if (normalized === "collecting outputs and preparing the final response...") return "Wrapping up final answer...";
+  return raw;
+}
+function extractChecklist(result) {
+  if (!result || typeof result !== "object") return [];
+  const shellSteps = Array.isArray(result.shell_plan_steps) ? result.shell_plan_steps : [];
+  if (shellSteps.length) {
+    return shellSteps.map((step, index2) => ({
+      step: Number(step.step || index2 + 1),
+      title: String(step.title || step.description || `Step ${index2 + 1}`).trim() || `Step ${index2 + 1}`,
+      status: normalizeChecklistStatus(step.status || (step.done ? "completed" : "pending")),
+      detail: String(step.detail || step.reason || "").trim(),
+      command: String(step.command || "").trim(),
+      stdout: String(step.stdout || "").trim(),
+      stderr: String(step.stderr || "").trim(),
+      reason: String(step.reason || "").trim(),
+      optional: !!step.optional,
+      done: !!step.done || ["completed", "skipped"].includes(normalizeChecklistStatus(step.status)),
+      returnCode: step.return_code
+    }));
+  }
+  const planSteps = Array.isArray(result.plan_steps) ? result.plan_steps : [];
+  if (planSteps.length) {
+    const activeIndex = Math.max(0, Number(result.plan_step_index || 0));
+    return planSteps.map((step, index2) => {
+      const rawStatus = normalizeChecklistStatus(step.status || "");
+      const status = rawStatus || (index2 < activeIndex ? "completed" : index2 === activeIndex ? "running" : "pending");
+      return {
+        step: index2 + 1,
+        title: String(step.title || step.name || step.description || `Step ${index2 + 1}`).trim() || `Step ${index2 + 1}`,
+        status,
+        detail: String(step.success_criteria || step.description || "").trim(),
+        command: "",
+        stdout: "",
+        stderr: "",
+        reason: String(step.reason || "").trim(),
+        optional: false,
+        done: ["completed", "skipped"].includes(status),
+        returnCode: null
+      };
+    });
+  }
+  return [];
+}
+function latestChecklistMessage(messages) {
+  const safe = Array.isArray(messages) ? messages : [];
+  for (let i = safe.length - 1; i >= 0; i -= 1) {
+    const msg = safe[i];
+    if (msg?.role === "assistant" && Array.isArray(msg?.checklist) && msg.checklist.length) return msg;
+  }
+  return null;
+}
+function buildSimpleHistory(messages, maxTurns = 12) {
+  const safe = Array.isArray(messages) ? messages : [];
+  return safe.filter((m2) => (m2?.role === "user" || m2?.role === "assistant") && String(m2?.content || "").trim() && !["thinking", "streaming"].includes(String(m2?.status || ""))).slice(-maxTurns).map((m2) => ({
+    role: m2.role,
+    content: String(m2.content || "").trim()
+  }));
+}
+function estimateObjectTokens(value) {
+  try {
+    const raw = JSON.stringify(value);
+    return Math.max(0, Math.round(String(raw || "").length / 4));
+  } catch {
+    return 0;
+  }
+}
 function formatDuration(totalSeconds) {
   const s = Math.max(0, Number(totalSeconds) || 0);
   const h2 = Math.floor(s / 3600);
@@ -7951,6 +8148,101 @@ function formatDuration(totalSeconds) {
   if (m2 > 0) return `${m2}m ${sec}s`;
   return `${sec}s`;
 }
+function isShellProgressItem(item) {
+  if (!item || typeof item !== "object") return false;
+  const kind = String(item.kind || "").toLowerCase();
+  const title = String(item.title || "").toLowerCase();
+  const detail = String(item.detail || "").toLowerCase();
+  const command = String(item.command || "").trim();
+  if (command) return true;
+  if (kind.includes("command") || kind.includes("shell")) return true;
+  return /\bshell command\b|\brunning command\b|\bos[_\s-]?agent\b/.test(`${title} ${detail}`);
+}
+function shellCardFromProgress(progress = []) {
+  const items = (Array.isArray(progress) ? progress : []).filter(isShellProgressItem);
+  if (!items.length) return null;
+  const running = items.find((it) => ["running", "started", "in_progress"].includes(String(it.status || "").toLowerCase()));
+  const primary = running || items[0];
+  if (!primary) return null;
+  const primaryStatus = String(primary.status || "").toLowerCase();
+  const command = String(primary.command || "").trim();
+  let output = "";
+  if (["completed", "failed", "error"].includes(primaryStatus)) {
+    output = String(primary.detail || "").trim();
+  } else if (command) {
+    const companion = items.find((it) => it !== primary && String(it.command || "").trim() === command && ["completed", "failed", "error"].includes(String(it.status || "").toLowerCase()) && String(it.detail || "").trim());
+    if (companion) output = String(companion.detail || "").trim();
+  }
+  return {
+    title: String(primary.title || "Shell command").trim() || "Shell command",
+    command,
+    output,
+    status: primaryStatus || "running",
+    cwd: String(primary.cwd || "").trim(),
+    durationLabel: String(primary.durationLabel || "").trim(),
+    exitCode: primary.exitCode
+  };
+}
+function inferExecutionBlockers({ msg, shellCard, progress = [], checklist = [] }) {
+  const textParts = [];
+  const addText = (value) => {
+    const raw = String(value || "").trim();
+    if (raw) textParts.push(raw);
+  };
+  addText(msg?.content);
+  addText(shellCard?.output);
+  for (const item of Array.isArray(progress) ? progress : []) {
+    addText(item?.title);
+    addText(item?.detail);
+  }
+  for (const item of Array.isArray(checklist) ? checklist : []) {
+    addText(item?.title);
+    addText(item?.detail);
+    addText(item?.reason);
+    addText(item?.stdout);
+    addText(item?.stderr);
+  }
+  const observedMatch = String(msg?.content || "").match(/Observed blockers:\s*([\s\S]*?)(?:\n\s*\n|$)/i);
+  if (observedMatch?.[1]) {
+    for (const line of observedMatch[1].split("\n")) {
+      const cleaned = line.replace(/^\s*-\s*/, "").trim();
+      if (cleaned) textParts.push(cleaned);
+    }
+  }
+  const corpus = textParts.join("\n").toLowerCase();
+  if (!corpus.trim()) return [];
+  const chips = [];
+  const pushChip = (key, label, tone = "warn") => {
+    if (chips.some((item) => item.key === key)) return;
+    chips.push({ key, label, tone });
+  };
+  if (/dockerdesktoplinuxengine|docker engine\/desktop was not actually running|docker engine not responding|cannot connect to the docker daemon|docker daemon|the system cannot find the file specified.*docker/i.test(corpus)) {
+    pushChip("engine-down", "Engine Down", "err");
+  }
+  if (/wrong shell|not a valid statement separator|\/dev\/null|command -v|planner emitted syntax for the wrong shell|powershell plan uses|is not recognized as the name of a cmdlet|unexpected token '\|\|'/i.test(corpus)) {
+    pushChip("wrong-shell", "Wrong Shell", "err");
+  }
+  if (/required app\/tool was missing|not discoverable from this machine|cannot find the file specified|was not found|could not find|not recognized as the name of a cmdlet|no such file or directory|missing or not discoverable/i.test(corpus)) {
+    pushChip("app-missing", "App Missing", "warn");
+  }
+  if (/outside the allowed execution scope|outside the allowed scope|blocked by execution policy|policy block|approval_required|requires your approval/i.test(corpus)) {
+    pushChip("policy-block", "Policy Block", "warn");
+  }
+  if (/permission denied|access is denied|administrator|elevation required|sudo|operation not permitted/i.test(corpus)) {
+    pushChip("permission", "Need Permission", "warn");
+  }
+  if (/timed out|timeout|could not resolve|temporary failure in name resolution|connection refused|network is unreachable|failed to fetch/i.test(corpus)) {
+    pushChip("network", "Network Issue", "warn");
+  }
+  const blockedSteps = (Array.isArray(checklist) ? checklist : []).filter((item) => {
+    const status = normalizeChecklistStatus(item?.status);
+    return status === "blocked" || status === "failed";
+  }).length;
+  if (!chips.length && blockedSteps > 0) {
+    pushChip("blocked", blockedSteps > 1 ? "Steps Blocked" : "Step Blocked", "warn");
+  }
+  return chips.slice(0, 4);
+}
 function readBlobAsDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -7958,6 +8250,23 @@ function readBlobAsDataUrl(blob) {
     reader.onerror = () => reject(reader.error || new Error("read_failed"));
     reader.readAsDataURL(blob);
   });
+}
+function detectAttachmentType(filePath, fallback = "file") {
+  const raw = String(filePath || "").trim().toLowerCase();
+  if (!raw) return fallback;
+  if (/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(raw)) return "image";
+  return fallback;
+}
+function attachmentPreviewSrc(item) {
+  if (!item || item.type !== "image") return "";
+  const preview = String(item.previewUrl || "").trim();
+  if (preview) return preview;
+  const rawPath = String(item.path || "").trim();
+  if (!rawPath) return "";
+  const normalized = rawPath.replace(/\\/g, "/");
+  if (/^[a-z]:\//i.test(normalized)) return `file:///${normalized}`;
+  if (normalized.startsWith("/")) return `file://${normalized}`;
+  return rawPath;
 }
 const DR_DEFAULTS = {
   pages: 25,
@@ -7977,6 +8286,7 @@ const DR_DEFAULTS = {
 };
 function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }) {
   const { state: appState, dispatch: appDispatch, refreshModelInventory } = useApp();
+  const api = window.kendrAPI;
   const [chat, dispatch] = reactExports.useReducer(chatReducer, void 0, () => ({ ...initChat, messages: loadHistory() }));
   const [input, setInput] = reactExports.useState("");
   const [resumeInput, setResumeInput] = reactExports.useState("");
@@ -7986,35 +8296,67 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
   const [mcpEnabled, setMcpEnabled] = reactExports.useState(false);
   const [mcpServerCount, setMcpServerCount] = reactExports.useState(0);
   const [mcpUndiscovered, setMcpUndiscovered] = reactExports.useState(0);
+  const [machineStatus, setMachineStatus] = reactExports.useState(null);
+  const [machineStatusLoaded, setMachineStatusLoaded] = reactExports.useState(false);
+  const [machineSyncRunning, setMachineSyncRunning] = reactExports.useState(false);
   const [showHistory, setShowHistory] = reactExports.useState(false);
   const [sessions, setSessions] = reactExports.useState(() => loadSessions());
   const messagesEndRef = reactExports.useRef(null);
   const inputRef = reactExports.useRef(null);
   const esRef = reactExports.useRef(null);
+  const resumeAttemptedRunRef = reactExports.useRef("");
   const apiBase = appState.backendUrl || "http://127.0.0.1:2151";
   const updateDr = (patch) => setDr((s) => ({ ...s, ...patch }));
   const selectedModelMeta = resolveSelectedModel(appState.selectedModel);
   const isSimpleStudioChat = studioMode && chat.mode === "chat";
   const modelInventory = appState.modelInventory;
-  const contextLimit = Number(modelInventory?.active_context_window || modelInventory?.context_window || 128e3) || 128e3;
-  const estimatedContextTokens = Math.max(
-    0,
-    Math.round(
-      (chat.messages.reduce((sum, m2) => sum + String(m2?.content || "").length, 0) + String(input || "").length) / 4
-    )
-  );
+  const selectedModelAgentCapable = resolveAgentCapability(appState.selectedModel, modelInventory);
+  const contextLimit = resolveContextWindow(appState.selectedModel, modelInventory);
+  const payloadPreview = reactExports.useMemo(() => {
+    const draftText = String(input || "").trim();
+    const body = buildPayload(
+      draftText,
+      chatId,
+      "ctx-preview",
+      appState.projectRoot,
+      chat.mode,
+      dr,
+      attachments,
+      studioMode,
+      mcpEnabled
+    );
+    body.history = buildSimpleHistory(chat.messages, 14);
+    if (appState.selectedModel) {
+      const selected = resolveSelectedModel(appState.selectedModel);
+      if (selected.provider) body.provider = selected.provider;
+      if (selected.model) body.model = selected.model;
+    }
+    if (isSimpleStudioChat) body.stream = true;
+    return body;
+  }, [input, chatId, appState.projectRoot, chat.mode, dr, attachments, studioMode, mcpEnabled, chat.messages, appState.selectedModel, isSimpleStudioChat]);
+  const estimatedContextTokens = estimateObjectTokens(payloadPreview);
   const contextPct = Math.min(100, Math.round(estimatedContextTokens / Math.max(contextLimit, 1) * 100));
+  const stickyChecklistMsg = reactExports.useMemo(() => latestChecklistMessage(chat.messages), [chat.messages]);
+  const stickyChecklist = Array.isArray(stickyChecklistMsg?.checklist) ? stickyChecklistMsg.checklist : [];
   reactExports.useEffect(() => {
     return () => {
       esRef.current?.close();
     };
   }, []);
   reactExports.useEffect(() => {
+    if (!appState.activeRunId) resumeAttemptedRunRef.current = "";
+  }, [appState.activeRunId]);
+  reactExports.useEffect(() => {
+    if (chat.mode === "agent" && !selectedModelAgentCapable) {
+      dispatch({ type: "SET_MODE", mode: "chat" });
+    }
+  }, [chat.mode, selectedModelAgentCapable]);
+  reactExports.useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chat.messages]);
   reactExports.useEffect(() => {
-    if (!chat.streaming) saveHistory(chat.messages);
-  }, [chat.messages, chat.streaming]);
+    saveHistory(chat.messages);
+  }, [chat.messages]);
   reactExports.useEffect(() => {
     refreshModelInventory(false);
   }, [refreshModelInventory]);
@@ -8112,6 +8454,74 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     }).catch(() => {
     });
   }, [apiBase, mcpEnabled]);
+  const syncWorkingDirectory = (appState.projectRoot || appState.settings?.projectRoot || "").trim();
+  const fetchMachineStatus = reactExports.useCallback(async () => {
+    try {
+      const q2 = syncWorkingDirectory ? `?working_directory=${encodeURIComponent(syncWorkingDirectory)}` : "";
+      const resp = await fetch(`${apiBase}/api/machine/status${q2}`);
+      if (!resp.ok) {
+        setMachineStatusLoaded(true);
+        return null;
+      }
+      const data = await resp.json().catch(() => ({}));
+      const status = data?.status && typeof data.status === "object" ? data.status : null;
+      if (status) setMachineStatus(status);
+      setMachineStatusLoaded(true);
+      return status;
+    } catch (_2) {
+      setMachineStatusLoaded(true);
+      return null;
+    }
+  }, [apiBase, syncWorkingDirectory]);
+  const triggerMachineSync = reactExports.useCallback(async (scope = "machine", isAuto = false) => {
+    if (machineSyncRunning) return;
+    setMachineSyncRunning(true);
+    try {
+      const resp = await fetch(`${apiBase}/api/machine/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope,
+          working_directory: syncWorkingDirectory || void 0
+        })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data?.status && typeof data.status === "object") {
+        setMachineStatus(data.status);
+        if (api?.settings?.set) {
+          const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+          await api.settings.set("machineLastAutoSyncAt", nowIso);
+          appDispatch({ type: "SET_SETTINGS", settings: { machineLastAutoSyncAt: nowIso } });
+        }
+      }
+    } catch (_2) {
+    } finally {
+      setMachineSyncRunning(false);
+      if (!isAuto) fetchMachineStatus();
+    }
+  }, [apiBase, syncWorkingDirectory, machineSyncRunning, api, appDispatch, fetchMachineStatus]);
+  reactExports.useEffect(() => {
+    fetchMachineStatus();
+  }, [fetchMachineStatus]);
+  reactExports.useEffect(() => {
+    const id2 = setInterval(() => {
+      fetchMachineStatus();
+    }, 60 * 1e3);
+    return () => clearInterval(id2);
+  }, [fetchMachineStatus]);
+  reactExports.useEffect(() => {
+    const enabled = !!appState.settings?.machineAutoSyncEnabled;
+    if (!enabled) return;
+    if (machineSyncRunning) return;
+    const intervalDays = Math.max(1, Math.min(30, Number(appState.settings?.machineAutoSyncIntervalDays || 7)));
+    const lastRaw = String(appState.settings?.machineLastAutoSyncAt || "").trim();
+    const lastTs = lastRaw ? Date.parse(lastRaw) : 0;
+    const dueMs = intervalDays * 24 * 60 * 60 * 1e3;
+    const now = Date.now();
+    if (!lastTs || Number.isNaN(lastTs) || now - lastTs >= dueMs) {
+      triggerMachineSync("machine", true);
+    }
+  }, [appState.settings, machineSyncRunning, triggerMachineSync]);
   const send = reactExports.useCallback(async (text, isResume = false) => {
     const msg = (typeof text === "string" ? text.trim() : "") || input.trim();
     if (!msg || chat.streaming) return;
@@ -8119,17 +8529,60 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     setResumeInput("");
     const runId = `ui-${Date.now().toString(36)}`;
     const userMsgId = `u-${runId}`;
-    const asstMsgId = `a-${runId}`;
+    const resumeMessageId = String(chat.awaitingContext?.messageId || "").trim();
+    const asstMsgId = isResume && resumeMessageId ? resumeMessageId : `a-${runId}`;
     const currentMode = chat.mode;
     const currentModeLabel = modeLabel(currentMode);
-    dispatch({ type: "ADD_MSG", msg: { id: userMsgId, role: "user", content: msg, mode: currentMode, modeLabel: currentModeLabel, ts: /* @__PURE__ */ new Date() } });
+    const sentAttachments = Array.isArray(attachments) ? attachments.map((item) => ({ ...item })) : [];
+    dispatch({
+      type: "ADD_MSG",
+      msg: {
+        id: userMsgId,
+        role: "user",
+        content: msg,
+        attachments: sentAttachments,
+        mode: currentMode,
+        modeLabel: currentModeLabel,
+        ts: /* @__PURE__ */ new Date()
+      }
+    });
     dispatch({ type: "SET_STREAMING", val: true });
     dispatch({ type: "SET_RUN", id: runId });
     dispatch({ type: "CLEAR_AWAITING" });
-    dispatch({
-      type: "ADD_MSG",
-      msg: { id: asstMsgId, role: "assistant", content: "", steps: [], status: "thinking", runId: isSimpleStudioChat ? null : runId, mode: currentMode, modeLabel: currentModeLabel, ts: /* @__PURE__ */ new Date() }
-    });
+    setAttachments([]);
+    if (isResume && resumeMessageId) {
+      dispatch({
+        type: "UPD_MSG",
+        id: asstMsgId,
+        patch: {
+          content: "",
+          status: "thinking",
+          runId: isSimpleStudioChat ? null : runId,
+          runStartedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          mode: currentMode,
+          modeLabel: currentModeLabel,
+          statusText: "Continuing approved plan..."
+        }
+      });
+    } else {
+      dispatch({
+        type: "ADD_MSG",
+        msg: {
+          id: asstMsgId,
+          role: "assistant",
+          content: "",
+          steps: [],
+          progress: [],
+          checklist: [],
+          status: "thinking",
+          runId: isSimpleStudioChat ? null : runId,
+          runStartedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          mode: currentMode,
+          modeLabel: currentModeLabel,
+          ts: /* @__PURE__ */ new Date()
+        }
+      });
+    }
     appDispatch({ type: "SET_STREAMING", streaming: true });
     try {
       const endpoint = isResume && chat.awaitingContext ? `${apiBase}/api/chat/resume` : isSimpleStudioChat ? `${apiBase}/api/chat/simple` : `${apiBase}/api/chat`;
@@ -8138,13 +8591,17 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
         workflow_id: chat.awaitingContext.workflowId,
         text: msg,
         channel: "webchat"
-      } : buildPayload(msg, chatId, runId, appState.projectRoot, chat.mode, dr, attachments, studioMode, mcpEnabled);
+      } : buildPayload(msg, chatId, runId, appState.projectRoot, chat.mode, dr, sentAttachments, studioMode, mcpEnabled);
       if (!isResume && appState.selectedModel) {
         const selected = resolveSelectedModel(appState.selectedModel);
         if (selected.provider) body.provider = selected.provider;
         if (selected.model) body.model = selected.model;
       }
+      if (!isResume) {
+        body.history = buildSimpleHistory(chat.messages, 14);
+      }
       if (isSimpleStudioChat && !isResume) {
+        body.stream = true;
         const resp2 = await fetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -8154,12 +8611,23 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
         if (!resp2.ok) {
           refreshModelInventory(true);
           dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: data.error || data.detail || resp2.statusText, status: "error", runId: null } });
+          dispatch({ type: "SET_STREAMING", val: false });
+          appDispatch({ type: "SET_STREAMING", streaming: false });
+          return;
+        }
+        if (data.streaming) {
+          const effectiveRunId2 = data.run_id || runId;
+          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { runId: effectiveRunId2, status: "thinking" } });
+          dispatch({ type: "SET_RUN", id: effectiveRunId2 });
+          appDispatch({ type: "SET_ACTIVE_RUN", runId: effectiveRunId2 });
+          openStream(effectiveRunId2, asstMsgId);
+          return;
         } else {
           dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: data.answer || "", status: "done", runId: null, artifacts: [] } });
+          dispatch({ type: "SET_STREAMING", val: false });
+          appDispatch({ type: "SET_STREAMING", streaming: false });
+          return;
         }
-        dispatch({ type: "SET_STREAMING", val: false });
-        appDispatch({ type: "SET_STREAMING", streaming: false });
-        return;
       }
       const resp = await fetch(endpoint, {
         method: "POST",
@@ -8178,6 +8646,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
       const effectiveRunId = srvRunId || runId;
       dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { runId: effectiveRunId, status: "thinking" } });
       dispatch({ type: "SET_RUN", id: effectiveRunId });
+      appDispatch({ type: "SET_ACTIVE_RUN", runId: effectiveRunId });
       openStream(effectiveRunId, asstMsgId);
     } catch (err) {
       refreshModelInventory(true);
@@ -8200,7 +8669,18 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
       try {
         const d = JSON.parse(e.data);
         if (d.status && d.status !== "connected") {
-          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { statusText: d.message || d.status } });
+          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { statusText: sanitizeStatusMessage(d.message || d.status) } });
+          dispatch({
+            type: "ADD_PROGRESS",
+            msgId: asstMsgId,
+            item: {
+              id: `status-${Date.now()}`,
+              title: "Runtime update",
+              detail: sanitizeStatusMessage(d.message || d.status || ""),
+              kind: "status",
+              status: d.status || "running"
+            }
+          });
         }
       } catch (_2) {
       }
@@ -8222,6 +8702,54 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
             startedAt: step.started_at || ""
           }
         });
+        const agent = String(step.agent || step.name || "agent").trim();
+        const reason = String(step.reason || step.message || "").trim();
+        const stepStatus = String(step.status || "running").toLowerCase();
+        const title = ["completed", "done", "success"].includes(stepStatus) ? `${agent} completed a task` : ["failed", "error"].includes(stepStatus) ? `${agent} reported a failure` : `${agent} is working`;
+        dispatch({
+          type: "ADD_PROGRESS",
+          msgId: asstMsgId,
+          item: {
+            id: stepId,
+            title,
+            detail: reason || "",
+            kind: "step",
+            status: step.status || "running"
+          }
+        });
+        dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { status: "streaming" } });
+      } catch (_2) {
+      }
+    });
+    es.addEventListener("activity", (e) => {
+      try {
+        const item = JSON.parse(e.data);
+        const title = String(item.title || item.kind || "Activity").trim();
+        const detail = String(item.detail || item.command || "").trim();
+        dispatch({
+          type: "ADD_PROGRESS",
+          msgId: asstMsgId,
+          item: {
+            id: item.id || `activity-${Date.now()}`,
+            title,
+            detail,
+            kind: item.kind || "activity",
+            status: item.status || "running",
+            command: item.command || "",
+            cwd: item.cwd || "",
+            actor: item.actor || "",
+            durationLabel: item.duration_label || "",
+            exitCode: item.exit_code
+          }
+        });
+      } catch (_2) {
+      }
+    });
+    es.addEventListener("delta", (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        if (!d.delta) return;
+        dispatch({ type: "APPEND_MSG_CONTENT", id: asstMsgId, delta: String(d.delta) });
         dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { status: "streaming" } });
       } catch (_2) {
       }
@@ -8232,18 +8760,22 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
         const output = d.final_output || d.output || d.draft_response || d.response || "";
         const awaiting = !!(d.awaiting_user_input || d.plan_waiting_for_approval || d.plan_needs_clarification || d.pending_user_input_kind || d.approval_pending_scope || d.pending_user_question || d.approval_request && Object.keys(d.approval_request).length > 0);
         if (awaiting) {
+          const checklist = extractChecklist(d);
           dispatch({
             type: "SET_AWAITING",
             ctx: {
               runId,
               workflowId: d.workflow_id || runId,
+              messageId: asstMsgId,
               prompt: d.pending_user_question || output || "Waiting for your input.",
-              kind: d.pending_user_input_kind || ""
+              kind: d.pending_user_input_kind || "",
+              scope: d.approval_pending_scope || "",
+              approvalRequest: d.approval_request || null
             }
           });
-          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: output, status: "awaiting", artifacts: d.artifact_files || [] } });
+          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: output, status: "awaiting", artifacts: d.artifact_files || [], checklist } });
         } else {
-          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: output, status: "done", artifacts: d.artifact_files || [] } });
+          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: output, status: "done", artifacts: d.artifact_files || [], checklist: extractChecklist(d) } });
         }
       } catch (_2) {
       }
@@ -8262,6 +8794,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
       closeClean();
       dispatch({ type: "SET_STREAMING", val: false });
       appDispatch({ type: "SET_STREAMING", streaming: false });
+      appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
     });
     es.addEventListener("error", (e) => {
       try {
@@ -8274,6 +8807,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
       closeClean();
       dispatch({ type: "SET_STREAMING", val: false });
       appDispatch({ type: "SET_STREAMING", streaming: false });
+      appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
     });
     es.onerror = () => {
       if (closed) return;
@@ -8282,8 +8816,62 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
       closeClean();
       dispatch({ type: "SET_STREAMING", val: false });
       appDispatch({ type: "SET_STREAMING", streaming: false });
+      appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
     };
-  }, [apiBase, appDispatch, chat.messages, refreshModelInventory]);
+  }, [apiBase, appDispatch, refreshModelInventory]);
+  reactExports.useEffect(() => {
+    const activeRunId = String(appState.activeRunId || "").trim();
+    if (!activeRunId) return;
+    if (resumeAttemptedRunRef.current === activeRunId) return;
+    resumeAttemptedRunRef.current = activeRunId;
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(activeRunId)}`);
+        const data = await resp.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!resp.ok) return;
+        const status = String(data?.status || "").toLowerCase();
+        if (["completed", "failed", "cancelled"].includes(status)) {
+          appDispatch({ type: "SET_STREAMING", streaming: false });
+          appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
+          return;
+        }
+        let asstMsgId = "";
+        const existing = (chat.messages || []).find((m2) => String(m2.runId || "") === activeRunId);
+        if (existing?.id) {
+          asstMsgId = existing.id;
+          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { status: status === "awaiting_user_input" ? "awaiting" : "streaming" } });
+        } else {
+          asstMsgId = `a-${activeRunId}-resume`;
+          dispatch({
+            type: "ADD_MSG",
+            msg: {
+              id: asstMsgId,
+              role: "assistant",
+              content: "",
+              steps: [],
+              progress: [],
+              status: status === "awaiting_user_input" ? "awaiting" : "thinking",
+              runId: activeRunId,
+              runStartedAt: data?.started_at || (/* @__PURE__ */ new Date()).toISOString(),
+              mode: chat.mode,
+              modeLabel: modeLabel(chat.mode),
+              ts: /* @__PURE__ */ new Date()
+            }
+          });
+        }
+        dispatch({ type: "SET_RUN", id: activeRunId });
+        dispatch({ type: "SET_STREAMING", val: status !== "awaiting_user_input" });
+        appDispatch({ type: "SET_STREAMING", streaming: status !== "awaiting_user_input" });
+        openStream(activeRunId, asstMsgId);
+      } catch (_2) {
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [appState.activeRunId, apiBase, openStream, chat.messages, chat.mode, appDispatch]);
   const stopRun = reactExports.useCallback(async () => {
     esRef.current?.close();
     const activeMsg = chat.messages.find((m2) => m2.status === "streaming" || m2.status === "thinking");
@@ -8301,7 +8889,31 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     }
     dispatch({ type: "SET_STREAMING", val: false });
     appDispatch({ type: "SET_STREAMING", streaming: false });
+    appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
   }, [chat.activeRunId, chat.messages, apiBase, appDispatch]);
+  const submitSkillApproval = reactExports.useCallback(async (scope, note = "") => {
+    const ctx = chat.awaitingContext || {};
+    const request = ctx.approvalRequest && typeof ctx.approvalRequest === "object" ? ctx.approvalRequest : {};
+    const metadata = request.metadata && typeof request.metadata === "object" ? request.metadata : {};
+    const skillId = String(metadata.skill_id || "").trim();
+    const sessionId = String(metadata.session_id || "").trim();
+    if (!skillId) throw new Error("Missing skill id for approval.");
+    const response = await fetch(`${apiBase}/api/marketplace/skills/${encodeURIComponent(skillId)}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scope,
+        note: String(note || "").trim() || `Approved ${String(metadata.skill_slug || skillId)} from the desktop chat UI (${scope}).`,
+        session_id: sessionId
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || data.detail || response.statusText);
+    }
+    const reply = scope === "always" ? "approve always" : scope === "session" ? "approve for this session" : "approve once";
+    await send(reply, true);
+  }, [apiBase, chat.awaitingContext, send]);
   const handleKey = (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
@@ -8324,7 +8936,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
       const next = [...prev];
       for (const filePath of paths) {
         if (seen2.has(filePath)) continue;
-        next.push({ path: filePath, type: "file", name: basename(filePath) });
+        next.push({ path: filePath, type: detectAttachmentType(filePath), name: basename(filePath) });
         seen2.add(filePath);
       }
       return next;
@@ -8343,14 +8955,14 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     const imageItems = items.filter((item) => item.kind === "file" && String(item.type || "").startsWith("image/"));
     if (!imageItems.length) return;
     e.preventDefault();
-    const api = window.kendrAPI;
+    const api2 = window.kendrAPI;
     const saved = [];
     for (const item of imageItems) {
       const file = item.getAsFile();
       if (!file) continue;
       try {
         const dataUrl = await readBlobAsDataUrl(file);
-        const result = await api?.clipboard?.saveImage({
+        const result = await api2?.clipboard?.saveImage({
           dataUrl,
           name: file.name ? file.name.replace(/\.[^.]+$/, "") : "pasted-screenshot"
         });
@@ -8405,8 +9017,12 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-mode-bar", children: MODES.map((m2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
       "button",
       {
-        className: `kc-mode-pill ${chat.mode === m2.id ? "kc-mode-pill--active" : ""}`,
-        onClick: () => dispatch({ type: "SET_MODE", mode: m2.id }),
+        className: `kc-mode-pill ${chat.mode === m2.id ? "kc-mode-pill--active" : ""} ${m2.id === "agent" && !selectedModelAgentCapable ? "kc-mode-pill--disabled" : ""}`,
+        onClick: () => {
+          if (m2.id === "agent" && !selectedModelAgentCapable) return;
+          dispatch({ type: "SET_MODE", mode: m2.id });
+        },
+        title: m2.id === "agent" && !selectedModelAgentCapable ? "Selected model cannot run as agent." : "",
         children: m2.label
       },
       m2.id
@@ -8430,6 +9046,8 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
         onChange: setResumeInput,
         onSend: () => send(resumeInput, true),
         onQuickReply: (r2) => send(r2, true),
+        onSkillApprove: submitSkillApproval,
+        onStop: stopRun,
         onDismiss: () => {
           dispatch({ type: "CLEAR_AWAITING" });
           setResumeInput("");
@@ -8448,6 +9066,13 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
         (appState.settings?.chatHistoryRetentionDays ?? 14) > 0 ? `Auto-deleted after ${appState.settings?.chatHistoryRetentionDays ?? 14} days · configure in Settings` : "History kept forever · configure in Settings"
       ] })
     ] }) }),
+    stickyChecklist.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      StickyChecklist,
+      {
+        checklist: stickyChecklist,
+        title: stickyChecklistMsg?.status === "awaiting" ? "Checklist waiting" : "Checklist"
+      }
+    ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-input-area", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-attach-bar", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-attach-actions", children: [
@@ -8563,6 +9188,7 @@ function DeepResearchPanel({ dr, updateDr }) {
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-panel-title", children: "🔬 Deep Research Settings" }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-summary", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "dr-sum-pill", children: [
+          "~",
           dr.pages,
           "p"
         ] }),
@@ -8575,13 +9201,14 @@ function DeepResearchPanel({ dr, updateDr }) {
     !dr.collapsed && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-body", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-grid", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Page Target" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Approx. Length" }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { className: "dr-select", value: dr.pages, onChange: (e) => updateDr({ pages: +e.target.value }), children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 10, children: "10 pages" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 25, children: "25 pages" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 50, children: "50 pages" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 100, children: "100 pages" })
-          ] })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 10, children: "~10 pages" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 25, children: "~25 pages" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 50, children: "~50 pages" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 100, children: "~100 pages" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Aiming near this length; citations and formatting can shift the final page count." })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Citation Style" }),
@@ -8714,10 +9341,26 @@ function WelcomeScreen({ onSuggest }) {
   ] });
 }
 function UserMessage({ msg }) {
+  const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+  const imageAttachments = attachments.filter((item) => item?.type === "image");
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-row kc-row--user", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-bubble kc-bubble--user", children: [
       msg.modeLabel && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-mode-stamp", children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `kc-mode-stamp-chip kc-mode-stamp-chip--${String(msg.mode || "chat")}`, children: msg.modeLabel }) }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-bubble-text", children: msg.content }),
+      attachments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-msg-attachments", children: [
+        imageAttachments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-msg-image-grid", children: imageAttachments.map((item) => {
+          const src = attachmentPreviewSrc(item);
+          return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-msg-image-card", title: item.path, children: [
+            src ? /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src, alt: item.name || "attached image", className: "kc-msg-image" }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-msg-image-fallback", children: "🖼" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-msg-image-name", children: item.name })
+          ] }, `img-${item.path}`);
+        }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-msg-attach-list", children: attachments.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-msg-attach-chip", title: item.path, children: [
+          item.type === "folder" ? "📁" : item.type === "image" ? "🖼" : "📄",
+          " ",
+          item.name
+        ] }, item.path)) })
+      ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-bubble-ts", children: formatTs(msg.ts) })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-avatar kc-avatar--user", children: "👤" })
@@ -8737,7 +9380,27 @@ function AssistantMessage({ msg }) {
     const timer = setInterval(() => setNowMs(Date.now()), 1e3);
     return () => clearInterval(timer);
   }, [msg?.runId, msg?.status]);
-  const elapsedSeconds = msg?.runId ? Math.max(0, Math.floor((nowMs - new Date(msg.ts || Date.now()).getTime()) / 1e3)) : 0;
+  const elapsedSeconds = msg?.runId ? Math.max(0, Math.floor((nowMs - new Date(msg.runStartedAt || msg.ts || Date.now()).getTime()) / 1e3)) : 0;
+  const progress = Array.isArray(msg.progress) ? msg.progress : [];
+  const shellCard = shellCardFromProgress(progress);
+  const visibleProgress = progress.filter((item) => !isShellProgressItem(item));
+  const checklist = Array.isArray(msg.checklist) ? msg.checklist : [];
+  const blockerChips = inferExecutionBlockers({ msg, shellCard, progress: visibleProgress, checklist });
+  const progressSummary = (() => {
+    if (!visibleProgress.length) return "";
+    let searches = 0;
+    let files = 0;
+    for (const item of visibleProgress) {
+      const kind = String(item.kind || "").toLowerCase();
+      const text = `${item.title || ""} ${item.detail || ""}`.toLowerCase();
+      if (kind.includes("search") || /\b(search|query|grep|rg|ripgrep)\b/.test(text)) searches += 1;
+      if (kind.includes("file") || /\b(file|read|scan|inspect|inventory)\b/.test(text)) files += 1;
+    }
+    const parts = [];
+    if (files) parts.push(`${files} file${files === 1 ? "" : "s"}`);
+    if (searches) parts.push(`${searches} search${searches === 1 ? "" : "es"}`);
+    return parts.length ? `Exploring ${parts.join(", ")}` : "";
+  })();
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-row kc-row--assistant", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-avatar kc-avatar--kendr", children: "K" }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-bubble kc-bubble--assistant", children: [
@@ -8757,14 +9420,48 @@ function AssistantMessage({ msg }) {
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-typing-dot" }),
         msg.statusText && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-thinking-text", children: msg.statusText })
       ] }),
-      msg.steps?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-steps", children: msg.steps.map((step) => /* @__PURE__ */ jsxRuntimeExports.jsx(StepCard, { step }, step.stepId)) }),
-      msg.content && msg.status !== "error" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-content", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: msg.content }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-copy-btn", onClick: copy, children: copied ? "✓" : "⧉" })
+      shellCard && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-shell-card kc-shell-card--${shellCard.status || "running"}`, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-shell-card-head", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-shell-card-label", children: "Shell" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-shell-card-title", children: shellCard.title })
+        ] }),
+        shellCard.command && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: "kc-shell-card-code", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("code", { children: [
+          "$ ",
+          shellCard.command
+        ] }) }),
+        shellCard.output && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: "kc-shell-card-output", children: /* @__PURE__ */ jsxRuntimeExports.jsx("code", { children: shellCard.output }) }),
+        (shellCard.cwd || shellCard.durationLabel || shellCard.exitCode !== null && shellCard.exitCode !== void 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-shell-card-meta", children: [
+          shellCard.cwd && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: shellCard.cwd }),
+          shellCard.durationLabel && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: shellCard.durationLabel }),
+          shellCard.exitCode !== null && shellCard.exitCode !== void 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+            "exit ",
+            shellCard.exitCode
+          ] })
+        ] })
       ] }),
-      msg.artifacts?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-artifacts", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-artifacts-label", children: "Artifacts" }),
-        msg.artifacts.map((a, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-artifact", children: typeof a === "string" ? a : a.name || a.path || JSON.stringify(a) }, i))
+      blockerChips.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-blocker-strip", children: blockerChips.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `kc-blocker-chip kc-blocker-chip--${item.tone || "warn"}`, children: item.label }, item.key)) }),
+      msg.runId && (["thinking", "streaming", "awaiting"].includes(String(msg.status || "")) || visibleProgress.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-worklog", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-worklog-head", children: [
+          "Working for ",
+          formatDuration(elapsedSeconds)
+        ] }),
+        progressSummary && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-worklog-summary", children: progressSummary }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-worklog-items", children: visibleProgress.slice(0, 6).map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-worklog-item", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-worklog-title", children: item.title }),
+          item.detail && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-worklog-detail", children: item.detail })
+        ] }, item.id)) })
+      ] }),
+      msg.steps?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-steps", children: msg.steps.map((step) => /* @__PURE__ */ jsxRuntimeExports.jsx(StepCard, { step }, step.stepId)) }),
+      checklist.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(ChecklistCard, { checklist }),
+      msg.content && msg.status !== "error" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-content", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-content-actions", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-copy-btn", onClick: copy, children: copied ? "Copied" : "Copy" }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          MarkdownRenderer,
+          {
+            content: msg.content,
+            isStreaming: ["thinking", "streaming"].includes(String(msg.status || ""))
+          }
+        )
       ] }),
       msg.status === "error" && msg.content && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-error-msg", children: [
         "⚠ ",
@@ -8775,40 +9472,228 @@ function AssistantMessage({ msg }) {
     ] })
   ] });
 }
+function ChecklistCard({ checklist }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-card", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-title", children: "Checklist" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-list", children: checklist.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsx(ChecklistItem, { item }, `${item.step}-${item.title}`)) })
+  ] });
+}
+function StickyChecklist({ checklist, title }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-sticky-checklist", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-sticky-checklist-head", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: title }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+        checklist.filter((item) => item.done).length,
+        "/",
+        checklist.length
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-list", children: checklist.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsx(ChecklistItem, { item, compact: true }, `sticky-${item.step}-${item.title}`)) })
+  ] });
+}
+function ChecklistItem({ item, compact = false }) {
+  const state = normalizeChecklistStatus(item.status);
+  const icon = state === "completed" ? "✓" : state === "skipped" ? "↷" : state === "running" ? "…" : state === "awaiting" ? "!" : state === "failed" || state === "blocked" ? "✗" : "·";
+  const detail = String(item.detail || item.reason || item.stdout || item.stderr || "").trim();
+  const doneLike = state === "completed" || state === "skipped";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-checklist-item kc-checklist-item--${state}${doneLike ? " kc-checklist-item--done" : ""}`, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-mark", children: icon }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-body", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-checklist-step", children: [
+          item.step,
+          "."
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-checklist-text", children: item.title })
+      ] }),
+      !compact && item.command && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-command", children: [
+        "$ ",
+        item.command
+      ] }),
+      detail && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-detail", children: detail })
+    ] })
+  ] });
+}
+function parseMcpAgentMeta(agentName) {
+  const raw = String(agentName || "").trim();
+  if (!raw.startsWith("mcp_") || !raw.endsWith("_agent")) return null;
+  const inner = raw.slice(4, -6);
+  const parts = inner.split("_");
+  if (!parts.length) return null;
+  const server = parts[0] || "";
+  const tool = parts.slice(1).join("_") || "";
+  return {
+    server,
+    tool,
+    serverLabel: server.replace(/_/g, " "),
+    toolLabel: tool.replace(/_/g, " ")
+  };
+}
 function StepCard({ step }) {
   const [open, setOpen] = reactExports.useState(false);
   const cls = step.status === "completed" || step.status === "success" ? "done" : step.status === "failed" || step.status === "error" ? "failed" : step.status === "running" ? "running" : "pending";
+  const mcpMeta = parseMcpAgentMeta(step.agent);
   const ICON = { done: "✓", failed: "✗", running: "●", pending: "·" };
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-step kc-step--${cls}`, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-step-dot", children: ICON[cls] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-step-inner", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-step-header", onClick: () => (step.reason || step.message) && setOpen((o) => !o), children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-step-agent", children: step.agent }),
+        mcpMeta ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-step-agent kc-step-agent--mcp", children: "🔌 MCP" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-step-chip", children: mcpMeta.serverLabel }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-step-agent", children: mcpMeta.toolLabel || step.agent })
+        ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-step-agent", children: step.agent }),
         step.message && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-step-msg", children: step.message.slice(0, 80) }),
         step.durationLabel && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-step-dur", children: step.durationLabel }),
         (step.reason || step.message) && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-step-toggle", children: open ? "▾" : "▸" })
+      ] }),
+      mcpMeta && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-step-reason kc-step-reason--inline", children: [
+        "Ran MCP tool `",
+        mcpMeta.toolLabel,
+        "` via `",
+        mcpMeta.serverLabel,
+        "`."
       ] }),
       open && step.reason && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-step-reason", children: step.reason })
     ] })
   ] });
 }
-function MarkdownRenderer({ content }) {
-  const parts = [];
-  const re2 = /```(\w*)\n?([\s\S]*?)```/g;
-  let last = 0, m2;
-  while ((m2 = re2.exec(content)) !== null) {
-    if (m2.index > last) parts.push({ t: "text", v: content.slice(last, m2.index) });
-    parts.push({ t: "code", lang: m2[1], v: m2[2].trimEnd() });
-    last = m2.index + m2[0].length;
+function MarkdownRenderer({ content, isStreaming = false }) {
+  if (isStreaming) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-md kc-md--live", children: /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: "kc-md-live-text", children: String(content || "") }) });
   }
-  if (last < content.length) parts.push({ t: "text", v: content.slice(last) });
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-md", children: parts.map(
-    (p2, i) => p2.t === "code" ? /* @__PURE__ */ jsxRuntimeExports.jsx(CodeBlock, { lang: p2.lang, code: p2.v }, i) : /* @__PURE__ */ jsxRuntimeExports.jsx(InlineText, { text: p2.v }, i)
-  ) });
+  const blocks = parseMarkdown(content || "");
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-md", children: blocks.map((b, i) => /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownBlock, { block: b }, `${b.type}-${i}`)) });
+}
+function MarkdownBlock({ block }) {
+  if (block.type === "code") return /* @__PURE__ */ jsxRuntimeExports.jsx(CodeBlock, { lang: block.lang, code: block.code });
+  if (block.type === "heading") {
+    const HeadingTag = `h${Math.min(6, Math.max(1, Number(block.level) || 1))}`;
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(HeadingTag, { className: `kc-md-heading kc-md-heading--h${block.level}`, children: /* @__PURE__ */ jsxRuntimeExports.jsx(InlineText, { text: block.text }) });
+  }
+  if (block.type === "ol") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("ol", { className: "kc-md-list kc-md-list--ol", start: block.start || 1, children: block.items.map((item, idx) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: /* @__PURE__ */ jsxRuntimeExports.jsx(InlineText, { text: item }) }, idx)) });
+  }
+  if (block.type === "ul") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "kc-md-list kc-md-list--ul", children: block.items.map((item, idx) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: /* @__PURE__ */ jsxRuntimeExports.jsx(InlineText, { text: item }) }, idx)) });
+  }
+  if (block.type === "quote") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("blockquote", { className: "kc-md-quote", children: block.lines.map((line, idx) => /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: /* @__PURE__ */ jsxRuntimeExports.jsx(InlineText, { text: line }) }, idx)) });
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "kc-md-paragraph", children: /* @__PURE__ */ jsxRuntimeExports.jsx(InlineText, { text: block.text }) });
+}
+function parseMarkdown(content) {
+  const lines = String(content || "").replace(/\r\n/g, "\n").split("\n");
+  const blocks = [];
+  let i = 0;
+  const isBlockStart = (line) => /^```/.test(line) || /^(#{1,6})\s+/.test(line) || /^>\s?/.test(line) || /^\d+\.\s+/.test(line) || /^[-*]\s+/.test(line);
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i += 1;
+      continue;
+    }
+    if (/^```/.test(line)) {
+      const lang = line.replace(/^```/, "").trim();
+      i += 1;
+      const codeLines = [];
+      while (i < lines.length && !/^```/.test(lines[i])) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length && /^```/.test(lines[i])) i += 1;
+      blocks.push({ type: "code", lang, code: codeLines.join("\n").trimEnd() });
+      continue;
+    }
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      blocks.push({ type: "heading", level: headingMatch[1].length, text: headingMatch[2] });
+      i += 1;
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      const quoteLines = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        quoteLines.push(lines[i].replace(/^>\s?/, ""));
+        i += 1;
+      }
+      blocks.push({ type: "quote", lines: quoteLines });
+      continue;
+    }
+    const ordered = line.match(/^(\d+)\.\s+(.+)$/);
+    if (ordered) {
+      const items = [];
+      const start = Number(ordered[1]) || 1;
+      while (i < lines.length) {
+        const m2 = lines[i].match(/^\d+\.\s+(.+)$/);
+        if (!m2) break;
+        items.push(m2[1]);
+        i += 1;
+      }
+      blocks.push({ type: "ol", start, items });
+      continue;
+    }
+    if (/^[-*]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length) {
+        const m2 = lines[i].match(/^[-*]\s+(.+)$/);
+        if (!m2) break;
+        items.push(m2[1]);
+        i += 1;
+      }
+      blocks.push({ type: "ul", items });
+      continue;
+    }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) {
+      para.push(lines[i].trim());
+      i += 1;
+    }
+    blocks.push({ type: "paragraph", text: para.join(" ") });
+  }
+  return blocks;
 }
 function InlineText({ text }) {
-  const html = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\*(.+?)\*/g, "<em>$1</em>").replace(/`([^`]+)`/g, '<code class="kc-inline-code">$1</code>').replace(/\n/g, "<br/>");
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { dangerouslySetInnerHTML: { __html: html } });
+  const src = String(text || "");
+  const nodes = [];
+  const re2 = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\((https?:\/\/[^\s)]+)\))/g;
+  let last = 0;
+  let match;
+  while ((match = re2.exec(src)) !== null) {
+    if (match.index > last) {
+      nodes.push(src.slice(last, match.index));
+    }
+    const token = match[0];
+    if (token.startsWith("**") && token.endsWith("**")) {
+      nodes.push(/* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: token.slice(2, -2) }, `b-${match.index}`));
+    } else if (token.startsWith("*") && token.endsWith("*")) {
+      nodes.push(/* @__PURE__ */ jsxRuntimeExports.jsx("em", { children: token.slice(1, -1) }, `i-${match.index}`));
+    } else if (token.startsWith("`") && token.endsWith("`")) {
+      nodes.push(/* @__PURE__ */ jsxRuntimeExports.jsx("code", { className: "kc-inline-code", children: token.slice(1, -1) }, `c-${match.index}`));
+    } else {
+      const linkMatch = token.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+      if (linkMatch) {
+        nodes.push(
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "a",
+            {
+              href: linkMatch[2],
+              target: "_blank",
+              rel: "noreferrer",
+              className: "kc-md-link",
+              children: linkMatch[1]
+            },
+            `a-${match.index}`
+          )
+        );
+      } else {
+        nodes.push(token);
+      }
+    }
+    last = match.index + token.length;
+  }
+  if (last < src.length) nodes.push(src.slice(last));
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(jsxRuntimeExports.Fragment, { children: nodes });
 }
 function CodeBlock({ lang, code }) {
   const [copied, setCopied] = reactExports.useState(false);
@@ -8833,12 +9718,25 @@ function formatTs(ts) {
     return "";
   }
 }
-function AgentApprovalModal({ ctx, value, onChange, onSend, onQuickReply, onDismiss }) {
+function AgentApprovalModal({ ctx, value, onChange, onSend, onQuickReply, onSkillApprove, onStop, onDismiss }) {
   const inputRef = reactExports.useRef(null);
   const [showSuggest, setShowSuggest] = reactExports.useState(false);
+  const [approvalNote, setApprovalNote] = reactExports.useState("");
+  const [approvalBusy, setApprovalBusy] = reactExports.useState("");
+  const [approvalError, setApprovalError] = reactExports.useState("");
+  const approvalRequest = ctx?.approvalRequest && typeof ctx.approvalRequest === "object" ? ctx.approvalRequest : {};
+  const approvalActions = approvalRequest.actions && typeof approvalRequest.actions === "object" ? approvalRequest.actions : {};
+  const approvalMetadata = approvalRequest.metadata && typeof approvalRequest.metadata === "object" ? approvalRequest.metadata : {};
+  const isSkillApproval = String(ctx?.kind || "").toLowerCase() === "skill_approval" || String(approvalMetadata.approval_mode || "").toLowerCase() === "skill_permission_grant";
   reactExports.useEffect(() => {
     if (showSuggest) inputRef.current?.focus();
   }, [showSuggest]);
+  reactExports.useEffect(() => {
+    setApprovalNote("");
+    setApprovalBusy("");
+    setApprovalError("");
+    setShowSuggest(false);
+  }, [ctx?.runId, ctx?.scope, ctx?.kind]);
   const handleKey = (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
@@ -8846,50 +9744,108 @@ function AgentApprovalModal({ ctx, value, onChange, onSend, onQuickReply, onDism
     }
     if (e.key === "Escape") onDismiss();
   };
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-modal-overlay", onClick: (e) => e.target === e.currentTarget && onDismiss(), children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-modal", children: [
+  const handleSkillApproval = async (scope) => {
+    if (!onSkillApprove) return;
+    setApprovalBusy(scope);
+    setApprovalError("");
+    try {
+      await onSkillApprove(scope, approvalNote);
+    } catch (err) {
+      setApprovalError(err.message || "Approval failed.");
+    } finally {
+      setApprovalBusy("");
+    }
+  };
+  const suggestedScopes = Array.isArray(approvalMetadata.suggested_scopes) && approvalMetadata.suggested_scopes.length ? approvalMetadata.suggested_scopes : ["once", "session", "always"];
+  const scopeLabels = {
+    once: "Allow once",
+    session: "Allow this session",
+    always: "Always allow"
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-modal-overlay", onClick: (e) => {
+    if (!isSkillApproval && e.target === e.currentTarget) onDismiss();
+  }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-modal", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-modal-header", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-modal-icon", children: "⏳" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-modal-title", children: "Agent is waiting for your input" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-modal-close", onClick: onDismiss, children: "✕" })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-modal-icon", children: isSkillApproval ? "🛡️" : "⏳" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-modal-title", children: approvalRequest.title || (isSkillApproval ? "Skill permission required" : "Agent is waiting for your input") }),
+      !isSkillApproval && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-modal-close", onClick: onDismiss, children: "✕" })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-modal-prompt", children: /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: ctx.prompt }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-modal-quick", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-modal-quick-btn kc-modal-quick-btn--approve", onClick: () => onQuickReply("approve"), children: "Approve" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          className: `kc-modal-quick-btn kc-modal-quick-btn--suggest${showSuggest ? " kc-modal-quick-btn--active" : ""}`,
-          onClick: () => {
-            setShowSuggest((v2) => !v2);
-            onChange("");
+    (approvalRequest.summary || ctx.prompt) && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-modal-prompt", children: /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: approvalRequest.summary || ctx.prompt }) }),
+    Array.isArray(approvalRequest.sections) && approvalRequest.sections.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-approval-sections", children: approvalRequest.sections.map((section, index2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-approval-section", children: [
+      section.title && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-approval-section-title", children: section.title }),
+      Array.isArray(section.items) && section.items.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "kc-approval-list", children: section.items.map((item, itemIndex) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: item }, `${index2}-${itemIndex}`)) })
+    ] }, `${section.title || "section"}-${index2}`)) }),
+    approvalRequest.help_text && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-approval-help", children: approvalRequest.help_text }),
+    isSkillApproval ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-approval-note-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "kc-approval-label", children: "Approval note" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "textarea",
+          {
+            className: "kc-modal-input",
+            placeholder: "Optional note for the audit log",
+            value: approvalNote,
+            onChange: (e) => setApprovalNote(e.target.value),
+            rows: 2
+          }
+        )
+      ] }),
+      approvalError && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-approval-error", children: [
+        "⚠ ",
+        approvalError
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-modal-quick kc-modal-quick--stacked", children: [
+        suggestedScopes.map((scope) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: "kc-modal-quick-btn kc-modal-quick-btn--approve",
+            onClick: () => handleSkillApproval(scope),
+            disabled: !!approvalBusy,
+            children: approvalBusy === scope ? "Approving…" : scopeLabels[scope] || `Approve (${scope})`
           },
-          children: "Suggest"
-        }
-      ),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-modal-quick-btn kc-modal-quick-btn--reject", onClick: () => onQuickReply("cancel"), children: "Reject" })
-    ] }),
-    showSuggest && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-modal-input-row", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "textarea",
-        {
-          ref: inputRef,
-          className: "kc-modal-input",
-          placeholder: "Type your suggestion… (Ctrl+Enter to send)",
-          value,
-          onChange: (e) => onChange(e.target.value),
-          onKeyDown: handleKey,
-          rows: 3
-        }
-      ),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          className: "kc-modal-send",
-          onClick: onSend,
-          disabled: !value.trim(),
-          children: /* @__PURE__ */ jsxRuntimeExports.jsx(SendIcon$1, {})
-        }
-      )
+          scope
+        )),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-modal-quick-btn kc-modal-quick-btn--reject", onClick: onStop, children: "Stop run" })
+      ] })
+    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-modal-quick", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-modal-quick-btn kc-modal-quick-btn--approve", onClick: () => onQuickReply("approve"), children: approvalActions.accept_label || "Approve" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: `kc-modal-quick-btn kc-modal-quick-btn--suggest${showSuggest ? " kc-modal-quick-btn--active" : ""}`,
+            onClick: () => {
+              setShowSuggest((v2) => !v2);
+              onChange("");
+            },
+            children: approvalActions.suggest_label || "Suggest"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-modal-quick-btn kc-modal-quick-btn--reject", onClick: () => onQuickReply("cancel"), children: approvalActions.reject_label || "Reject" })
+      ] }),
+      showSuggest && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-modal-input-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "textarea",
+          {
+            ref: inputRef,
+            className: "kc-modal-input",
+            placeholder: "Type your suggestion… (Ctrl+Enter to send)",
+            value,
+            onChange: (e) => onChange(e.target.value),
+            onKeyDown: handleKey,
+            rows: 3
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: "kc-modal-send",
+            onClick: onSend,
+            disabled: !value.trim(),
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(SendIcon$1, {})
+          }
+        )
+      ] })
     ] })
   ] }) });
 }
@@ -9181,6 +10137,21 @@ function ModelPicker({ ollamaModels, onRefreshOllama, providerStatuses, getProvi
     const name = String(modelId || "").replace(new RegExp(`^${provider}/`), "");
     return Array.isArray(status.model_badges?.[name]) ? status.model_badges[name] : [];
   };
+  const isAgentCapable = (provider, modelName) => {
+    const status = providerStatuses[provider] || {};
+    const details = Array.isArray(status.selectable_model_details) ? status.selectable_model_details : [];
+    const matched = details.find((item) => String(item?.name || "") === String(modelName || ""));
+    if (matched && typeof matched.agent_capable === "boolean") return matched.agent_capable;
+    if (provider === "ollama") return false;
+    if (String(status.model || "") === String(modelName || "") && typeof status.agent_capable === "boolean") return status.agent_capable;
+    return false;
+  };
+  reactExports.useEffect(() => {
+    if (!state.selectedModel) return;
+    if (!resolveAgentCapability(state.selectedModel, { providers: Object.values(providerStatuses) })) {
+      dispatch({ type: "SET_MODEL", model: null });
+    }
+  }, [dispatch, providerStatuses, state.selectedModel]);
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-root", ref: rootRef, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: `mp-trigger ${selectedProviderLost ? "mp-trigger--warn" : ""}`, onClick: () => setOpen((o) => !o), children: [
       selectedProvider && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-provider-dot ${selectedProvider}` }),
@@ -9216,22 +10187,28 @@ function ModelPicker({ ollamaModels, onRefreshOllama, providerStatuses, getProvi
             ] }),
             ui2.kind === "error" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-key-badge error", children: "error" })
           ] }),
-          models.map((m2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
-            {
-              className: `mp-option ${selected === m2.id ? "active" : ""} ${!isConfigured ? "mp-option--dim" : ""}`,
-              onClick: () => select(m2.id, !isConfigured),
-              title: !isConfigured ? ui2.title : m2.label,
-              disabled: !isConfigured,
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-name", children: m2.label }),
-                getModelBadges(provider, m2.id).map((badge) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-model-badge ${badge}`, children: badge }, `${m2.id}:${badge}`)),
-                !isConfigured && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-lock", children: "🔒" }),
-                selected === m2.id && isConfigured && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-check", children: "✓" })
-              ]
-            },
-            m2.id
-          )),
+          models.map((m2) => (() => {
+            const modelName = String(m2.id || "").replace(`${provider}/`, "");
+            const agentCapable = isAgentCapable(provider, modelName);
+            const disabled = !isConfigured || !agentCapable;
+            return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                className: `mp-option ${selected === m2.id ? "active" : ""} ${disabled ? "mp-option--dim" : ""}`,
+                onClick: () => select(m2.id, disabled),
+                title: !isConfigured ? ui2.title : !agentCapable ? "No agent capability: tool/function calls unavailable." : m2.label,
+                disabled,
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-name", children: m2.label }),
+                  getModelBadges(provider, m2.id).map((badge) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-model-badge ${badge}`, children: badge }, `${m2.id}:${badge}`)),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-model-badge ${agentCapable ? "agent" : "noagent"}`, children: agentCapable ? "agent" : "no-agent" }),
+                  disabled && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-lock", children: "🔒" }),
+                  selected === m2.id && !disabled && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-check", children: "✓" })
+                ]
+              },
+              m2.id
+            );
+          })()),
           !isConfigured && /* @__PURE__ */ jsxRuntimeExports.jsx(
             "button",
             {
@@ -9259,18 +10236,22 @@ function ModelPicker({ ollamaModels, onRefreshOllama, providerStatuses, getProvi
           }, children: "Pull a model →" })
         ] }) : ollamaModels.map((m2) => {
           const id2 = `ollama/${m2.name || m2}`;
+          const disabled = true;
           return /* @__PURE__ */ jsxRuntimeExports.jsxs(
             "button",
             {
-              className: `mp-option ${selected === id2 ? "active" : ""}`,
-              onClick: () => select(id2, false),
+              className: `mp-option ${selected === id2 ? "active" : ""} mp-option--dim`,
+              onClick: () => select(id2, disabled),
+              title: "Local models disabled for agent mode: no supported agent capability.",
+              disabled,
               children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-name", children: m2.name || m2 }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-model-badge noagent", children: "no-agent" }),
                 m2.size && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "mp-option-size", children: [
                   (m2.size / 1e9).toFixed(1),
                   " GB"
                 ] }),
-                selected === id2 && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-check", children: "✓" })
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-lock", children: "🔒" })
               ]
             },
             id2
@@ -9528,6 +10509,132 @@ function groupBy(arr, key) {
     return acc;
   }, {});
 }
+function sandboxPresentation(sandbox) {
+  const mode = String(sandbox?.mode || "").trim().toLowerCase();
+  if (mode === "bubblewrap") return { label: "Sandboxed", tone: "ok" };
+  if (mode === "blocked") return { label: "Blocked", tone: "err" };
+  if (mode === "process_isolated_only") return { label: "Process only", tone: "warn" };
+  if (mode === "configurable") return { label: "Configurable", tone: "warn" };
+  if (mode === "full_access") return { label: "Full access", tone: "err" };
+  if (mode === "in_process") return { label: "No sandbox", tone: "muted" };
+  return { label: "Unknown", tone: "muted" };
+}
+function badgeStyle(tone) {
+  if (tone === "ok") return { background: "#27ae6018", color: "#27ae60", border: "1px solid #27ae6044" };
+  if (tone === "warn") return { background: "#f39c1218", color: "#d68910", border: "1px solid #f39c1244" };
+  if (tone === "err") return { background: "#e74c3c18", color: "#e74c3c", border: "1px solid #e74c3c44" };
+  return { background: "var(--bg)", color: "var(--text-muted)", border: "1px solid var(--border)" };
+}
+function SandboxBadge({ sandbox }) {
+  const visual = sandboxPresentation(sandbox);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, padding: "1px 7px", borderRadius: 4, fontWeight: 600, ...badgeStyle(visual.tone) }, children: visual.label });
+}
+function SandboxDetail({ sandbox, compact = false }) {
+  if (!sandbox) return null;
+  const reason = String(sandbox.reason || "").trim();
+  const installHint = String(sandbox.install_hint || "").trim();
+  const mode = String(sandbox.mode || "").trim().toLowerCase();
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 4 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(SandboxBadge, { sandbox }),
+      sandbox.provider && sandbox.provider !== "none" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "var(--text-muted)" }, children: sandbox.provider })
+    ] }),
+    !compact && reason && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "var(--text-muted)", lineHeight: 1.45 }, children: reason }),
+    !compact && installHint && (mode === "blocked" || mode === "process_isolated_only") && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "var(--text-muted)", lineHeight: 1.45 }, children: installHint })
+  ] });
+}
+function RuntimeSandboxBanner({ runtime }) {
+  if (!runtime || runtime.available) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      style: {
+        background: "rgba(243,156,18,.10)",
+        border: "1px solid rgba(243,156,18,.28)",
+        borderRadius: 10,
+        padding: "12px 14px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 6
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: 13 }, children: "Sandbox limited" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(SandboxBadge, { sandbox: { mode: runtime.supported ? "blocked" : "process_isolated_only" } })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }, children: runtime.reason || "Sandbox support is not fully available in this environment." }),
+        runtime.install_hint && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }, children: runtime.install_hint })
+      ]
+    }
+  );
+}
+function _safeJsonParse(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+function _defaultDesktopForm() {
+  return {
+    action: "list_apps",
+    app: "generic",
+    access_mode: "sandbox",
+    app_name: "",
+    office_app: "outlook",
+    phone_number: "",
+    handle: "",
+    message: "",
+    document_path: "",
+    url: "",
+    timeout: 10
+  };
+}
+function _desktopFormFromInputs(inputs) {
+  const source = inputs && typeof inputs === "object" ? inputs : {};
+  return {
+    ..._defaultDesktopForm(),
+    action: String(source.action || "list_apps"),
+    app: String(source.app || "generic"),
+    access_mode: String(source.access_mode || "sandbox"),
+    app_name: String(source.app_name || ""),
+    office_app: String(source.office_app || "outlook"),
+    phone_number: String(source.phone_number || ""),
+    handle: String(source.handle || ""),
+    message: String(source.message || ""),
+    document_path: String(source.document_path || ""),
+    url: String(source.url || ""),
+    timeout: Number.isFinite(Number(source.timeout)) ? Number(source.timeout) : 10
+  };
+}
+function _desktopInputsFromForm(form) {
+  const source = form || _defaultDesktopForm();
+  const action = String(source.action || "list_apps");
+  const app = String(source.app || "generic");
+  const payload = {
+    action,
+    app,
+    access_mode: String(source.access_mode || "sandbox")
+  };
+  const timeout = Number(source.timeout);
+  if (Number.isFinite(timeout) && timeout > 0) payload.timeout = timeout;
+  if (action === "open_app") {
+    if (app === "generic" && String(source.app_name || "").trim()) payload.app_name = String(source.app_name).trim();
+    if (app === "microsoft_365" && String(source.office_app || "").trim()) payload.office_app = String(source.office_app).trim();
+  }
+  if (action === "open_chat") {
+    if (app === "whatsapp" && String(source.phone_number || "").trim()) payload.phone_number = String(source.phone_number).trim();
+    if (app === "telegram" && String(source.handle || "").trim()) payload.handle = String(source.handle).trim();
+    if (String(source.message || "").trim()) payload.message = String(source.message).trim();
+  }
+  if (action === "open_document" && String(source.document_path || "").trim()) {
+    payload.document_path = String(source.document_path).trim();
+  }
+  if (action === "open_url" && String(source.url || "").trim()) {
+    payload.url = String(source.url).trim();
+  }
+  return payload;
+}
 function SkillsPanel() {
   const { state } = useApp();
   const base = state.backendUrl || "http://127.0.0.1:2151";
@@ -9597,6 +10704,7 @@ function SkillsPanel() {
   const custom = data?.custom || [];
   const categories = data?.categories || [];
   const installedCount = data?.installed_count ?? 0;
+  const sandboxRuntime = data?.sandbox_runtime || null;
   const filteredCatalog = catalog.filter((s) => {
     if (tab === "installed" && !s.is_installed) return false;
     return true;
@@ -9622,6 +10730,7 @@ function SkillsPanel() {
           installedCount,
           " installed"
         ] }),
+        sandboxRuntime && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `pp-badge ${sandboxRuntime.available ? "pp-badge--ok" : "pp-badge--warn"}`, children: sandboxRuntime.available ? "Sandbox ready" : "Sandbox limited" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "pp-btn pp-btn--ghost", onClick: load, children: "↺ Refresh" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           "button",
@@ -9639,6 +10748,7 @@ function SkillsPanel() {
       err,
       /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setErr(null), children: "✕" })
     ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(RuntimeSandboxBanner, { runtime: sandboxRuntime }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-filters", style: { gap: 8 }, children: [
       [["all", "All Skills"], ["installed", "Installed"]].map(([val, label]) => /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
@@ -9810,7 +10920,8 @@ function CatalogSkillCard({ skill, busy, onInstall, onUninstall, onTest }) {
         skill.requires_config?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "var(--warn, #e6a700)", display: "flex", alignItems: "center", gap: 4 }, children: [
           "⚙ Requires: ",
           skill.requires_config.join(", ")
-        ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SandboxDetail, { sandbox: skill.sandbox, compact: true })
       ]
     }
   );
@@ -9855,7 +10966,8 @@ function CustomSkillCard({ skill, onTest, onDelete }) {
             )
           ] })
         ] }),
-        skill.tags?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4 }, children: skill.tags.slice(0, 4).map((t2, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-intent-chip", style: { fontSize: 11 }, children: t2 }, i)) })
+        skill.tags?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4 }, children: skill.tags.slice(0, 4).map((t2, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-intent-chip", style: { fontSize: 11 }, children: t2 }, i)) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SandboxDetail, { sandbox: skill.sandbox, compact: true })
       ]
     }
   );
@@ -9983,6 +11095,10 @@ function CreateSkillModal({ base, onClose, onCreated }) {
   ] }) });
 }
 function TestSkillModal({ base, skill, onClose }) {
+  const skillId = skill.skill_id || skill.id;
+  const isDesktopAutomationSkill = String(skill?.catalog_id || skill?.slug || "").trim() === "desktop-automation";
+  const approvalSessionIdRef = reactExports.useRef(`skill-test-${String(skillId || "skill").replace(/[^a-z0-9_-]+/ig, "-")}-${Date.now().toString(36)}`);
+  const approvalSessionId = approvalSessionIdRef.current;
   const [inputJson, setInputJson] = reactExports.useState(() => {
     try {
       const schema = skill.input_schema || {};
@@ -10001,9 +11117,45 @@ function TestSkillModal({ base, skill, onClose }) {
   const [result, setResult] = reactExports.useState(null);
   const [busy, setBusy] = reactExports.useState(false);
   const [err, setErr] = reactExports.useState(null);
-  const run = async () => {
+  const [approvalRequest, setApprovalRequest] = reactExports.useState(null);
+  const [approvalNote, setApprovalNote] = reactExports.useState("");
+  const [approvalBusy, setApprovalBusy] = reactExports.useState("");
+  const [approvalErr, setApprovalErr] = reactExports.useState(null);
+  const [grants, setGrants] = reactExports.useState([]);
+  const [revokeBusy, setRevokeBusy] = reactExports.useState("");
+  const [desktopForm, setDesktopForm] = reactExports.useState(() => {
+    const parsed = _safeJsonParse(inputJson);
+    return _desktopFormFromInputs(parsed || {});
+  });
+  const loadApprovals = reactExports.useCallback(async () => {
+    try {
+      const r2 = await fetch(`${base}/api/marketplace/skills/${skillId}/approvals?status=active`);
+      const data = await r2.json().catch(() => ({}));
+      if (!r2.ok) throw new Error(data.error || r2.statusText);
+      setGrants(Array.isArray(data.items) ? data.items : []);
+    } catch (_2) {
+    }
+  }, [base, skillId]);
+  reactExports.useEffect(() => {
+    loadApprovals();
+  }, [loadApprovals]);
+  reactExports.useEffect(() => {
+    if (!isDesktopAutomationSkill) return;
+    const parsed = _safeJsonParse(inputJson);
+    if (!parsed || typeof parsed !== "object") return;
+    setDesktopForm(_desktopFormFromInputs(parsed));
+  }, [inputJson, isDesktopAutomationSkill]);
+  const setDesktopField = reactExports.useCallback((field, value) => {
+    setDesktopForm((prev) => {
+      const next = { ...prev, [field]: value };
+      setInputJson(JSON.stringify(_desktopInputsFromForm(next), null, 2));
+      return next;
+    });
+  }, []);
+  const run = reactExports.useCallback(async () => {
     setBusy(true);
     setErr(null);
+    setApprovalErr(null);
     setResult(null);
     try {
       let inputs;
@@ -10012,20 +11164,77 @@ function TestSkillModal({ base, skill, onClose }) {
       } catch {
         throw new Error("Invalid JSON in inputs");
       }
-      const skillId = skill.skill_id || skill.id;
       const r2 = await fetch(`${base}/api/marketplace/skills/${skillId}/test`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ inputs })
+        body: JSON.stringify({ inputs, session_id: approvalSessionId })
       });
-      const data = await r2.json();
+      const data = await r2.json().catch(() => ({}));
+      if (r2.status === 409 || data?.error_type === "approval_required") {
+        setApprovalRequest(data);
+        setResult(data);
+        await loadApprovals();
+        return;
+      }
+      if (!r2.ok) throw new Error(data.error || data.detail || r2.statusText);
+      setApprovalRequest(null);
       setResult(data);
     } catch (e) {
       setErr(e.message);
     } finally {
       setBusy(false);
+      loadApprovals();
     }
-  };
+  }, [approvalSessionId, base, inputJson, loadApprovals, skillId]);
+  const approve = reactExports.useCallback(async (scope) => {
+    setApprovalBusy(scope);
+    setApprovalErr(null);
+    try {
+      const r2 = await fetch(`${base}/api/marketplace/skills/${skillId}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope,
+          note: approvalNote.trim() || `Approved ${skill.name || skill.slug || skillId} from the desktop skills panel (${scope}).`,
+          session_id: approvalSessionId
+        })
+      });
+      const data = await r2.json().catch(() => ({}));
+      if (!r2.ok || !data.ok) throw new Error(data.error || data.detail || r2.statusText);
+      setApprovalRequest(null);
+      await loadApprovals();
+      await run();
+    } catch (e) {
+      setApprovalErr(e.message);
+    } finally {
+      setApprovalBusy("");
+    }
+  }, [approvalNote, approvalSessionId, base, loadApprovals, run, skill.name, skill.slug, skillId]);
+  const revokeGrant = reactExports.useCallback(async (grantId) => {
+    setRevokeBusy(grantId);
+    setApprovalErr(null);
+    try {
+      const r2 = await fetch(`${base}/api/marketplace/skills/${skillId}/revoke-approval`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grant_id: grantId })
+      });
+      const data = await r2.json().catch(() => ({}));
+      if (!r2.ok || !data.ok) throw new Error(data.error || data.detail || r2.statusText);
+      await loadApprovals();
+    } catch (e) {
+      setApprovalErr(e.message);
+    } finally {
+      setRevokeBusy("");
+    }
+  }, [base, loadApprovals, skillId]);
+  const approvalSections = Array.isArray(approvalRequest?.approval_request?.sections) ? approvalRequest.approval_request.sections : [];
+  const suggestedScopes = Array.isArray(approvalRequest?.approval_request?.metadata?.suggested_scopes) ? approvalRequest.approval_request.metadata.suggested_scopes : ["once", "session", "always"];
+  const isApprovalPending = approvalRequest?.error_type === "approval_required";
+  const activeGrants = grants.filter((grant) => String(grant.status || "").toLowerCase() === "active");
+  const effectiveSandbox = result?.sandbox || skill?.sandbox || null;
+  const desktopAutomation = skill?.desktop_automation || null;
+  const desktopApps = Array.isArray(desktopAutomation?.supported_apps) ? desktopAutomation.supported_apps : [];
   return /* @__PURE__ */ jsxRuntimeExports.jsx(ModalOverlay, { onClose, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { width: 560, maxHeight: "85vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontWeight: 700, fontSize: 16 }, children: [
       skill.icon || "⚡",
@@ -10037,16 +11246,90 @@ function TestSkillModal({ base, skill, onClose }) {
       "⚠ ",
       err
     ] }),
+    approvalErr && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#e74c3c", fontSize: 13 }, children: [
+      "⚠ ",
+      approvalErr
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "pp-badge pp-badge--muted", children: [
+        "Session ",
+        approvalSessionId.slice(-10)
+      ] }),
+      activeGrants.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "pp-badge pp-badge--warn", children: [
+        activeGrants.length,
+        " active grant",
+        activeGrants.length === 1 ? "" : "s"
+      ] })
+    ] }),
+    desktopAutomation && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 8, background: "rgba(52,152,219,.08)", border: "1px solid rgba(52,152,219,.22)", borderRadius: 10, padding: 12 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600, fontSize: 13 }, children: "Desktop automation modes" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }, children: desktopAutomation.sandbox_notice }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }, children: desktopAutomation.full_access_warning }),
+      Array.isArray(desktopAutomation.supported_apps) && desktopAutomation.supported_apps.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 }, children: desktopAutomation.supported_apps.map((app) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-badge pp-badge--info", children: app.name }, app.id)) })
+    ] }),
+    effectiveSandbox && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 8, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, padding: 12 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600, fontSize: 13 }, children: "Execution boundary" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(SandboxDetail, { sandbox: effectiveSandbox })
+    ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "Inputs (JSON)", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
       "textarea",
       {
         value: inputJson,
-        onChange: (e) => setInputJson(e.target.value),
+        onChange: (e) => {
+          const next = e.target.value;
+          setInputJson(next);
+          if (isDesktopAutomationSkill) {
+            const parsed = _safeJsonParse(next);
+            if (parsed && typeof parsed === "object") setDesktopForm(_desktopFormFromInputs(parsed));
+          }
+        },
         rows: 6,
         className: "modal-input",
         style: { fontFamily: "monospace", fontSize: 12, resize: "vertical" }
       }
     ) }),
+    isDesktopAutomationSkill && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "Access mode", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { className: "modal-input", value: desktopForm.access_mode, onChange: (e) => setDesktopField("access_mode", e.target.value), children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "sandbox", children: "sandbox (preview only)" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "full_access", children: "full_access (native dispatch)" })
+      ] }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "Action", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { className: "modal-input", value: desktopForm.action, onChange: (e) => setDesktopField("action", e.target.value), children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "list_apps", children: "list_apps" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "open_app", children: "open_app" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "open_chat", children: "open_chat" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "open_document", children: "open_document" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "open_url", children: "open_url" })
+      ] }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "App", children: /* @__PURE__ */ jsxRuntimeExports.jsx("select", { className: "modal-input", value: desktopForm.app, onChange: (e) => setDesktopField("app", e.target.value), children: (desktopApps.length ? desktopApps : [
+        { id: "generic", name: "Generic Native App" },
+        { id: "whatsapp", name: "WhatsApp" },
+        { id: "telegram", name: "Telegram" },
+        { id: "microsoft_365", name: "Microsoft 365" }
+      ]).map((app) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: app.id, children: app.id }, app.id)) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "Timeout (s)", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "input",
+        {
+          className: "modal-input",
+          type: "number",
+          min: 1,
+          value: desktopForm.timeout,
+          onChange: (e) => setDesktopField("timeout", Number(e.target.value || 10))
+        }
+      ) }),
+      desktopForm.action === "open_app" && desktopForm.app === "generic" && /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "App name", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "modal-input", value: desktopForm.app_name, onChange: (e) => setDesktopField("app_name", e.target.value), placeholder: "Telegram Desktop" }) }),
+      desktopForm.action === "open_app" && desktopForm.app === "microsoft_365" && /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "Office app", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { className: "modal-input", value: desktopForm.office_app, onChange: (e) => setDesktopField("office_app", e.target.value), children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "outlook", children: "outlook" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "word", children: "word" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "excel", children: "excel" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "powerpoint", children: "powerpoint" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "teams", children: "teams" })
+      ] }) }),
+      desktopForm.action === "open_chat" && desktopForm.app === "whatsapp" && /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "Phone number", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "modal-input", value: desktopForm.phone_number, onChange: (e) => setDesktopField("phone_number", e.target.value), placeholder: "+14155550123" }) }),
+      desktopForm.action === "open_chat" && desktopForm.app === "telegram" && /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "Telegram handle", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "modal-input", value: desktopForm.handle, onChange: (e) => setDesktopField("handle", e.target.value), placeholder: "OpenAI" }) }),
+      desktopForm.action === "open_chat" && /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "Message", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "modal-input", value: desktopForm.message, onChange: (e) => setDesktopField("message", e.target.value), placeholder: "Optional message draft" }) }),
+      desktopForm.action === "open_document" && /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "Document path", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "modal-input", value: desktopForm.document_path, onChange: (e) => setDesktopField("document_path", e.target.value), placeholder: "/path/to/file.docx" }) }),
+      desktopForm.action === "open_url" && /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "URL", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "modal-input", value: desktopForm.url, onChange: (e) => setDesktopField("url", e.target.value), placeholder: "https://example.com" }) })
+    ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx(
       "button",
       {
@@ -10056,7 +11339,80 @@ function TestSkillModal({ base, skill, onClose }) {
         children: busy ? "⏳ Running…" : "▶ Run Test"
       }
     ),
-    result && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 8 }, children: [
+    isApprovalPending && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 10, background: "rgba(255,179,71,.08)", border: "1px solid rgba(255,179,71,.3)", borderRadius: 10, padding: 14 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: 13 }, children: "Permission required" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-badge pp-badge--warn", children: "approval required" })
+      ] }),
+      approvalRequest?.approval_request?.summary && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", lineHeight: 1.55 }, children: approvalRequest.approval_request.summary }),
+      approvalSections.map((section, index2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 6 }, children: [
+        section.title && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".08em" }, children: section.title }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { style: { margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4, color: "var(--text)" }, children: (section.items || []).map((item, itemIndex) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { style: { fontSize: 12, lineHeight: 1.5 }, children: item }, `${index2}-${itemIndex}`)) })
+      ] }, `${section.title || "section"}-${index2}`)),
+      approvalRequest?.approval_request?.help_text && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }, children: approvalRequest.approval_request.help_text }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FormField, { label: "Approval note", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "textarea",
+        {
+          value: approvalNote,
+          onChange: (e) => setApprovalNote(e.target.value),
+          rows: 2,
+          className: "modal-input",
+          placeholder: "Optional note for the audit log"
+        }
+      ) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" }, children: suggestedScopes.map((scope) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => approve(scope),
+          disabled: !!approvalBusy,
+          className: "pp-btn pp-btn--primary",
+          children: approvalBusy === scope ? "Approving…" : scope === "session" ? "Allow this session" : scope === "always" ? "Always allow" : "Allow once"
+        },
+        scope
+      )) })
+    ] }),
+    activeGrants.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 8 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600, fontSize: 13 }, children: "Active grants" }),
+      activeGrants.map((grant) => {
+        const isCurrentSession = grant.session_id && grant.session_id === approvalSessionId;
+        return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              padding: "10px 12px",
+              background: "var(--bg)"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-badge pp-badge--ok", children: grant.scope }),
+                  isCurrentSession && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-badge pp-badge--info", children: "current session" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "var(--text-muted)" }, children: grant.actor || "user" })
+                ] }),
+                grant.note && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", lineHeight: 1.45 }, children: grant.note })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  onClick: () => revokeGrant(grant.grant_id),
+                  disabled: revokeBusy === grant.grant_id,
+                  className: "pp-btn pp-btn--ghost",
+                  children: revokeBusy === grant.grant_id ? "Revoking…" : "Revoke"
+                }
+              )
+            ]
+          },
+          grant.grant_id
+        );
+      })
+    ] }),
+    result && !isApprovalPending && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 8 }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, fontSize: 13 }, children: "Result" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
@@ -10066,10 +11422,12 @@ function TestSkillModal({ base, skill, onClose }) {
           background: result.success ? "#27ae6018" : "#e74c3c18",
           color: result.success ? "#27ae60" : "#e74c3c",
           border: `1px solid ${result.success ? "#27ae6044" : "#e74c3c44"}`
-        }, children: result.success ? "✓ success" : "✕ failed" })
+        }, children: result.success ? "✓ success" : "✕ failed" }),
+        typeof result.output?.preview_only === "boolean" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `pp-badge ${result.output.preview_only ? "pp-badge--warn" : "pp-badge--ok"}`, children: result.output.preview_only ? "preview only" : "dispatched" })
       ] }),
       result.stdout && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { style: { background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, padding: 10, fontSize: 12, overflowX: "auto", maxHeight: 200, margin: 0 }, children: result.stdout }),
-      result.error && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { style: { background: "#e74c3c0a", border: "1px solid #e74c3c44", borderRadius: 6, padding: 10, fontSize: 12, color: "#e74c3c", overflowX: "auto", maxHeight: 150, margin: 0 }, children: result.error })
+      result.error && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { style: { background: "#e74c3c0a", border: "1px solid #e74c3c44", borderRadius: 6, padding: 10, fontSize: 12, color: "#e74c3c", overflowX: "auto", maxHeight: 150, margin: 0 }, children: result.error }),
+      result.output && typeof result.output === "object" && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { style: { background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, padding: 10, fontSize: 12, overflowX: "auto", maxHeight: 220, margin: 0 }, children: JSON.stringify(result.output, null, 2) })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", justifyContent: "flex-end" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "pp-btn pp-btn--ghost", onClick: onClose, children: "Close" }) })
   ] }) });
@@ -11170,15 +12528,15 @@ function TerminalPanel() {
       }
       try {
         const { Terminal } = await __vitePreload(async () => {
-          const { Terminal: Terminal2 } = await import("./xterm-BzJi2P6l.js").then((n2) => n2.x);
+          const { Terminal: Terminal2 } = await import("./xterm-DG8GPk84.js").then((n2) => n2.x);
           return { Terminal: Terminal2 };
         }, true ? [] : void 0, import.meta.url);
         const { FitAddon } = await __vitePreload(async () => {
-          const { FitAddon: FitAddon2 } = await import("./addon-fit-YsM5urVF.js").then((n2) => n2.a);
+          const { FitAddon: FitAddon2 } = await import("./addon-fit-BS4PYES_.js").then((n2) => n2.a);
           return { FitAddon: FitAddon2 };
         }, true ? [] : void 0, import.meta.url);
         const { WebLinksAddon } = await __vitePreload(async () => {
-          const { WebLinksAddon: WebLinksAddon2 } = await import("./addon-web-links-5EeBBFje.js").then((n2) => n2.a);
+          const { WebLinksAddon: WebLinksAddon2 } = await import("./addon-web-links-Dr3PXSD5.js").then((n2) => n2.a);
           return { WebLinksAddon: WebLinksAddon2 };
         }, true ? [] : void 0, import.meta.url);
         if (cancelled) return;
@@ -12696,14 +14054,14 @@ function HomePanel() {
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hero-metrics", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Connected cloud providers", value: String(connectedCloudProviders), detail: "OpenAI, Anthropic, Google, xAI" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Detected local models", value: String(localModels), detail: "Ollama-ready engines" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Recent runs", value: String(runs.length), detail: "Durable execution history" })
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard$1, { label: "Connected cloud providers", value: String(connectedCloudProviders), detail: "OpenAI, Anthropic, Google, xAI" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard$1, { label: "Detected local models", value: String(localModels), detail: "Ollama-ready engines" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard$1, { label: "Recent runs", value: String(runs.length), detail: "Durable execution history" })
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "grid-two", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "surface-card", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "Recommended Next Steps", subtitle: "Get to a complete first run quickly." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader$1, { title: "Recommended Next Steps", subtitle: "Get to a complete first run quickly." }),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           ActionRow,
           {
@@ -12733,7 +14091,7 @@ function HomePanel() {
         )
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "surface-card", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "Workspace Status", subtitle: "A product view of the current environment." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader$1, { title: "Workspace Status", subtitle: "A product view of the current environment." }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "status-grid", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(StatusPill, { label: "Backend", value: state.backendStatus, tone: state.backendStatus === "running" ? "ok" : "warn" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx(StatusPill, { label: "Project", value: state.projectRoot ? state.projectRoot.split(/[\\/]/).pop() : "Not connected", tone: state.projectRoot ? "neutral" : "warn" }),
@@ -12743,7 +14101,7 @@ function HomePanel() {
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "surface-card", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "Recent Activity", subtitle: "The most recent assistant and workflow runs." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader$1, { title: "Recent Activity", subtitle: "The most recent assistant and workflow runs." }),
       recentRuns.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "empty-state", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "empty-state__title", children: "No runs yet" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "empty-state__body", children: "Start in Studio to create an assistant or open Runs after your first task completes." })
@@ -12756,13 +14114,13 @@ function HomePanel() {
     ] })
   ] });
 }
-function SectionHeader({ title, subtitle }) {
+function SectionHeader$1({ title, subtitle }) {
   return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "section-header", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: title }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: subtitle })
   ] }) });
 }
-function MetricCard({ label, value, detail }) {
+function MetricCard$1({ label, value, detail }) {
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "metric-card", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__label", children: label }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__value", children: value }),
@@ -13572,7 +14930,7 @@ const TABS$2 = [
   { id: "overview", label: "◎ Overview" },
   { id: "tool-sources", label: "🔌 MCP Servers" },
   { id: "skills", label: "⚡ Skills" },
-  { id: "plugins", label: "🧩 Plugins" }
+  { id: "integrations", label: "🧩 Service Integrations" }
 ];
 function IntegrationsHub() {
   const [tab, setTab] = reactExports.useState("overview");
@@ -13595,7 +14953,7 @@ function IntegrationsHub() {
     tab === "overview" && /* @__PURE__ */ jsxRuntimeExports.jsx(ConnectorOverview, { onNavigate: setTab }),
     tab === "tool-sources" && /* @__PURE__ */ jsxRuntimeExports.jsx(MCPPanel, {}),
     tab === "skills" && /* @__PURE__ */ jsxRuntimeExports.jsx(SkillsPanel, {}),
-    tab === "plugins" && /* @__PURE__ */ jsxRuntimeExports.jsx(PluginsPanel, {})
+    tab === "integrations" && /* @__PURE__ */ jsxRuntimeExports.jsx(IntegrationsPanel, {})
   ] });
 }
 function ConnectorOverview({ onNavigate }) {
@@ -13632,7 +14990,7 @@ function ConnectorOverview({ onNavigate }) {
   const skills = byType.skill || [];
   const mcpTools = byType.mcp_tool || [];
   const agents = byType.task_agent || [];
-  const plugins = byType.plugin || [];
+  const integrations = byType.integration || byType.plugin || [];
   const ready = connectors.filter((c) => c.status === "ready").length;
   const needsConfig = connectors.filter((c) => c.status === "needs_config").length;
   const total = connectors.length;
@@ -13649,7 +15007,7 @@ function ConnectorOverview({ onNavigate }) {
     [
       { key: "skill", items: skills, label: "⚡ Skills", tab: "skills", emptyAction: "Install skills to give agents reusable capabilities." },
       { key: "mcp_tool", items: mcpTools, label: "🔌 MCP Tools", tab: "tool-sources", emptyAction: "Add an MCP server to expose external tools to your agents." },
-      { key: "plugin", items: plugins, label: "🧩 Plugins", tab: "plugins", emptyAction: "Configure plugin credentials in the Plugins tab." },
+      { key: "integration", items: integrations, label: "🧩 Service Integrations", tab: "integrations", emptyAction: "Configure credentials in the Service Integrations tab." },
       { key: "task_agent", items: agents, label: "🤖 Built-in Agents", tab: null, emptyAction: null }
     ].map(({ key, items, label, tab, emptyAction }) => /* @__PURE__ */ jsxRuntimeExports.jsx(
       ConnectorSection,
@@ -13666,7 +15024,7 @@ function ConnectorOverview({ onNavigate }) {
 }
 function ConnectorSection({ label, items, emptyAction, onNavigate }) {
   const [expanded, setExpanded] = reactExports.useState(true);
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }, children: [
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 10, overflow: "visible" }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs(
       "div",
       {
@@ -13701,6 +15059,19 @@ function ConnectorSection({ label, items, emptyAction, onNavigate }) {
   ] });
 }
 function ConnectorCard({ connector: c }) {
+  const [showDetails, setShowDetails] = reactExports.useState(false);
+  const [popoverPos, setPopoverPos] = reactExports.useState({ top: 0, right: 0 });
+  const btnRef = reactExports.useRef(null);
+  const handleInfoClick = () => {
+    if (!showDetails && btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      setPopoverPos({
+        top: rect.bottom + 6,
+        right: window.innerWidth - rect.right
+      });
+    }
+    setShowDetails((v2) => !v2);
+  };
   const statusColor = {
     ready: "#27ae60",
     needs_config: "#e6a700",
@@ -13713,37 +15084,105 @@ function ConnectorCard({ connector: c }) {
     not_discovered: "○ Not discovered",
     disabled: "— Disabled"
   }[c.status] || c.status;
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-    background: "var(--bg)",
-    border: `1px solid ${c.status === "ready" ? "var(--border)" : "#e6a70044"}`,
-    borderRadius: 8,
-    padding: "10px 12px",
-    display: "flex",
-    flexDirection: "column",
-    gap: 4
+  const compactDescription = String(c.description || "").replace(/\s+/g, " ").trim();
+  const fullDescription = String(c.description || "").trim();
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card", style: {
+    border: `1px solid ${c.status === "ready" ? "var(--border)" : "#e6a70044"}`
   }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-head", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 18 }, children: c.icon || "•" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, fontSize: 13, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: c.display_name }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: statusColor, fontWeight: 500, flexShrink: 0 }, children: statusLabel })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ih-connector-card-title", children: c.display_name }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          ref: btnRef,
+          className: "ih-connector-card-info-btn",
+          title: "View full details",
+          onClick: handleInfoClick,
+          children: "i"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ih-connector-card-status", style: { color: statusColor }, children: statusLabel })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", lineHeight: 1.4 }, children: c.description }),
-    c.missing_config?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "#e6a700", marginTop: 2 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ih-connector-card-desc", title: compactDescription, children: compactDescription }),
+    c.missing_config?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-missing", children: [
       "Missing: ",
       c.missing_config.join(", ")
     ] }),
-    c.required_inputs?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "var(--text-muted)", fontFamily: "monospace", marginTop: 2 }, children: [
+    c.required_inputs?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-inputs", title: c.required_inputs.join(", "), children: [
       "inputs: ",
       c.required_inputs.join(", ")
+    ] }),
+    showDetails && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-popover", style: { top: popoverPos.top, right: popoverPos.right }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-popover-header", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Connector Details" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "ih-connector-card-popover-close", onClick: () => setShowDetails(false), children: "✕" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-popover-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Name:" }),
+        " ",
+        c.display_name || c.agent_name || "-"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-popover-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Status:" }),
+        " ",
+        statusLabel
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-popover-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Type:" }),
+        " ",
+        c.type || "-"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-popover-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Agent:" }),
+        " ",
+        c.agent_name || "-"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-popover-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Description:" }),
+        " ",
+        fullDescription || "-"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-popover-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Inputs:" }),
+        " ",
+        c.required_inputs?.length ? c.required_inputs.join(", ") : "-"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ih-connector-card-popover-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Missing Config:" }),
+        " ",
+        c.missing_config?.length ? c.missing_config.join(", ") : "-"
+      ] })
     ] })
   ] });
 }
-function PluginsPanel() {
-  const { state } = useApp();
+function resolveSetupComponentId(integrationId) {
+  const key = String(integrationId || "").trim().toLowerCase();
+  const alias = {
+    gmail: "google_workspace",
+    google_drive: "google_workspace",
+    microsoft_365: "microsoft_graph",
+    microsoft365: "microsoft_graph",
+    microsoft: "microsoft_graph"
+  }[key];
+  return alias || key;
+}
+function integrationIdFromConnector(integration) {
+  const explicit = String(integration?.integration_id || integration?.id || "").trim();
+  if (explicit) return explicit;
+  const agentName = String(integration?.agent_name || "").trim();
+  if (agentName.startsWith("integration:")) return agentName.slice("integration:".length);
+  return "";
+}
+function IntegrationsPanel() {
+  const { state, dispatch } = useApp();
   const base = state.backendUrl || "http://127.0.0.1:2151";
-  const [plugins, setPlugins] = reactExports.useState([]);
+  const [integrations, setIntegrations] = reactExports.useState([]);
   const [loading, setLoading] = reactExports.useState(true);
   const [err, setErr] = reactExports.useState(null);
+  const [providerKeys, setProviderKeys] = reactExports.useState({});
+  const [keysSaved, setKeysSaved] = reactExports.useState(false);
+  const [keysSaving, setKeysSaving] = reactExports.useState(false);
   const load = reactExports.useCallback(async () => {
     setLoading(true);
     setErr(null);
@@ -13751,7 +15190,7 @@ function PluginsPanel() {
       const r2 = await fetch(`${base}/api/connectors`);
       if (!r2.ok) throw new Error(r2.statusText);
       const data = await r2.json();
-      setPlugins(data?.by_type?.plugin || []);
+      setIntegrations(data?.by_type?.integration || data?.by_type?.plugin || []);
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -13761,83 +15200,352 @@ function PluginsPanel() {
   reactExports.useEffect(() => {
     load();
   }, [load]);
-  if (loading) return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pp-loading", children: "Loading plugins…" });
+  reactExports.useEffect(() => {
+    setProviderKeys(state.settings || {});
+  }, [state.settings]);
+  const saveProviderKeys = async () => {
+    const api = window.kendrAPI;
+    if (!api?.settings) return;
+    const providerSettingKeys = ["anthropicKey", "openaiKey", "openaiOrgId", "googleKey", "xaiKey"];
+    const shouldRestartBackend = providerSettingKeys.some((key) => (state.settings?.[key] || "") !== (providerKeys?.[key] || ""));
+    setKeysSaving(true);
+    try {
+      for (const [k2, v2] of Object.entries(providerKeys || {})) {
+        if (typeof v2 === "string") await api.settings.set(k2, v2);
+      }
+      dispatch({ type: "SET_SETTINGS", settings: providerKeys });
+      if (shouldRestartBackend && state.backendStatus === "running") await api.backend?.restart();
+      setKeysSaved(true);
+      setTimeout(() => setKeysSaved(false), 1800);
+    } finally {
+      setKeysSaving(false);
+    }
+  };
+  if (loading) return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pp-loading", children: "Loading service integrations…" });
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-root", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-topbar", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-topbar-left", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-page-title", children: "Plugins" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-page-sub", children: "External service integrations — configure credentials to enable" })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-page-title", children: "Service Integrations" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-page-sub", children: "External systems your agents can connect to once credentials are configured" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "pp-btn pp-btn--ghost", onClick: load, children: "↺ Refresh" })
     ] }),
-    err && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-error-banner", children: [
-      "⚠ ",
-      err,
-      " ",
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setErr(null), children: "✕" })
-    ] }),
-    plugins.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-empty", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pp-empty-icon", children: "🧩" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pp-empty-title", children: "No plugins found" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pp-empty-sub", children: "Plugins are loaded from the kendr backend. Make sure the gateway is running." })
-    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: 12 }, children: ["ready", "needs_config"].map((status) => {
-      const group = plugins.filter((p2) => p2.status === status);
-      if (!group.length) return null;
-      return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }, children: status === "ready" ? "✓ Configured" : "⚙ Needs Configuration" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }, children: group.map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx(PluginCard, { plugin: p2 }, p2.agent_name)) })
-      ] }, status);
-    }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 24, padding: "14px 16px", background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 10, fontSize: 13, color: "var(--text-muted)" }, children: [
-      "💡 To configure a plugin, set the required environment variables in",
-      " ",
-      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Settings → API Keys" }),
-      ", then restart the backend."
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-skills-body", children: [
+      err && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-error-banner", children: [
+        "⚠ ",
+        err,
+        " ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setErr(null), children: "✕" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-add-card", style: { maxWidth: 700 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pp-add-title", children: "Model & API Keys" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-form-grid", style: { gridTemplateColumns: "170px 1fr" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "pp-form-label", children: "Anthropic API Key" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "pp-input", type: "password", placeholder: "sk-ant-…", value: providerKeys.anthropicKey || "", onChange: (e) => setProviderKeys((v2) => ({ ...v2, anthropicKey: e.target.value })) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "pp-form-label", children: "OpenAI API Key" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "pp-input", type: "password", placeholder: "sk-…", value: providerKeys.openaiKey || "", onChange: (e) => setProviderKeys((v2) => ({ ...v2, openaiKey: e.target.value })) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "pp-form-label", children: "OpenAI Org ID" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "pp-input", placeholder: "org-…", value: providerKeys.openaiOrgId || "", onChange: (e) => setProviderKeys((v2) => ({ ...v2, openaiOrgId: e.target.value })) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "pp-form-label", children: "Google API Key" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "pp-input", type: "password", placeholder: "AIza…", value: providerKeys.googleKey || "", onChange: (e) => setProviderKeys((v2) => ({ ...v2, googleKey: e.target.value })) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "pp-form-label", children: "xAI API Key" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "pp-input", type: "password", placeholder: "xai-…", value: providerKeys.xaiKey || "", onChange: (e) => setProviderKeys((v2) => ({ ...v2, xaiKey: e.target.value })) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "pp-form-label", children: "HuggingFace Token" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "pp-input", type: "password", placeholder: "hf_…", value: providerKeys.hfToken || "", onChange: (e) => setProviderKeys((v2) => ({ ...v2, hfToken: e.target.value })) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "pp-form-label", children: "Tavily Key" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "pp-input", type: "password", placeholder: "tvly-…", value: providerKeys.tavilyKey || "", onChange: (e) => setProviderKeys((v2) => ({ ...v2, tavilyKey: e.target.value })) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "pp-form-label", children: "Brave Key" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "pp-input", type: "password", value: providerKeys.braveKey || "", onChange: (e) => setProviderKeys((v2) => ({ ...v2, braveKey: e.target.value })) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "pp-form-label", children: "Serper Key" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "pp-input", type: "password", value: providerKeys.serperKey || "", onChange: (e) => setProviderKeys((v2) => ({ ...v2, serperKey: e.target.value })) })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-form-actions", style: { marginTop: 10 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "pp-btn pp-btn--primary", onClick: saveProviderKeys, disabled: keysSaving, children: keysSaving ? "Saving…" : "Save API Keys" }),
+          keysSaved && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "pp-form-label", style: { marginBottom: 0 }, children: "Saved" })
+        ] })
+      ] }),
+      integrations.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pp-empty", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pp-empty-icon", children: "🧩" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pp-empty-title", children: "No service integrations found" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pp-empty-sub", children: "Service integrations are exposed by the Kendr backend. Make sure the gateway is running." })
+      ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: 12 }, children: ["ready", "needs_config"].map((status) => {
+        const group = integrations.filter((p2) => p2.status === status);
+        if (!group.length) return null;
+        return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }, children: status === "ready" ? "✓ Configured" : "⚙ Needs Configuration" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }, children: group.map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+            IntegrationCard,
+            {
+              integration: p2,
+              base,
+              onSaved: load
+            },
+            p2.agent_name
+          )) })
+        ] }, status);
+      }) })
     ] })
   ] });
 }
-function PluginCard({ plugin: p2 }) {
+function IntegrationCard({ integration: p2, base, onSaved }) {
   const configured = p2.status === "ready";
+  const [expanded, setExpanded] = reactExports.useState(false);
+  const [formLoading, setFormLoading] = reactExports.useState(true);
+  const [saving, setSaving] = reactExports.useState(false);
+  const [saved, setSaved] = reactExports.useState(false);
+  const [err, setErr] = reactExports.useState(null);
+  const [fields, setFields] = reactExports.useState(null);
+  const [values, setValues] = reactExports.useState({});
+  const [componentId, setComponentId] = reactExports.useState("");
+  const [oauthPath, setOauthPath] = reactExports.useState(null);
+  const [hint, setHint] = reactExports.useState(null);
+  const openForm = async () => {
+    if (expanded) {
+      setExpanded(false);
+      return;
+    }
+    setExpanded(true);
+    if (fields !== null) {
+      setFormLoading(false);
+      return;
+    }
+    setFormLoading(true);
+    setErr(null);
+    const rawId = integrationIdFromConnector(p2);
+    const cid = resolveSetupComponentId(rawId);
+    setComponentId(cid);
+    let loaded = false;
+    if (cid) {
+      try {
+        const r2 = await fetch(`${base}/api/setup/component/${encodeURIComponent(cid)}`);
+        const data = await r2.json().catch(() => ({}));
+        if (r2.ok && !data.error && data.component?.fields?.length) {
+          const raw = data.raw_values && typeof data.raw_values === "object" ? data.raw_values : {};
+          const initVals = {};
+          for (const f2 of data.component.fields) {
+            const k2 = String(f2.key || "").trim();
+            if (k2) initVals[k2] = String(raw[k2] ?? "");
+          }
+          setFields(data.component.fields);
+          setValues(initVals);
+          setOauthPath(data.component.oauth_start_path || null);
+          setHint(data.component.description || data.component.setup_hint || null);
+          loaded = true;
+        }
+      } catch (_2) {
+      }
+    }
+    if (!loaded) {
+      const missing = p2.missing_config || [];
+      setFields(missing.map((k2) => ({ key: k2, label: k2, secret: true, required: true })));
+      setValues(Object.fromEntries(missing.map((k2) => [k2, ""])));
+    }
+    setFormLoading(false);
+  };
+  const save = async () => {
+    setSaving(true);
+    setErr(null);
+    try {
+      const r2 = await fetch(`${base}/api/setup/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ component_id: componentId || integrationIdFromConnector(p2), values })
+      });
+      const data = await r2.json().catch(() => ({}));
+      if (!r2.ok || data.error) throw new Error(data.error || r2.statusText);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1800);
+      await onSaved?.();
+      setExpanded(false);
+      setFields(null);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
     background: "var(--bg-secondary)",
-    border: `1px solid ${configured ? "var(--border)" : "#e6a70033"}`,
+    border: `1px solid ${configured ? "var(--border)" : expanded ? "#e6a70066" : "#e6a70033"}`,
     borderRadius: 10,
-    padding: "14px 16px",
     display: "flex",
     flexDirection: "column",
-    gap: 8
+    overflow: "hidden"
   }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10 }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 24, lineHeight: 1 }, children: p2.icon }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1 }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600, fontSize: 14 }, children: p2.display_name }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "var(--text-muted)" }, children: p2.category })
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "14px 16px", display: "flex", flexDirection: "column", gap: 8 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 24, lineHeight: 1 }, children: p2.icon }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600, fontSize: 14 }, children: p2.display_name }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "var(--text-muted)" }, children: p2.category })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+          fontSize: 11,
+          padding: "2px 8px",
+          borderRadius: 4,
+          flexShrink: 0,
+          background: configured ? "#27ae6015" : "#e6a70015",
+          color: configured ? "#27ae60" : "#e6a700",
+          border: `1px solid ${configured ? "#27ae6044" : "#e6a70044"}`,
+          fontWeight: 600
+        }, children: configured ? "✓ Ready" : "⚙ Setup needed" })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-        fontSize: 11,
-        padding: "2px 8px",
-        borderRadius: 4,
-        background: configured ? "#27ae6015" : "#e6a70015",
-        color: configured ? "#27ae60" : "#e6a700",
-        border: `1px solid ${configured ? "#27ae6044" : "#e6a70044"}`,
-        fontWeight: 600
-      }, children: configured ? "✓ Ready" : "⚙ Setup needed" })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", lineHeight: 1.4 }, children: p2.description }),
+      p2.missing_config?.length > 0 && !expanded && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "#e6a700", fontFamily: "var(--font-mono)" }, children: [
+        "Missing: ",
+        p2.missing_config.join(", ")
+      ] }),
+      p2.metadata?.required_env_vars?.length > 0 && configured && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "#27ae60" }, children: [
+        "✓ ",
+        p2.metadata.required_env_vars.length,
+        " credential",
+        p2.metadata.required_env_vars.length !== 1 ? "s" : "",
+        " configured"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", justifyContent: "flex-end" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "pp-btn pp-btn--ghost", style: { fontSize: 12 }, onClick: openForm, children: expanded ? "Cancel" : configured ? "Manage Credentials" : "Set Up →" }) })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", lineHeight: 1.4 }, children: p2.description }),
-    p2.missing_config?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "#e6a70010", border: "1px solid #e6a70033", borderRadius: 6, padding: "8px 10px", fontSize: 12 }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600, color: "#e6a700", marginBottom: 4 }, children: "Required environment variables:" }),
-      p2.missing_config.map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontFamily: "monospace", fontSize: 11, color: "var(--text-muted)", marginTop: 2 }, children: [
-        "• ",
-        v2
-      ] }, v2))
+    expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "2px solid #e6a700", background: "var(--bg)", padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }, children: formLoading ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)" }, children: "Loading configuration…" }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, fontWeight: 700, color: "#e6a700" }, children: "Configure credentials" }),
+      hint && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", lineHeight: 1.4 }, children: hint }),
+      fields?.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)" }, children: "No credentials required for this integration." }),
+      fields?.map((field) => {
+        const k2 = String(field.key || "").trim();
+        if (!k2) return null;
+        return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 4 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { fontSize: 11, color: "var(--text-muted)", fontWeight: 600 }, children: [
+            field.label || k2,
+            field.required ? " *" : ""
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              className: "pp-input",
+              type: field.secret ? "password" : "text",
+              placeholder: field.placeholder || field.default || "",
+              value: values[k2] || "",
+              onChange: (e) => setValues((v2) => ({ ...v2, [k2]: e.target.value }))
+            }
+          ),
+          field.hint && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "var(--text-muted)" }, children: field.hint })
+        ] }, k2);
+      }),
+      oauthPath && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: "pp-btn pp-btn--ghost",
+          style: { alignSelf: "flex-start", fontSize: 12 },
+          onClick: () => window.open(`${base}${oauthPath}`, "_blank", "noopener"),
+          children: "Start OAuth →"
+        }
+      ),
+      err && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 12, color: "#e74c3c" }, children: [
+        "⚠ ",
+        err
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 2 }, children: [
+        saved && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, color: "#27ae60", alignSelf: "center" }, children: "Saved" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "pp-btn pp-btn--ghost", style: { fontSize: 12 }, onClick: () => setExpanded(false), children: "Cancel" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "pp-btn pp-btn--primary", style: { fontSize: 12 }, onClick: save, disabled: saving, children: saving ? "Saving…" : "Save" })
+      ] })
+    ] }) })
+  ] });
+}
+function MachineHub() {
+  const { state } = useApp();
+  const apiBase = state.backendUrl || "http://127.0.0.1:2151";
+  const workingDirectory = (state.projectRoot || state.settings?.projectRoot || "").trim();
+  const [data, setData] = reactExports.useState(null);
+  const [loading, setLoading] = reactExports.useState(false);
+  const [error, setError] = reactExports.useState("");
+  const fetchDetails = reactExports.useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const q2 = new URLSearchParams();
+      if (workingDirectory) q2.set("working_directory", workingDirectory);
+      q2.set("max_files", "20000");
+      const resp = await fetch(`${apiBase}/api/machine/details?${q2.toString()}`);
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(body?.error || `machine_${resp.status}`);
+      setData(body || null);
+    } catch (err) {
+      setError(String(err?.message || err || "Failed to load machine details"));
+    } finally {
+      setLoading(false);
+    }
+  }, [apiBase, workingDirectory]);
+  reactExports.useEffect(() => {
+    fetchDetails();
+  }, [fetchDetails]);
+  const apps = Array.isArray(data?.apps) ? data.apps : [];
+  const status = data?.status || {};
+  const system = data?.system_info || status?.system_info || {};
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kendr-page machine-page", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "hero-card machine-hero", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hero-copy", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "eyebrow", children: "Machine" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { children: "See machine facts and available apps." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "Keep this view focused on system snapshot and synced software inventory." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "hero-actions", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kendr-btn kendr-btn--primary", onClick: fetchDetails, disabled: loading, children: loading ? "Refreshing…" : "Refresh" }) }),
+        error && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "machine-error", children: error }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "machine-note", children: [
+          "Workspace root: ",
+          system.workspace_root || data?.working_directory || "unknown"
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hero-metrics", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Apps", value: String(Number(status?.installed_software_count || 0)), detail: "Installed tools in snapshot" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Host", value: system.hostname || "unknown", detail: system.architecture || "unknown" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Memory", value: system.total_memory_gb ? `${system.total_memory_gb} GB` : "unknown", detail: system.python_version ? `Python ${system.python_version}` : "Python unknown" })
+      ] })
     ] }),
-    p2.metadata?.required_env_vars?.length > 0 && configured && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "#27ae60", display: "flex", alignItems: "center", gap: 4 }, children: [
-      "✓ ",
-      p2.metadata.required_env_vars.length,
-      " credential",
-      p2.metadata.required_env_vars.length !== 1 ? "s" : "",
-      " configured"
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "grid-two machine-grid", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "surface-card machine-card", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "System Snapshot", subtitle: "Machine-wide environment facts" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "machine-kv-grid", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(KeyValue, { label: "Host", value: system.hostname || "unknown" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(KeyValue, { label: "OS", value: [system.os, system.os_release].filter(Boolean).join(" ") || system.platform || "unknown" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(KeyValue, { label: "Arch", value: system.architecture || "unknown" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(KeyValue, { label: "Python", value: system.python_version || "unknown" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(KeyValue, { label: "CPU Cores", value: String(system.cpu_count || 0) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(KeyValue, { label: "Memory", value: system.total_memory_gb ? `${system.total_memory_gb} GB` : "unknown" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(KeyValue, { label: "Disk Root", value: system.disk_root || "unknown" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(KeyValue, { label: "Disk Free", value: system.disk_free_gb ? `${system.disk_free_gb} GB` : "unknown" })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "surface-card machine-card", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "Synced Apps", subtitle: "Software inventory snapshot" }),
+        apps.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "empty-state", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "empty-state__title", children: "No apps synced yet" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "empty-state__body", children: "Run machine sync first." })
+        ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "machine-app-list machine-app-list--scroll", children: apps.map((app) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "machine-app-row", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "machine-app-row__name", children: app.name }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "machine-app-row__meta", children: app.version || "version unknown" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "machine-app-row__path", title: app.path || "", children: app.path || "path unknown" })
+        ] }, `${app.name}-${app.path || ""}`)) })
+      ] })
     ] })
+  ] });
+}
+function SectionHeader({ title, subtitle }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "section-header", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: title }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: subtitle })
+  ] }) });
+}
+function MetricCard({ label, value, detail }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "metric-card", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__label", children: label }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__value", children: value }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__detail", children: detail })
+  ] });
+}
+function KeyValue({ label, value }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "machine-kv", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "machine-kv__label", children: label }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "machine-kv__value", title: value, children: value })
   ] });
 }
 function MemoryHub() {
@@ -13944,12 +15652,53 @@ function Settings() {
   const [tab, setTab] = reactExports.useState("general");
   const [settings, setSettings] = reactExports.useState({});
   const [saved, setSaved] = reactExports.useState(false);
+  const [machineStatus, setMachineStatus] = reactExports.useState(null);
+  const [machineStatusLoading, setMachineStatusLoading] = reactExports.useState(false);
   const api = window.kendrAPI;
   const apiBase = state.backendUrl || "http://127.0.0.1:2151";
   const providerSettingKeys = ["anthropicKey", "openaiKey", "openaiOrgId", "googleKey", "xaiKey"];
   reactExports.useEffect(() => {
     api?.settings.getAll().then((s2) => setSettings(s2 || {}));
   }, []);
+  const syncWorkingDirectory = (state.projectRoot || state.settings?.projectRoot || settings.projectRoot || "").trim();
+  const fetchMachineStatus = async () => {
+    setMachineStatusLoading(true);
+    try {
+      const q2 = syncWorkingDirectory ? `?working_directory=${encodeURIComponent(syncWorkingDirectory)}` : "";
+      const resp = await fetch(`${apiBase}/api/machine/status${q2}`);
+      if (!resp.ok) return;
+      const data = await resp.json().catch(() => ({}));
+      const status = data?.status && typeof data.status === "object" ? data.status : null;
+      if (status) setMachineStatus(status);
+    } catch (_2) {
+    } finally {
+      setMachineStatusLoading(false);
+    }
+  };
+  const refreshMachineSync = async () => {
+    setMachineStatusLoading(true);
+    try {
+      const resp = await fetch(`${apiBase}/api/machine/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope: "machine",
+          working_directory: syncWorkingDirectory || void 0
+        })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) return;
+      const status = data?.status && typeof data.status === "object" ? data.status : null;
+      if (status) setMachineStatus(status);
+    } catch (_2) {
+    } finally {
+      setMachineStatusLoading(false);
+    }
+  };
+  reactExports.useEffect(() => {
+    if (tab !== "general") return;
+    fetchMachineStatus();
+  }, [tab, apiBase, syncWorkingDirectory]);
   const update = (key, value) => setSettings((s2) => ({ ...s2, [key]: value }));
   const save = async () => {
     const shouldRestartBackend = providerSettingKeys.some((key) => (state.settings?.[key] || "") !== (settings?.[key] || ""));
@@ -14002,6 +15751,37 @@ function Settings() {
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Display Name", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "st-input", value: s.gitName || "", onChange: (e) => update("gitName", e.target.value) }) }),
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Email", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "st-input", value: s.gitEmail || "", onChange: (e) => update("gitEmail", e.target.value) }) }),
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "GitHub PAT", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "st-input", type: "password", value: s.githubPat || "", onChange: (e) => update("githubPat", e.target.value), placeholder: "ghp_…" }) })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(Section, { title: "Machine Sync", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Auto Sync Machine Index", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              type: "checkbox",
+              className: "st-check",
+              checked: !!s.machineAutoSyncEnabled,
+              onChange: (e) => update("machineAutoSyncEnabled", e.target.checked)
+            }
+          ) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Auto Sync Every (days)", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              className: "st-input st-input--sm",
+              type: "number",
+              min: "1",
+              max: "30",
+              value: Number(s.machineAutoSyncIntervalDays || 7),
+              onChange: (e) => update("machineAutoSyncIntervalDays", Math.max(1, Math.min(30, Number(e.target.value || 7))))
+            }
+          ) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-actions", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "st-btn", onClick: refreshMachineSync, disabled: machineStatusLoading, children: machineStatusLoading ? "Refreshing…" : "Refresh Machine Index" }) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-info-banner", children: machineStatus?.software_inventory_last_synced ? `Last machine sync: ${new Date(machineStatus.software_inventory_last_synced).toLocaleString()}` : "No machine sync snapshot yet. Run machine sync once." }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-machine-apps", children: (Array.isArray(machineStatus?.discovered_apps) ? machineStatus.discovered_apps : []).length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-machine-empty", children: "No discovered apps yet." }) : (machineStatus.discovered_apps || []).map((app) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "st-machine-app", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-machine-app-name", children: app.name }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "st-machine-app-meta", children: [
+              app.version || "version unknown",
+              app.path ? ` · ${app.path}` : ""
+            ] })
+          ] }, `${app.name}-${app.path || ""}`)) })
         ] })
       ] }),
       tab === "keys" && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
@@ -14171,10 +15951,13 @@ function formatBytes(value) {
 function ModelManager() {
   const { state } = useApp();
   const [ollamaModels, setOllamaModels] = reactExports.useState([]);
+  const [guide, setGuide] = reactExports.useState(null);
   const [loadingModels, setLoadingModels] = reactExports.useState(true);
+  const [loadingGuide, setLoadingGuide] = reactExports.useState(true);
   const [pullTag, setPullTag] = reactExports.useState("");
   const [pullState, setPullState] = reactExports.useState(null);
   const [pulling, setPulling] = reactExports.useState(false);
+  const [deletingModel, setDeletingModel] = reactExports.useState("");
   const [pullStatus, setPullStatus] = reactExports.useState(null);
   const backendUrl = state.backendUrl || "http://127.0.0.1:2151";
   const fetchModels = async () => {
@@ -14183,11 +15966,25 @@ function ModelManager() {
       const r2 = await fetch(`${backendUrl}/api/models/ollama`);
       if (r2.ok) {
         const data = await r2.json();
-        setOllamaModels(data.models || []);
+        setOllamaModels(Array.isArray(data.models) ? data.models : []);
       }
     } catch (_2) {
     } finally {
       setLoadingModels(false);
+    }
+  };
+  const fetchGuide = async (force = false) => {
+    setLoadingGuide(true);
+    try {
+      const suffix = force ? "?refresh=1" : "";
+      const r2 = await fetch(`${backendUrl}/api/models/guide${suffix}`);
+      if (r2.ok) {
+        const data = await r2.json();
+        setGuide(data || null);
+      }
+    } catch (_2) {
+    } finally {
+      setLoadingGuide(false);
     }
   };
   const fetchPullStatus = async () => {
@@ -14200,12 +15997,14 @@ function ModelManager() {
       setPulling(live);
       if (!live && data.status === "completed") {
         fetchModels();
+        fetchGuide(true);
       }
     } catch (_2) {
     }
   };
   reactExports.useEffect(() => {
     fetchModels();
+    fetchGuide(false);
     fetchPullStatus();
   }, [backendUrl]);
   reactExports.useEffect(() => {
@@ -14215,9 +16014,16 @@ function ModelManager() {
     }, 900);
     return () => clearInterval(timer);
   }, [backendUrl, pullState?.active, pullState?.status]);
-  const pullModel = async () => {
-    if (!pullTag.trim() || pulling) return;
-    const model = pullTag.trim();
+  reactExports.useEffect(() => {
+    const timer = setInterval(() => {
+      fetchGuide(true);
+    }, 10 * 60 * 1e3);
+    return () => clearInterval(timer);
+  }, [backendUrl]);
+  const pullModelWithValue = async (modelName) => {
+    const model = String(modelName || "").trim();
+    if (!model || pulling) return;
+    setPullTag(model);
     setPullStatus(null);
     try {
       const r2 = await fetch(`${backendUrl}/api/models/ollama/pull`, {
@@ -14230,12 +16036,16 @@ function ModelManager() {
         setPulling(true);
         setPullState(data.pull || null);
         setPullStatus(null);
+        fetchGuide(true);
       } else {
         setPullStatus({ ok: false, msg: data.error || `Pull failed (${r2.status})` });
       }
     } catch (e) {
       setPullStatus({ ok: false, msg: `Network error: ${e.message}` });
     }
+  };
+  const pullModel = async () => {
+    await pullModelWithValue(pullTag);
   };
   const cancelPull = async () => {
     try {
@@ -14255,18 +16065,73 @@ function ModelManager() {
       setPullStatus({ ok: false, msg: `Network error: ${e.message}` });
     }
   };
+  const deleteModel = async (modelName) => {
+    const model = String(modelName || "").trim();
+    if (!model || deletingModel) return;
+    setDeletingModel(model);
+    setPullStatus(null);
+    try {
+      const r2 = await fetch(`${backendUrl}/api/models/ollama/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model })
+      });
+      const data = await r2.json().catch(() => ({}));
+      if (r2.ok && data.ok) {
+        setPullStatus({ ok: true, msg: `Deleted ${model}` });
+        fetchModels();
+        fetchGuide(true);
+      } else {
+        setPullStatus({ ok: false, msg: data.detail || data.error || `Delete failed (${r2.status})` });
+      }
+    } catch (e) {
+      setPullStatus({ ok: false, msg: `Network error: ${e.message}` });
+    } finally {
+      setDeletingModel("");
+    }
+  };
   const activePull = pullState && (pullState.active || ["completed", "failed", "cancelled"].includes(pullState.status)) ? pullState : null;
   const progressPercent = Number(activePull?.percent || 0);
   const hasDeterminateProgress = Number(activePull?.total || 0) > 0;
   const progressWidth = hasDeterminateProgress ? `${Math.max(0, Math.min(100, progressPercent))}%` : "35%";
+  const recommendations = Array.isArray(guide?.recommendations) ? guide.recommendations : [];
+  const cloudUsage = Array.isArray(guide?.cloud_usage) ? guide.cloud_usage : [];
+  const rankings = Array.isArray(guide?.openrouter_rankings) ? guide.openrouter_rankings.slice(0, 5) : [];
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-manager", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sidebar-label", children: "RECOMMENDED NEXT" }),
+    loadingGuide && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sidebar-empty", children: "Building model guide…" }),
+    !loadingGuide && recommendations.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-reco-grid", children: recommendations.slice(0, 6).map((item) => {
+      const isPulled = item.status === "pulled";
+      const isCloud = item.access === "cloud";
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `model-reco-card ${item.fits_system ? "" : "model-reco-card--dim"}`, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-reco-top", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-reco-name", children: item.label }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-reco-meta", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `model-mini-chip ${isCloud ? "cloud" : "local"}`, children: isCloud ? "cloud" : "local" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "model-mini-chip", children: item.speed }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "model-mini-chip", children: item.cost })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-reco-size", children: isCloud ? "No local GB" : `${Number(item.size_gb || 0).toFixed(1)} GB` })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-reco-fit", children: item.fit_label }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-reco-copy", children: Array.isArray(item.best_for) ? item.best_for.join(" • ") : "" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-reco-copy", children: Array.isArray(item.agent_fit) ? `Agents: ${item.agent_fit.join(" • ")}` : "" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-reco-note", children: item.notes }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-reco-actions", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn-accent", disabled: pulling || isPulled, onClick: () => pullModelWithValue(item.id), children: isPulled ? "Pulled" : isCloud ? "Add Alias" : "Pull" }),
+          isPulled && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn-danger", disabled: deletingModel === item.id, onClick: () => deleteModel(item.id), children: deletingModel === item.id ? "Deleting…" : "Delete" })
+        ] })
+      ] }, item.id);
+    }) }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sidebar-label", children: "OLLAMA MODELS" }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-pull-row", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "input",
         {
           className: "model-input",
-          placeholder: "e.g. llama3.2, mistral, deepseek-r1",
+          placeholder: "e.g. llama3.2, mistral, deepseek-r1, kimi-k2.5:cloud",
           value: pullTag,
           onChange: (e) => {
             setPullTag(e.target.value);
@@ -14310,10 +16175,42 @@ function ModelManager() {
     pullStatus && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `model-pull-result ${pullStatus.ok ? "model-pull-result--ok" : "model-pull-result--err"}`, children: pullStatus.msg }),
     loadingModels && !pulling && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sidebar-empty", children: "Checking Ollama models…" }),
     !loadingModels && ollamaModels.length === 0 && !pulling && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sidebar-empty", children: "No Ollama models found. Pull one above or start Ollama." }),
-    !loadingModels && ollamaModels.map((m2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-item", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "model-name", children: m2.name || m2 }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "model-size", children: m2.size ? `${(m2.size / 1e9).toFixed(1)} GB` : "" })
-    ] }, m2.name || m2)),
+    !loadingModels && ollamaModels.map((m2) => {
+      const name = m2.name || m2;
+      const isCloud = String(name).includes(":cloud");
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-item", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-item-main", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "model-name", children: name }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `model-mini-chip ${isCloud ? "cloud" : "local"}`, children: isCloud ? "cloud alias" : "local" })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-item-actions", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "model-size", children: m2.size ? `${(m2.size / 1e9).toFixed(1)} GB` : "" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn-danger", disabled: deletingModel === name, onClick: () => deleteModel(name), children: deletingModel === name ? "Deleting…" : "Delete" })
+        ] })
+      ] }, name);
+    }),
+    cloudUsage.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sidebar-label", style: { marginTop: 16 }, children: "CLOUD MODELS" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-cloud-guide", children: cloudUsage.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-cloud-card", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-cloud-title", children: item.title }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-cloud-body", children: item.body })
+      ] }, item.title)) })
+    ] }),
+    rankings.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sidebar-label", style: { marginTop: 16 }, children: "OPENROUTER TOP" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-ranking-list", children: rankings.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "model-ranking-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "model-ranking-rank", children: [
+          "#",
+          item.rank
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "model-ranking-name", children: item.name }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "model-ranking-meta", children: [
+          item.tokens,
+          " • ",
+          item.share
+        ] })
+      ] }, `${item.rank}:${item.name}`)) })
+    ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sidebar-label", style: { marginTop: 16 }, children: "CONFIGURED PROVIDERS" }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "model-providers", children: ["openai", "anthropic", "google", "ollama"].map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "provider-row", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "provider-name", children: p2 }),
@@ -14322,88 +16219,211 @@ function ModelManager() {
   ] });
 }
 const capabilityLabel = (value) => value ? "Yes" : "No";
+function priceLabel(value) {
+  if (value == null) return "—";
+  if (value === 0) return "Free";
+  return `$${Number(value).toFixed(2)}/M`;
+}
 function ModelDocs() {
-  const { state } = useApp();
+  const { state, refreshModelInventory } = useApp();
   const apiBase = state.backendUrl || "http://127.0.0.1:2151";
-  const [inventory, setInventory] = reactExports.useState(null);
-  const [loading, setLoading] = reactExports.useState(false);
-  const [error, setError] = reactExports.useState("");
-  const loadInventory = React.useCallback(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError("");
-    fetch(`${apiBase}/api/models`).then((r2) => r2.ok ? r2.json() : Promise.reject(new Error(`HTTP ${r2.status}`))).then((d) => {
-      if (cancelled) return;
-      setInventory(d);
-      setLoading(false);
-    }).catch((err) => {
-      if (cancelled) return;
-      setError(err?.message || "Failed to load model inventory");
-      setLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [apiBase]);
+  const inventory = state.modelInventory;
+  const loadingInventory = !!state.modelInventoryLoading && !inventory;
+  const inventoryError = !!state.modelInventoryError;
+  const [guide, setGuide] = reactExports.useState(null);
+  const [loadingGuide, setLoadingGuide] = reactExports.useState(false);
+  const [guideError, setGuideError] = reactExports.useState("");
+  const loadGuide = async (force = false) => {
+    setLoadingGuide(true);
+    setGuideError("");
+    try {
+      const suffix = force ? "?refresh=1" : "";
+      const r2 = await fetch(`${apiBase}/api/models/guide${suffix}`);
+      if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
+      const data = await r2.json();
+      setGuide(data || null);
+    } catch (err) {
+      setGuideError(err?.message || "Failed to load model guide");
+    } finally {
+      setLoadingGuide(false);
+    }
+  };
   reactExports.useEffect(() => {
-    const cleanup = loadInventory();
-    return cleanup;
-  }, [loadInventory]);
+    refreshModelInventory(false);
+    loadGuide(false);
+  }, [apiBase, refreshModelInventory]);
+  reactExports.useEffect(() => {
+    const timer = setInterval(() => {
+      loadGuide(true);
+    }, 10 * 60 * 1e3);
+    return () => clearInterval(timer);
+  }, [apiBase]);
   const rows = reactExports.useMemo(() => {
     const providers = Array.isArray(inventory?.providers) ? inventory.providers : [];
     return providers.filter((provider) => provider.has_key || provider.provider === "ollama");
   }, [inventory]);
+  const recommendations = Array.isArray(guide?.recommendations) ? guide.recommendations : [];
+  const comparison = Array.isArray(guide?.openrouter_comparison) ? guide.openrouter_comparison : [];
+  const rankings = Array.isArray(guide?.openrouter_rankings) ? guide.openrouter_rankings : [];
+  const cloudUsage = Array.isArray(guide?.cloud_usage) ? guide.cloud_usage : [];
+  const generatedAt = guide?.generated_at ? new Date(guide.generated_at).toLocaleString() : "";
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-root", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-hero", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-eyebrow", children: "Reference" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { className: "md-title", children: "Model Comparison" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "md-subtitle", children: "Comparison for the providers currently configured in Kendr. Capability flags are best-effort product hints for the configured model." })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { className: "md-title", children: "Model Decision Hub" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "md-subtitle", children: "Fast local guide first, live provider inventory second. Pull recommendations use machine RAM, Ollama inventory, and OpenRouter ranking signals." })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "md-refresh", onClick: loadInventory, children: "Reload" })
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-hero-actions", children: [
+        generatedAt && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-updated", children: [
+          "Updated ",
+          generatedAt
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "md-refresh", onClick: () => {
+          refreshModelInventory(true);
+          loadGuide(true);
+        }, children: "Reload" })
+      ] })
     ] }),
-    loading && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-state", children: "Loading model inventory…" }),
-    !loading && error && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-state md-state--error", children: error }),
-    !loading && !error && rows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-state", children: "No configured providers yet. Add a model API key in Settings to populate this table." }),
-    !loading && !error && rows.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-table-wrap", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("table", { className: "md-table", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("thead", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Provider" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Configured Model" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Status" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Context" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Tool Calling" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Vision" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Structured Output" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Reasoning" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Suggested Latest" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Suggested Best" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Suggested Cheapest" })
-      ] }) }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: rows.map((provider) => {
-        const badges = provider.model_badges || {};
-        const latest = Object.keys(badges).find((model) => badges[model]?.includes("latest")) || "—";
-        const best = Object.keys(badges).find((model) => badges[model]?.includes("best")) || "—";
-        const cheapest = Object.keys(badges).find((model) => badges[model]?.includes("cheapest")) || "—";
-        const capabilities = provider.model_capabilities || {};
-        const status = provider.model_fetch_error ? `Error: ${provider.model_fetch_error}` : provider.ready ? "Ready" : provider.note || "Not ready";
-        return /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: provider.provider }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-model-cell", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: provider.model || "—" }),
-            provider.model_badges?.[provider.model]?.map((badge) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `md-chip ${badge}`, children: badge }, `${provider.provider}:${provider.model}:${badge}`))
-          ] }) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: provider.model_fetch_error ? "md-error-text" : "", children: status }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: provider.context_window ? `${provider.context_window.toLocaleString()} tokens` : "—" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.tool_calling) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.vision) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.structured_output) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.reasoning) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: latest }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: best }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: cheapest })
-        ] }, provider.provider);
-      }) })
-    ] }) })
+    (loadingGuide || loadingInventory) && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-state", children: "Loading model knowledge…" }),
+    !loadingGuide && guideError && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-state md-state--error", children: guideError }),
+    recommendations.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "md-section", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-section-head", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "md-section-title", children: "What To Pull" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-section-copy", children: [
+          "Machine RAM: ",
+          guide?.system_memory_gb ? `${guide.system_memory_gb} GB detected` : "unknown"
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-card-grid", children: recommendations.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("article", { className: `md-card ${item.fits_system ? "" : "md-card--dim"}`, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-card-top", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-card-title", children: item.label }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-model-cell", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `md-chip ${item.access === "cloud" ? "latest" : "cheapest"}`, children: item.access }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "md-chip best", children: item.speed }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "md-chip", children: item.cost })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-card-side", children: item.access === "cloud" ? "No local GB" : `${Number(item.size_gb || 0).toFixed(1)} GB` })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-card-fit", children: item.fit_label }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-card-line", children: Array.isArray(item.best_for) ? item.best_for.join(" • ") : "" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-card-line", children: Array.isArray(item.agent_fit) ? `Agents: ${item.agent_fit.join(" • ")}` : "" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-card-note", children: item.notes })
+      ] }, item.id)) })
+    ] }),
+    cloudUsage.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "md-section", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-section-head", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "md-section-title", children: "Cloud Aliases In Ollama" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-section-copy", children: "How `:cloud` models like Kimi and GLM work." })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-info-grid", children: cloudUsage.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("article", { className: "md-info-card", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-info-title", children: item.title }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-info-copy", children: item.body })
+      ] }, item.title)) })
+    ] }),
+    comparison.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "md-section", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-section-head", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "md-section-title", children: "Cloud Comparison" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-section-copy", children: "Live-ish OpenRouter model metadata for speed/cost/context tradeoffs." })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-table-wrap", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("table", { className: "md-table", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("thead", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Model" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Context" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Prompt" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Completion" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Price Band" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Tools" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Vision" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Structured" })
+        ] }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: comparison.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: item.name }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: item.context_length ? `${Number(item.context_length).toLocaleString()} tok` : "—" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: priceLabel(item.prompt_price_per_million) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: priceLabel(item.completion_price_per_million) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: item.price_band || "—" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(item.supports_tools) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(item.supports_vision) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(item.supports_structured_output) })
+        ] }, item.id)) })
+      ] }) })
+    ] }),
+    rankings.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "md-section", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-section-head", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "md-section-title", children: "OpenRouter Ranking Pulse" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-section-copy", children: [
+          "Source: ",
+          guide?.rankings_source === "live" ? "live page" : "fallback snapshot"
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-ranking-grid", children: rankings.slice(0, 10).map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("article", { className: "md-ranking-card", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-ranking-top", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "md-ranking-rank", children: [
+            "#",
+            item.rank
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "md-ranking-share", children: item.share })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-ranking-name", children: item.name }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-ranking-author", children: item.author }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-ranking-tokens", children: [
+          item.tokens,
+          " weekly tokens"
+        ] })
+      ] }, `${item.rank}:${item.name}`)) })
+    ] }),
+    !loadingInventory && inventoryError && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-state md-state--error", children: "Provider inventory slow/offline. Guide still loaded." }),
+    !loadingInventory && !inventoryError && rows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-state", children: "No configured providers yet. Add a model API key in Settings to populate provider comparison." }),
+    !loadingInventory && !inventoryError && rows.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "md-section", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-section-head", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "md-section-title", children: "Configured Providers" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-section-copy", children: "Live capability hints for models currently wired into Kendr." })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-table-wrap", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("table", { className: "md-table", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("thead", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Provider" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Configured Model" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Status" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Context" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Tool Calling" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Agent Capable" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Vision" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Structured Output" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Reasoning" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Suggested Latest" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Suggested Best" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Suggested Cheapest" })
+        ] }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: rows.map((provider) => {
+          const badges = provider.model_badges || {};
+          const latest = Object.keys(badges).find((model) => badges[model]?.includes("latest")) || "—";
+          const best = Object.keys(badges).find((model) => badges[model]?.includes("best")) || "—";
+          const cheapest = Object.keys(badges).find((model) => badges[model]?.includes("cheapest")) || "—";
+          const capabilities = provider.model_capabilities || {};
+          const status = provider.model_fetch_error ? `Error: ${provider.model_fetch_error}` : provider.ready ? "Ready" : provider.note || "Not ready";
+          return /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: provider.provider }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-model-cell", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: provider.model || "—" }),
+              provider.model_badges?.[provider.model]?.map((badge) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `md-chip ${badge}`, children: badge }, `${provider.provider}:${provider.model}:${badge}`))
+            ] }) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: provider.model_fetch_error ? "md-error-text" : "", children: status }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: provider.context_window ? `${provider.context_window.toLocaleString()} tokens` : "—" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.tool_calling) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(provider.agent_capable) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.vision) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.structured_output) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.reasoning) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: latest }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: best }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: cheapest })
+          ] }, provider.provider);
+        }) })
+      ] }) })
+    ] })
   ] });
 }
 const TABS = [
@@ -14430,6 +16450,7 @@ const PRIMARY_NAV = [
   { id: "home", label: "Home" },
   { id: "studio", label: "Studio" },
   { id: "build", label: "Build" },
+  { id: "machine", label: "Machine" },
   { id: "memory", label: "Memory" },
   { id: "integrations", label: "Integrations" },
   { id: "runs", label: "Runs" },
@@ -14478,6 +16499,8 @@ function RenderActiveView() {
       return /* @__PURE__ */ jsxRuntimeExports.jsx(StudioLayout, {});
     case "build":
       return /* @__PURE__ */ jsxRuntimeExports.jsx(BuildHub, {});
+    case "machine":
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(MachineHub, {});
     case "memory":
       return /* @__PURE__ */ jsxRuntimeExports.jsx(MemoryHub, {});
     case "integrations":

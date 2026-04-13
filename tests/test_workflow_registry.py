@@ -36,6 +36,43 @@ class WorkflowRegistryTests(unittest.TestCase):
         self.assertEqual(plan.intent, "local-command-dispatch")
         self.assertIn("/mnt/d", str(plan.state_updates.get("os_command", "")))
 
+    def test_match_explicit_workflow_routes_multistep_setup_to_shell_plan_agent(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state(
+                "Install docker if missing, then start it and run an nginx container."
+            )
+            plan = match_explicit_workflow(runtime, state)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.agent_name, "shell_plan_agent")
+        self.assertEqual(plan.intent, "shell-plan-dispatch")
+        self.assertIn("multi-step local setup", plan.reason.lower())
+
+    def test_match_explicit_workflow_allows_follow_up_local_command_after_os_agent(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("what is the largest file in the folder edscanner?")
+            state["last_agent"] = "os_agent"
+            plan = match_explicit_workflow(runtime, state)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.agent_name, "os_agent")
+        self.assertEqual(plan.intent, "local-command-dispatch")
+        self.assertIn("find ", str(plan.state_updates.get("os_command", "")))
+
     def test_match_explicit_workflow_returns_github_dispatch_plan(self):
         with (
             patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
@@ -87,6 +124,31 @@ class WorkflowRegistryTests(unittest.TestCase):
         self.assertEqual(plan.intent, "long-document-dispatch")
         self.assertTrue(plan.state_mutations["long_document_job_started"])
         self.assertTrue(plan.state_updates["long_document_collect_sources_first"])
+
+    def test_match_explicit_workflow_returns_deep_research_resume_plan(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Investigate ESG claims for potential greenwashing.")
+            state["workflow_type"] = "deep_research"
+            state["deep_research_mode"] = True
+            state["deep_research_confirmed"] = True
+            state["deep_research_result_card"] = {"kind": "analysis"}
+            state["long_document_mode"] = True
+            state["long_document_job_started"] = True
+            state["last_agent"] = "long_document_agent"
+            plan = match_explicit_workflow(runtime, state, stage="resume")
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.agent_name, "long_document_agent")
+        self.assertEqual(plan.intent, "long-document-resume")
+        self.assertTrue(plan.state_mutations["long_document_mode"])
+        self.assertTrue(plan.state_mutations["long_document_job_started"])
 
     def test_match_explicit_workflow_returns_research_pipeline_dispatch_plan(self):
         with (

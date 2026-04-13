@@ -34,6 +34,7 @@ from kendr.recovery import discover_resume_candidates, load_resume_candidate
 from kendr.capability_registry import CapabilityRegistryService
 from kendr.capability_sync import sync_mcp_capabilities
 from kendr.openapi_importer import import_openapi_as_capabilities, parse_openapi_payload
+from kendr.machine_index import machine_sync_status, run_machine_sync
 from kendr.skill_manager import (
     get_marketplace,
     grant_skill_approval,
@@ -274,6 +275,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/health":
             self._send_json(200, {"status": "ok"})
+            return
+        if parsed.path == "/api/machine/status":
+            params = parse_qs(parsed.query or "")
+            working_directory = str((params.get("working_directory") or [""])[0] or "").strip()
+            if not working_directory:
+                working_directory = str(Path.cwd().resolve())
+            try:
+                status = machine_sync_status(working_directory)
+                self._send_json(200, {"working_directory": working_directory, "status": status})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
             return
         if parsed.path == "/registry/skills":
             try:
@@ -600,6 +612,29 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not_found"})
 
     def do_POST(self):
+        if self.path == "/api/machine/sync":
+            payload, err = self._read_json_body()
+            if payload is None:
+                self._send_json(400, {"error": "invalid_json", "detail": err})
+                return
+            working_directory = str(payload.get("working_directory", "") or "").strip()
+            if not working_directory:
+                working_directory = str(Path.cwd().resolve())
+            scope = str(payload.get("scope", "machine") or "machine").strip().lower()
+            roots = payload.get("roots")
+            if not isinstance(roots, list):
+                roots = []
+            try:
+                result = run_machine_sync(
+                    working_directory=working_directory,
+                    scope=scope,
+                    roots=[str(item) for item in roots if str(item).strip()],
+                    max_files=int(payload.get("max_files", 250000) or 250000),
+                )
+                self._send_json(200, result)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
         # ── MCP server CRUD ────────────────────────────────────────────────────
         # POST /api/connectors/mcp  → add a new MCP server
         if self.path == "/api/connectors/mcp":
@@ -1218,6 +1253,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
         for key in passthrough_keys:
             if key in payload:
                 state_overrides[key] = payload.get(key)
+        if isinstance(payload.get("history"), list):
+            state_overrides["session_history"] = payload.get("history", [])[-20:]
         if "communication_authorized" in payload:
             state_overrides["communication_authorized"] = bool(payload.get("communication_authorized"))
         if bool(payload.get("security_authorized", False)):
@@ -1260,6 +1297,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "approval_pending_scope": result.get("approval_pending_scope", ""),
                     "pending_user_question": result.get("pending_user_question", ""),
                     "approval_request": result.get("approval_request", {}),
+                    "last_shell_command": result.get("last_shell_command", ""),
+                    "recent_shell_commands": result.get("recent_shell_commands", []),
+                    "software_inventory_last_synced": result.get("software_inventory_last_synced", ""),
+                    "software_inventory_stale": bool(result.get("software_inventory_stale", True)),
+                    "software_inventory": result.get("software_inventory", {}),
+                    "file_index_last_synced": result.get("file_index_last_synced", ""),
+                    "indexed_files": int(result.get("indexed_files", 0) or 0),
+                    "recent_file_changes_24h": int(result.get("recent_file_changes_24h", 0) or 0),
+                    "machine_sync_stale": bool(result.get("machine_sync_stale", True)),
                     "resume_candidate": candidate if self.path == "/resume" else {},
                     # Long-document / deep-research export paths
                     "long_document_compiled_path": result.get("long_document_compiled_path", ""),

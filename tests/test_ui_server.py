@@ -169,6 +169,80 @@ class TestUIRequestLogging(unittest.TestCase):
         self.assertIn("127.0.0.1", logged[0])
 
 
+class TestChatContextSummary(unittest.TestCase):
+    def test_sync_channel_chat_context_writes_summary_file_and_state(self):
+        import kendr.ui_server as ui_server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload = {"channel": "webchat", "sender_id": "desktop_user", "chat_id": "chat-1"}
+            prior_state = {
+                "state": {
+                    "chat_history_messages": [
+                        {"role": "user", "content": "First question"},
+                        {"role": "assistant", "content": "First answer"},
+                    ],
+                    "chat_summary_compaction_level": 0,
+                }
+            }
+            with (
+                patch.dict(os.environ, {"KENDR_HOME": tmpdir}),
+                patch.object(ui_server, "_HAS_PERSISTENCE", True),
+                patch.object(ui_server, "_db_get_channel_session", return_value=prior_state),
+                patch.object(ui_server, "_db_upsert_channel_session") as mock_upsert,
+            ):
+                result = ui_server._sync_channel_chat_context(
+                    payload,
+                    append_messages=[{"role": "user", "content": "Need a design update"}],
+                    context_limit=32000,
+                )
+                summary_path = Path(result["summary_file"])
+                self.assertTrue(summary_path.exists())
+                summary_text = summary_path.read_text(encoding="utf-8")
+
+        self.assertTrue(result["summary_file"].endswith("summary.md"))
+        self.assertIn("# summary.md", summary_text)
+        self.assertIn("Latest user intent", summary_text)
+        self.assertEqual(len(result["history"]), 3)
+        saved_state = mock_upsert.call_args.args[1]["state"]
+        self.assertIn("chat_summary_text", saved_state)
+        self.assertIn("chat_history_messages", saved_state)
+
+    def test_compact_endpoint_increments_compaction_level(self):
+        import kendr.ui_server as ui_server
+
+        handler = object.__new__(ui_server.KendrUIHandler)
+        responses = {}
+
+        def _capture(status, payload):
+            responses["status"] = status
+            responses["payload"] = payload
+
+        handler._json = _capture  # type: ignore[method-assign]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                patch.dict(os.environ, {"KENDR_HOME": tmpdir}),
+                patch.object(ui_server, "_HAS_PERSISTENCE", True),
+                patch.object(
+                    ui_server,
+                    "_db_get_channel_session",
+                    return_value={"state": {"chat_history_messages": [{"role": "user", "content": "one"}], "chat_summary_compaction_level": 1}},
+                ),
+                patch.object(ui_server, "_db_upsert_channel_session"),
+            ):
+                handler._handle_chat_compact({
+                    "channel": "webchat",
+                    "sender_id": "desktop_user",
+                    "chat_id": "chat-compact",
+                    "history": [{"role": "user", "content": "one"}],
+                    "context_limit": 20000,
+                })
+
+        self.assertEqual(responses["status"], 200)
+        self.assertTrue(responses["payload"]["ok"])
+        self.assertGreaterEqual(int(responses["payload"]["compaction_level"]), 2)
+
+
 class TestUIStepFormatting(unittest.TestCase):
     def test_format_step_includes_timing_and_failure_reason(self):
         import kendr.ui_server as ui_server
@@ -1116,6 +1190,47 @@ class TestUIModelInventory(unittest.TestCase):
         self.assertEqual(body.get("active_provider"), "openai")
         self.assertEqual(body.get("active_model"), "gpt-5.1")
 
+
+class TestUIMachineDetails(unittest.TestCase):
+    def test_machine_details_endpoint_returns_tree_payload(self):
+        from kendr.ui_server import KendrUIHandler
+        from http.client import HTTPConnection
+
+        with patch("kendr.ui_server.machine_sync_details", return_value={
+            "working_directory": "/tmp/demo",
+            "status": {"indexed_files": 2, "installed_software_count": 1, "system_info": {"hostname": "demo-box"}},
+            "system_info": {"hostname": "demo-box"},
+            "apps": [{"name": "git", "path": "/usr/bin/git", "version": "2.x"}],
+            "roots": ["/tmp/demo"],
+            "tree": [{
+                "name": "demo",
+                "path": "/tmp/demo",
+                "type": "directory",
+                "children": [{"name": "file.txt", "path": "/tmp/demo/file.txt", "type": "file", "size": 10}],
+            }],
+            "indexed_files": [{"path": "/tmp/demo/file.txt", "size": 10, "file_type": "text"}],
+            "truncated": False,
+            "max_files": 20000,
+        }):
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), KendrUIHandler)
+            _, port = srv.server_address
+            t = threading.Thread(target=srv.handle_request, daemon=True)
+            t.start()
+            try:
+                conn = HTTPConnection("127.0.0.1", port, timeout=3)
+                conn.request("GET", "/api/machine/details")
+                resp = conn.getresponse()
+                body = json.loads(resp.read())
+                conn.close()
+            finally:
+                srv.server_close()
+                t.join(timeout=3)
+
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body.get("working_directory"), "/tmp/demo")
+        self.assertTrue(body.get("tree"))
+        self.assertEqual(body.get("system_info", {}).get("hostname"), "demo-box")
+
     def test_ollama_models_endpoint_returns_pulled_models(self):
         from kendr.ui_server import KendrUIHandler
         from http.client import HTTPConnection
@@ -1213,6 +1328,49 @@ class TestUIModelInventory(unittest.TestCase):
             handler.command = "POST"
             handler._json = MagicMock()
             handler.do_POST()
+
+        handler._json.assert_called_once_with(200, payload)
+
+    def test_ollama_delete_endpoint_deletes_model(self):
+        from kendr.ui_server import KendrUIHandler
+
+        payload = {"ok": True, "model": "llama3.2"}
+        with patch("kendr.ui_server._delete_ollama_model", return_value=(True, payload, 200)):
+            raw = json.dumps({"model": "llama3.2"}).encode("utf-8")
+            handler = KendrUIHandler.__new__(KendrUIHandler)
+            handler.path = "/api/models/ollama/delete"
+            handler.headers = {"Content-Length": str(len(raw)), "Content-Type": "application/json"}
+            handler.rfile = io.BytesIO(raw)
+            handler.wfile = io.BytesIO()
+            handler.client_address = ("127.0.0.1", 0)
+            handler.server = None
+            handler.command = "POST"
+            handler._json = MagicMock()
+            handler.do_POST()
+
+        handler._json.assert_called_once_with(200, payload)
+
+    def test_model_guide_endpoint_returns_payload(self):
+        from kendr.ui_server import KendrUIHandler
+
+        payload = {
+            "generated_at": "2026-04-13T00:00:00+00:00",
+            "recommendations": [],
+            "openrouter_rankings": [],
+            "openrouter_comparison": [],
+            "cloud_usage": [],
+        }
+        with patch("kendr.ui_server._get_model_guide", return_value=payload):
+            handler = KendrUIHandler.__new__(KendrUIHandler)
+            handler.path = "/api/models/guide"
+            handler.headers = {}
+            handler.rfile = io.BytesIO()
+            handler.wfile = io.BytesIO()
+            handler.client_address = ("127.0.0.1", 0)
+            handler.server = None
+            handler.command = "GET"
+            handler._json = MagicMock()
+            handler.do_GET()
 
         handler._json.assert_called_once_with(200, payload)
 
@@ -1623,6 +1781,8 @@ class TestDeepResearchUploads(unittest.TestCase):
         self.assertIn("/api/deep-research/upload", html)
         self.assertIn("renderDocumentPreviewCard", html)
         self.assertIn("/api/artifacts/view", html)
+        self.assertIn("Live Research Trace", html)
+        self.assertIn("Viewed links", html)
 
 
 class TestDeepResearchChatPayload(unittest.TestCase):

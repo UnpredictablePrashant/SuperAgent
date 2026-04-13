@@ -31,6 +31,7 @@ SERP_API_URL = "https://serpapi.com/search.json"
 OPENALEX_API_URL = "https://api.openalex.org/works"
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 REDDIT_BASE_URL = "https://www.reddit.com"
+DUCKDUCKGO_HTML_SEARCH_URL = "https://html.duckduckgo.com/html/"
 IMAGE_FILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
 LOCAL_DRIVE_SUPPORTED_EXTENSIONS = {
     ".txt",
@@ -254,6 +255,237 @@ def serp_patent_search(
     if extra_params:
         params.update(extra_params)
     return serp_search(query, engine="google_patents", num=num, extra_params=params)
+
+
+def _clean_search_result_url(url: str) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    return value
+
+
+def duckduckgo_html_search(query: str, *, num: int = 10) -> dict:
+    payload = urlencode({"q": query, "kl": "us-en"})
+    request = Request(
+        DUCKDUCKGO_HTML_SEARCH_URL,
+        data=payload.encode("utf-8"),
+        headers={
+            "User-Agent": os.getenv(
+                "RESEARCH_USER_AGENT",
+                "multi-agent-research-bot/1.0 (+https://localhost)",
+            ),
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=30) as response:
+        html = response.read().decode("utf-8", errors="ignore")
+
+    results: list[dict] = []
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        anchors = soup.select("a.result__a, a.result-link")
+        for anchor in anchors:
+            title = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True)).strip()
+            href = _clean_search_result_url(anchor.get("href", ""))
+            if not title or not href:
+                continue
+            container = anchor.find_parent(class_="result") or anchor.parent
+            snippet_el = None
+            if container is not None:
+                snippet_el = container.select_one(".result__snippet, .result-snippet")
+            snippet = ""
+            if snippet_el is not None:
+                snippet = re.sub(r"\s+", " ", snippet_el.get_text(" ", strip=True)).strip()
+            if href not in {item.get("url", "") for item in results}:
+                results.append(
+                    {
+                        "title": title,
+                        "url": href,
+                        "snippet": snippet,
+                        "source": "DuckDuckGo",
+                        "date": "",
+                    }
+                )
+            if len(results) >= num:
+                break
+    except Exception:
+        pass
+
+    if not results:
+        for match in re.finditer(
+            r'<a[^>]+class="[^"]*(?:result__a|result-link)[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            href = _clean_search_result_url(match.group(1))
+            title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", match.group(2))).strip()
+            if not href or not title:
+                continue
+            if href not in {item.get("url", "") for item in results}:
+                results.append(
+                    {
+                        "title": title,
+                        "url": href,
+                        "snippet": "",
+                        "source": "DuckDuckGo",
+                        "date": "",
+                    }
+                )
+            if len(results) >= num:
+                break
+
+    return {"results": results[:num], "raw_html": html}
+
+
+def browser_search(query: str, *, num: int = 10) -> dict:
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        raise RuntimeError(f"Playwright unavailable: {exc}") from exc
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.goto(
+                f"https://duckduckgo.com/html/?{urlencode({'q': query, 'kl': 'us-en'})}",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            page.wait_for_timeout(1200)
+            html = page.content()
+        finally:
+            browser.close()
+
+    results: list[dict] = []
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        anchors = soup.select("a.result__a, a.result-link")
+        for anchor in anchors:
+            title = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True)).strip()
+            href = _clean_search_result_url(anchor.get("href", ""))
+            if not title or not href:
+                continue
+            container = anchor.find_parent(class_="result") or anchor.parent
+            snippet_el = None
+            if container is not None:
+                snippet_el = container.select_one(".result__snippet, .result-snippet")
+            snippet = ""
+            if snippet_el is not None:
+                snippet = re.sub(r"\s+", " ", snippet_el.get_text(" ", strip=True)).strip()
+            if href not in {item.get("url", "") for item in results}:
+                results.append(
+                    {
+                        "title": title,
+                        "url": href,
+                        "snippet": snippet,
+                        "source": "DuckDuckGo browser",
+                        "date": "",
+                    }
+                )
+            if len(results) >= num:
+                break
+    except Exception as exc:
+        raise RuntimeError(f"Browser search parsing failed: {exc}") from exc
+
+    return {"results": results[:num], "raw_html": html}
+
+
+def fetch_search_results(
+    query: str,
+    *,
+    num: int = 10,
+    fetch_pages: int = 3,
+) -> dict:
+    attempts: list[str] = []
+    search_results: list[dict] = []
+    provider = ""
+    raw_payload: dict | None = None
+    errors: list[str] = []
+
+    try:
+        attempts.append("serpapi")
+        serp_payload = serp_search(query, num=num)
+        raw_payload = serp_payload
+        provider = "serpapi"
+        for item in serp_payload.get("organic_results", [])[:num]:
+            url = _clean_search_result_url(item.get("link", ""))
+            if not url:
+                continue
+            search_results.append(
+                {
+                    "title": str(item.get("title", "")).strip(),
+                    "url": url,
+                    "snippet": str(item.get("snippet", "")).strip(),
+                    "source": str(item.get("source", "")).strip(),
+                    "date": str(item.get("date", "")).strip(),
+                }
+            )
+    except Exception as exc:
+        errors.append(f"serpapi: {exc}")
+
+    if not search_results:
+        try:
+            attempts.append("duckduckgo_html")
+            ddg_payload = duckduckgo_html_search(query, num=num)
+            raw_payload = ddg_payload
+            provider = "duckduckgo_html"
+            search_results = list(ddg_payload.get("results", []) or [])
+        except Exception as exc:
+            errors.append(f"duckduckgo_html: {exc}")
+
+    if not search_results:
+        try:
+            attempts.append("playwright_browser")
+            browser_payload = browser_search(query, num=num)
+            raw_payload = browser_payload
+            provider = "playwright_browser"
+            search_results = list(browser_payload.get("results", []) or [])
+        except Exception as exc:
+            errors.append(f"playwright_browser: {exc}")
+
+    viewed_pages: list[dict] = []
+    if search_results:
+        for item in search_results[: max(0, int(fetch_pages or 0))]:
+            url = _clean_search_result_url(item.get("url", ""))
+            if not url:
+                continue
+            try:
+                page = fetch_url_content(url, timeout=20)
+                excerpt = re.sub(r"\s+", " ", str(page.get("text", "")).strip())[:1200]
+                viewed_pages.append(
+                    {
+                        "url": url,
+                        "content_type": str(page.get("content_type", "")).strip(),
+                        "excerpt": excerpt,
+                    }
+                )
+            except Exception as exc:
+                viewed_pages.append(
+                    {
+                        "url": url,
+                        "content_type": "",
+                        "excerpt": "",
+                        "error": str(exc),
+                    }
+                )
+
+    return {
+        "provider": provider,
+        "providers_tried": attempts,
+        "results": search_results[:num],
+        "viewed_pages": viewed_pages,
+        "raw": raw_payload or {},
+        "error": "" if search_results else "; ".join(errors),
+    }
 
 
 def openalex_search(query: str, per_page: int = 10, filters: str | None = None) -> dict:

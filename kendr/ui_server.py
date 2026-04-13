@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import shlex
+import subprocess
 import tempfile
 import threading
 import time
@@ -23,6 +24,13 @@ from logging.handlers import RotatingFileHandler
 from urllib.parse import parse_qs, urlparse
 
 _log = logging.getLogger("kendr.ui")
+from kendr.chat_context import (
+    build_chat_context_block as _build_chat_context_block,
+    build_chat_summary_markdown as _build_chat_summary_markdown,
+    estimate_token_count as _estimate_chat_tokens,
+    normalize_chat_messages as _normalize_chat_messages,
+    summary_file_path as _chat_summary_file_path,
+)
 from kendr.path_utils import normalize_host_path_str
 
 from tasks.setup_config_store import (
@@ -33,6 +41,7 @@ from tasks.setup_config_store import (
     set_component_enabled,
     setup_overview,
 )
+from kendr.machine_index import machine_sync_details, machine_sync_status, run_machine_sync
 
 try:
     from kendr.persistence import (
@@ -673,6 +682,140 @@ def _project_chat_result_text(result: dict) -> str:
     return ""
 
 
+def _channel_session_key_from_payload(payload: dict) -> str:
+    channel = str(payload.get("channel") or "webchat").strip().lower() or "webchat"
+    workspace_id = str(payload.get("workspace_id") or "default").strip() or "default"
+    sender_id = str(payload.get("sender_id") or "unknown").strip() or "unknown"
+    chat_id = str(payload.get("chat_id") or sender_id or "unknown").strip() or sender_id or "unknown"
+    scope = "group" if bool(payload.get("is_group", False)) else "main"
+    return ":".join([channel, workspace_id, chat_id, scope])
+
+
+def _summary_budget_tokens(context_limit: int | str | None) -> int:
+    try:
+        limit = int(context_limit or 0)
+    except Exception:
+        limit = 0
+    if limit <= 0:
+        return 2048
+    return max(768, min(12000, int(limit * 0.2)))
+
+
+def _load_channel_chat_context(payload: dict) -> dict:
+    session_key = _channel_session_key_from_payload(payload)
+    row = _db_get_channel_session(session_key) if _HAS_PERSISTENCE else None
+    state = dict((row or {}).get("state") or {})
+    history = _normalize_chat_messages(state.get("chat_history_messages") or [])
+    summary_text = str(state.get("chat_summary_text") or "").strip()
+    summary_file = str(state.get("chat_summary_file") or "").strip()
+    return {
+        "session_key": session_key,
+        "row": row or {},
+        "state": state,
+        "history": history,
+        "summary_text": summary_text,
+        "summary_file": summary_file,
+        "compaction_level": int(state.get("chat_summary_compaction_level", 0) or 0),
+    }
+
+
+def _sync_channel_chat_context(
+    payload: dict,
+    *,
+    supplied_history: list[dict] | None = None,
+    append_messages: list[dict] | None = None,
+    context_limit: int | str | None = None,
+    compact_increment: int = 0,
+) -> dict:
+    context = _load_channel_chat_context(payload)
+    state = dict(context.get("state") or {})
+    history = _normalize_chat_messages(context.get("history") or [])
+    if isinstance(supplied_history, list) and supplied_history:
+        history = _merge_chat_history(history, supplied_history)
+    if append_messages:
+        history = _merge_chat_history(history, append_messages)
+    requested_level = max(0, int(state.get("chat_summary_compaction_level", 0) or 0) + int(compact_increment or 0))
+    summary_text, effective_level = _build_chat_summary_markdown(
+        history,
+        requested_level=requested_level,
+        max_tokens=_summary_budget_tokens(context_limit or state.get("chat_context_limit_tokens")),
+    )
+    summary_file = _chat_summary_file_path(str(context.get("session_key") or "default"))
+    summary_file.parent.mkdir(parents=True, exist_ok=True)
+    summary_file.write_text(summary_text, encoding="utf-8")
+
+    state["chat_history_messages"] = history
+    state["chat_summary_text"] = summary_text
+    state["chat_summary_file"] = str(summary_file)
+    state["chat_summary_updated_at"] = _utc_now_iso()
+    state["chat_summary_compaction_level"] = effective_level
+    if context_limit:
+        try:
+            state["chat_context_limit_tokens"] = int(context_limit)
+        except Exception:
+            pass
+    if _HAS_PERSISTENCE:
+        _db_upsert_channel_session(
+            str(context.get("session_key") or ""),
+            {
+                "channel": str(payload.get("channel") or "webchat"),
+                "chat_id": str(payload.get("chat_id") or ""),
+                "sender_id": str(payload.get("sender_id") or "ui_user"),
+                "workspace_id": str(payload.get("workspace_id") or ""),
+                "is_group": bool(payload.get("is_group", False)),
+                "state": state,
+                "updated_at": _utc_now_iso(),
+            },
+        )
+    return {
+        **context,
+        "state": state,
+        "history": history,
+        "summary_text": summary_text,
+        "summary_file": str(summary_file),
+        "compaction_level": effective_level,
+        "summary_tokens": _estimate_chat_tokens(summary_text),
+    }
+
+
+def _merge_chat_history(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    left = _normalize_chat_messages(existing)
+    right = _normalize_chat_messages(incoming)
+    if not left:
+        return right[-200:]
+    if not right:
+        return left[-200:]
+    overlap = 0
+    max_overlap = min(len(left), len(right))
+    for size in range(max_overlap, 0, -1):
+        if left[-size:] == right[:size]:
+            overlap = size
+            break
+    merged = [*left, *right[overlap:]]
+    return merged[-200:]
+
+
+def _persist_channel_chat_turn(
+    payload: dict,
+    *,
+    user_text: str,
+    assistant_text: str,
+    context_limit: int | str | None = None,
+) -> dict:
+    messages = []
+    if str(user_text or "").strip():
+        messages.append({"role": "user", "content": str(user_text).strip(), "created_at": _utc_now_iso()})
+    if str(assistant_text or "").strip():
+        messages.append({"role": "assistant", "content": str(assistant_text).strip(), "created_at": _utc_now_iso()})
+    if not messages:
+        return _load_channel_chat_context(payload)
+    return _sync_channel_chat_context(
+        payload,
+        append_messages=messages,
+        context_limit=context_limit,
+    )
+
+
 def _persist_project_chat_user_request(payload: dict, text: str) -> tuple[str, str, str]:
     channel = str(payload.get("channel") or "").strip().lower()
     if channel != "project_ui":
@@ -1079,6 +1222,385 @@ def _cancel_ollama_pull_job() -> tuple[bool, dict[str, object], int]:
     except Exception:
         pass
     return True, {"ok": True, "pull": _ollama_pull_public_state()}, 200
+
+
+_MODEL_GUIDE_CACHE_TTL_SECONDS = 15 * 60
+_MODEL_GUIDE_CACHE: dict[str, object] = {
+    "fetched_at": 0.0,
+    "payload": None,
+}
+_MODEL_GUIDE_LOCK = threading.Lock()
+
+_OPENROUTER_RANKINGS_FALLBACK = [
+    {"rank": 1, "name": "Qwen3.6 Plus (free)", "author": "qwen", "tokens": "1.66T", "share": "64%"},
+    {"rank": 2, "name": "Deepseek V3.2", "author": "deepseek", "tokens": "1.27T", "share": "7%"},
+    {"rank": 3, "name": "Claude Opus 4.6", "author": "anthropic", "tokens": "1.19T", "share": "17%"},
+    {"rank": 4, "name": "Minimax M2.7", "author": "minimax", "tokens": "1.19T", "share": "0%"},
+    {"rank": 5, "name": "Claude Sonnet 4.6", "author": "anthropic", "tokens": "1.16T", "share": "13%"},
+    {"rank": 6, "name": "Minimax M2.5", "author": "minimax", "tokens": "1.10T", "share": "30%"},
+    {"rank": 7, "name": "Gemini 3 Flash Preview", "author": "google", "tokens": "1.06T", "share": "8%"},
+    {"rank": 8, "name": "Nemotron 3 Super 120B A12B (free)", "author": "nvidia", "tokens": "659B", "share": "43%"},
+    {"rank": 9, "name": "Mimo V2 Pro", "author": "xiaomi", "tokens": "606B", "share": "80%"},
+    {"rank": 10, "name": "Gemini 2.5 Flash", "author": "google", "tokens": "543B", "share": "14%"},
+]
+
+_OLLAMA_MODEL_GUIDE = [
+    {
+        "id": "llama3.2:latest",
+        "label": "Llama 3.2",
+        "access": "local",
+        "family": "llama",
+        "size_gb": 2.0,
+        "min_memory_gb": 8,
+        "speed": "fast",
+        "cost": "free-local",
+        "reasoning": "basic",
+        "best_for": ["general chat", "offline fallback", "low-memory laptop"],
+        "agent_fit": ["small helper agents", "drafting", "classification"],
+        "notes": "Best cheap local default when machine small. Not best for heavy coding agents.",
+    },
+    {
+        "id": "gemma4:4b",
+        "label": "Gemma 4 4B",
+        "access": "local",
+        "family": "gemma",
+        "size_gb": 9.6,
+        "min_memory_gb": 16,
+        "speed": "medium",
+        "cost": "free-local",
+        "reasoning": "good",
+        "best_for": ["general work", "summaries", "light coding"],
+        "agent_fit": ["planner", "research helper", "doc generation"],
+        "notes": "Good balance if you can spare ~16 GB RAM and want stronger local quality.",
+    },
+    {
+        "id": "qwen2.5-coder:7b",
+        "label": "Qwen 2.5 Coder 7B",
+        "access": "local",
+        "family": "qwen",
+        "size_gb": 4.7,
+        "min_memory_gb": 12,
+        "speed": "fast",
+        "cost": "free-local",
+        "reasoning": "good",
+        "best_for": ["coding", "refactors", "CLI help"],
+        "agent_fit": ["code agent", "fixer", "test writer"],
+        "notes": "Best local coding-first pull for mid-range machine.",
+    },
+    {
+        "id": "deepseek-r1:8b",
+        "label": "DeepSeek R1 8B",
+        "access": "local",
+        "family": "deepseek",
+        "size_gb": 4.9,
+        "min_memory_gb": 12,
+        "speed": "medium",
+        "cost": "free-local",
+        "reasoning": "strong",
+        "best_for": ["reasoning", "math", "step-by-step work"],
+        "agent_fit": ["reasoning agent", "analysis agent"],
+        "notes": "Useful when you want better reasoning locally and can trade some speed.",
+    },
+    {
+        "id": "kimi-k2.5:cloud",
+        "label": "Kimi K2.5",
+        "access": "cloud",
+        "family": "kimi",
+        "size_gb": 0,
+        "min_memory_gb": 0,
+        "speed": "medium",
+        "cost": "paid-cloud",
+        "reasoning": "frontier",
+        "best_for": ["agent workflows", "coding with vision", "complex multi-step tasks"],
+        "agent_fit": ["tool-using agents", "code agent", "multimodal agent"],
+        "notes": "Runs through Ollama cloud alias. No local weights download; needs Ollama cloud access.",
+    },
+    {
+        "id": "kimi-k2-thinking:cloud",
+        "label": "Kimi K2 Thinking",
+        "access": "cloud",
+        "family": "kimi",
+        "size_gb": 0,
+        "min_memory_gb": 0,
+        "speed": "slow",
+        "cost": "paid-cloud",
+        "reasoning": "frontier",
+        "best_for": ["deep reasoning", "agent chains", "long-horizon coding"],
+        "agent_fit": ["reasoning agent", "research agent", "debug agent"],
+        "notes": "Cloud-only thinking model. Use with Ollama alias like any other model name.",
+    },
+    {
+        "id": "glm-5:cloud",
+        "label": "GLM 5",
+        "access": "cloud",
+        "family": "glm",
+        "size_gb": 0,
+        "min_memory_gb": 0,
+        "speed": "medium",
+        "cost": "paid-cloud",
+        "reasoning": "frontier",
+        "best_for": ["coding", "reasoning", "multilingual"],
+        "agent_fit": ["code agent", "browser agent", "general agent"],
+        "notes": "Strong cloud pick when you want agentic + coding focus without local RAM pressure.",
+    },
+    {
+        "id": "minimax-m2.7:cloud",
+        "label": "MiniMax M2.7",
+        "access": "cloud",
+        "family": "minimax",
+        "size_gb": 0,
+        "min_memory_gb": 0,
+        "speed": "fast",
+        "cost": "paid-cloud",
+        "reasoning": "strong",
+        "best_for": ["coding", "fast responses", "professional writing"],
+        "agent_fit": ["code agent", "ops agent", "writer agent"],
+        "notes": "High-usage cloud model on Ollama library; good if speed matters more than local-only.",
+    },
+]
+
+
+def _detect_system_memory_gb() -> int:
+    try:
+        if hasattr(os, "sysconf"):
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            page_count = int(os.sysconf("SC_PHYS_PAGES"))
+            total_bytes = page_size * page_count
+            if total_bytes > 0:
+                return max(1, int(round(total_bytes / (1024 ** 3))))
+    except Exception:
+        pass
+    return 0
+
+
+def _fetch_json(url: str, timeout: float = 2.0, headers: dict[str, str] | None = None) -> dict | list | None:
+    req = urllib.request.Request(url, method="GET", headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        return json.loads(raw)
+
+
+def _fetch_text(url: str, timeout: float = 2.0, headers: dict[str, str] | None = None) -> str:
+    req = urllib.request.Request(url, method="GET", headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _fetch_openrouter_models() -> tuple[list[dict], str]:
+    try:
+        payload = _fetch_json(
+            "https://openrouter.ai/api/v1/models",
+            timeout=2.5,
+            headers={"User-Agent": "kendr-ui/1.0"},
+        )
+        items = payload.get("data") if isinstance(payload, dict) else []
+        return items if isinstance(items, list) else [], ""
+    except Exception as exc:
+        return [], str(exc)
+
+
+def _fetch_openrouter_rankings() -> tuple[list[dict], str]:
+    try:
+        html = _fetch_text(
+            "https://openrouter.ai/rankings",
+            timeout=2.5,
+            headers={"User-Agent": "kendr-ui/1.0"},
+        )
+        pattern = re.compile(
+            r">\s*(\d+)\.\s*<.*?>\s*([^<]+?)\s*</a>\s*.*?>\s*by\s*<.*?>\s*([^<]+?)\s*</a>\s*.*?([0-9.]+[TBM])\s*tokens\s*.*?([0-9]+%)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        rows: list[dict] = []
+        for rank_text, name, author, tokens, share in pattern.findall(html):
+            rank = int(rank_text)
+            rows.append({
+                "rank": rank,
+                "name": re.sub(r"\s+", " ", name).strip(),
+                "author": re.sub(r"\s+", " ", author).strip(),
+                "tokens": tokens.strip(),
+                "share": share.strip(),
+            })
+            if len(rows) >= 10:
+                break
+        return rows, ""
+    except Exception as exc:
+        return [], str(exc)
+
+
+def _to_million_token_price(raw_value: object) -> float | None:
+    try:
+        value = float(str(raw_value or "0").strip())
+    except Exception:
+        return None
+    if value < 0:
+        return None
+    return round(value * 1_000_000, 4)
+
+
+def _format_price_band(prompt_price_per_million: float | None) -> str:
+    if prompt_price_per_million is None:
+        return "unknown"
+    if prompt_price_per_million == 0:
+        return "free"
+    if prompt_price_per_million <= 0.5:
+        return "very-low"
+    if prompt_price_per_million <= 3:
+        return "low"
+    if prompt_price_per_million <= 10:
+        return "mid"
+    return "high"
+
+
+def _normalize_openrouter_model(item: dict) -> dict:
+    pricing = item.get("pricing") if isinstance(item.get("pricing"), dict) else {}
+    architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
+    prompt_price = _to_million_token_price(pricing.get("prompt"))
+    completion_price = _to_million_token_price(pricing.get("completion"))
+    modalities_in = architecture.get("input_modalities") if isinstance(architecture.get("input_modalities"), list) else []
+    supported_parameters = item.get("supported_parameters") if isinstance(item.get("supported_parameters"), list) else []
+    return {
+        "id": str(item.get("id") or "").strip(),
+        "name": str(item.get("name") or item.get("id") or "").strip(),
+        "context_length": int(item.get("context_length") or 0),
+        "prompt_price_per_million": prompt_price,
+        "completion_price_per_million": completion_price,
+        "price_band": _format_price_band(prompt_price),
+        "supports_tools": any(str(param).strip() in {"tools", "tool_choice"} for param in supported_parameters),
+        "supports_structured_output": any(str(param).strip() == "response_format" for param in supported_parameters),
+        "supports_vision": any(str(modality).strip() == "image" for modality in modalities_in),
+    }
+
+
+def _build_openrouter_comparison(openrouter_models: list[dict]) -> list[dict]:
+    preferred = [
+        "openai/gpt-5.4",
+        "openai/gpt-5.4-mini",
+        "anthropic/claude-opus-4.6",
+        "anthropic/claude-sonnet-4.6",
+        "google/gemini-2.5-flash",
+        "google/gemini-2.5-pro",
+        "qwen/qwen3.6-plus",
+        "deepseek/deepseek-chat-v3.2",
+        "minimax/minimax-m2.7",
+    ]
+    by_id = {
+        str(item.get("id") or "").strip().lower(): _normalize_openrouter_model(item)
+        for item in openrouter_models
+        if isinstance(item, dict)
+    }
+    rows = [by_id[key] for key in preferred if key in by_id]
+    if len(rows) >= 6:
+        return rows[:6]
+    extras = [value for key, value in by_id.items() if key not in {item["id"].lower() for item in rows}]
+    extras.sort(key=lambda item: (item.get("price_band") != "free", -(item.get("context_length") or 0), item.get("name") or ""))
+    return (rows + extras)[:6]
+
+
+def _build_ollama_recommendations(pulled_models: list[dict]) -> list[dict]:
+    pulled_names = {
+        str(item.get("name") or "").strip().lower()
+        for item in pulled_models
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    system_memory_gb = _detect_system_memory_gb()
+    rows: list[dict] = []
+    for item in _OLLAMA_MODEL_GUIDE:
+        min_memory = int(item.get("min_memory_gb") or 0)
+        access = str(item.get("access") or "local")
+        fits = access == "cloud" or system_memory_gb <= 0 or system_memory_gb >= min_memory
+        status = "pulled" if str(item.get("id") or "").strip().lower() in pulled_names else "available"
+        rows.append({
+            **item,
+            "fits_system": fits,
+            "fit_label": (
+                "No local RAM limit"
+                if access == "cloud"
+                else (f"Fits {system_memory_gb} GB RAM" if fits and system_memory_gb > 0 else f"Needs about {min_memory}+ GB RAM")
+            ),
+            "status": status,
+        })
+    rows.sort(key=lambda item: (not item.get("fits_system"), item.get("access") != "local", item.get("status") == "pulled", item.get("min_memory_gb") or 0))
+    return rows
+
+
+def _build_model_guide_payload() -> dict[str, object]:
+    from kendr.llm_router import is_ollama_running, list_ollama_models
+
+    running = is_ollama_running()
+    pulled_models = list_ollama_models() if running else []
+    rankings, ranking_error = _fetch_openrouter_rankings()
+    models, models_error = _fetch_openrouter_models()
+    rankings_fresh = bool(rankings)
+    if not rankings_fresh:
+        rankings = list(_OPENROUTER_RANKINGS_FALLBACK)
+
+    return {
+        "generated_at": _utc_now_iso(),
+        "system_memory_gb": _detect_system_memory_gb(),
+        "ollama_running": running,
+        "pulled_models": pulled_models,
+        "recommendations": _build_ollama_recommendations(pulled_models),
+        "openrouter_rankings": rankings,
+        "rankings_source": "live" if rankings_fresh else "fallback",
+        "openrouter_comparison": _build_openrouter_comparison(models),
+        "cloud_usage": [
+            {
+                "title": "Cloud models in Ollama",
+                "body": "Models ending with :cloud do not download full local weights. Ollama routes requests to the cloud model through the Ollama API surface, so you use the same model name in chat/run APIs.",
+            },
+            {
+                "title": "How to run them",
+                "body": "Use the same command shape as local models, for example ollama run kimi-k2.5:cloud or POST /api/chat with model kimi-k2.5:cloud.",
+            },
+            {
+                "title": "When to choose them",
+                "body": "Pick cloud aliases when your machine RAM is too small, when you need better reasoning or vision, or when agent workflows need stronger tool use than small local models can provide.",
+            },
+        ],
+        "notes": {
+            "rankings_error": ranking_error,
+            "models_error": models_error,
+        },
+    }
+
+
+def _get_model_guide(force: bool = False) -> dict[str, object]:
+    now = time.time()
+    with _MODEL_GUIDE_LOCK:
+        cached_payload = _MODEL_GUIDE_CACHE.get("payload")
+        fetched_at = float(_MODEL_GUIDE_CACHE.get("fetched_at") or 0.0)
+        if not force and isinstance(cached_payload, dict) and (now - fetched_at) < _MODEL_GUIDE_CACHE_TTL_SECONDS:
+            return dict(cached_payload)
+    payload = _build_model_guide_payload()
+    with _MODEL_GUIDE_LOCK:
+        _MODEL_GUIDE_CACHE["payload"] = dict(payload)
+        _MODEL_GUIDE_CACHE["fetched_at"] = now
+    return payload
+
+
+def _delete_ollama_model(model_name: str) -> tuple[bool, dict[str, object], int]:
+    model = str(model_name or "").strip()
+    if not model:
+        return False, {"error": "missing_model"}, 400
+    try:
+        result = subprocess.run(
+            ["ollama", "rm", model],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False, {"error": "ollama_not_found"}, 500
+    except Exception as exc:
+        return False, {"error": str(exc)}, 500
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip() or f"ollama rm failed ({result.returncode})"
+        return False, {"error": "delete_failed", "detail": detail}, 500
+    with _MODEL_GUIDE_LOCK:
+        _MODEL_GUIDE_CACHE["payload"] = None
+        _MODEL_GUIDE_CACHE["fetched_at"] = 0.0
+    return True, {"ok": True, "model": model}, 200
 
 
 def _clear_kill_switch_file(path_value: str) -> None:
@@ -1689,10 +2211,24 @@ def _format_step(step: dict) -> dict:
         duration_ms = max(0, int((effective_end - started_dt).total_seconds() * 1000))
     status = step.get("status", "running")
     failure_reason = excerpt or reason
+    if not reason:
+        agent_slug = str(agent or "").lower()
+        if "plan" in agent_slug:
+            reason = "Define the execution approach before running tasks."
+        elif "research" in agent_slug:
+            reason = "Gather and validate the information needed for this objective."
+        elif "draft" in agent_slug or "write" in agent_slug:
+            reason = "Turn the gathered inputs into a clear deliverable."
+        elif "review" in agent_slug or "qa" in agent_slug or "test" in agent_slug:
+            reason = "Validate quality and catch errors before completion."
+        elif "code" in agent_slug or "build" in agent_slug:
+            reason = "Implement or refine the solution requested."
+        else:
+            reason = "Advance the run toward the final requested outcome."
     return {
         "agent": agent,
         "status": status,
-        "message": excerpt or (f"Running {agent}..." if not reason else ""),
+        "message": excerpt or "",
         "reason": reason,
         "execution_id": step.get("execution_id"),
         "started_at": started_at,
@@ -1701,6 +2237,56 @@ def _format_step(step: dict) -> dict:
         "duration_label": _duration_label(duration_ms),
         "failure_reason": failure_reason if str(status).lower() in {"failed", "error"} else "",
     }
+
+
+def _step_stream_key(step: dict, idx: int) -> str:
+    execution_id = str(step.get("execution_id") or "").strip()
+    if execution_id:
+        return execution_id
+    agent = str(step.get("agent_name") or "agent").strip()
+    started = str(step.get("timestamp") or step.get("started_at") or "").strip()
+    if started:
+        return f"{agent}:{started}"
+    return f"{agent}:{idx}"
+
+
+def _step_stream_signature(step: dict) -> tuple[str, str, str, str]:
+    return (
+        str(step.get("status") or "").strip().lower(),
+        str(step.get("completed_at") or "").strip(),
+        str(step.get("output_excerpt") or "").strip(),
+        str(step.get("reason") or "").strip(),
+    )
+
+
+def _launch_step_stream_poller(run_id: str, interval_seconds: float = 0.6) -> threading.Thread:
+    """Emit SSE step updates for a run while it is active, including status changes."""
+
+    def _poll() -> None:
+        seen_signatures: dict[str, tuple[str, str, str, str]] = {}
+        terminal_statuses = {"completed", "failed", "cancelled", "awaiting_user_input"}
+        while True:
+            with _pending_lock:
+                current = _pending_runs.get(run_id, {})
+            current_status = str(current.get("status") or "").strip().lower()
+            should_stop = current_status in terminal_statuses
+            try:
+                for idx, step in enumerate(_list_run_steps(run_id)):
+                    key = _step_stream_key(step, idx)
+                    signature = _step_stream_signature(step)
+                    if seen_signatures.get(key) == signature:
+                        continue
+                    seen_signatures[key] = signature
+                    _push_event(run_id, "step", _format_step(step))
+            except Exception as _step_exc:
+                _log.debug("Step poll error for run %s: %s", run_id, _step_exc)
+            if should_stop:
+                break
+            time.sleep(interval_seconds)
+
+    poller = threading.Thread(target=_poll, daemon=True)
+    poller.start()
+    return poller
 
 
 def _collect_artifacts(run_id: str, output_dir: str) -> tuple[list[dict], list[dict]]:
@@ -1726,28 +2312,9 @@ def _collect_artifacts(run_id: str, output_dir: str) -> tuple[list[dict], list[d
 
 
 def _start_run_background(run_id: str, payload: dict) -> None:
-    def _poll_db_steps() -> None:
-        seen: set = set()
-        while True:
-            with _pending_lock:
-                current = _pending_runs.get(run_id, {})
-            done = current.get("status") in ("completed", "failed")
-            try:
-                for step in _list_run_steps(run_id):
-                    eid = step.get("execution_id")
-                    if eid and eid not in seen:
-                        seen.add(eid)
-                        _push_event(run_id, "step", _format_step(step))
-            except Exception as _step_exc:
-                _log.debug("Step poll error for run %s: %s", run_id, _step_exc)
-            if done:
-                break
-            time.sleep(0.6)
-
     def _run() -> None:
         _push_event(run_id, "status", {"status": "running", "message": "Agents mobilizing..."})
-        poll = threading.Thread(target=_poll_db_steps, daemon=True)
-        poll.start()
+        _launch_step_stream_poller(run_id)
         try:
             result = _gateway_ingest(payload)
             db_artifacts, file_list = _collect_artifacts(run_id, result.get("output_dir", ""))
@@ -1828,6 +2395,12 @@ def _start_run_background(run_id: str, payload: dict) -> None:
             _run_awaiting = _run_status == "awaiting_user_input"
             with _pending_lock:
                 _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status=_run_status, result=result)
+            _persist_channel_chat_turn(
+                payload,
+                user_text=str(payload.get("text") or ""),
+                assistant_text=_project_chat_result_text(result),
+                context_limit=payload.get("context_limit"),
+            )
             _persist_project_chat_result(payload, result=result, run_id=run_id)
             _push_event(run_id, "result", result)
             _push_event(run_id, "done", {"run_id": run_id, "status": _run_status, "awaiting_user_input": _run_awaiting})
@@ -1852,12 +2425,24 @@ def _start_run_background(run_id: str, payload: dict) -> None:
                 }
                 with _pending_lock:
                     _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="cancelled", result=cancel_result)
+                _persist_channel_chat_turn(
+                    payload,
+                    user_text=str(payload.get("text") or ""),
+                    assistant_text=_project_chat_result_text(cancel_result),
+                    context_limit=payload.get("context_limit"),
+                )
                 _persist_project_chat_result(payload, result=cancel_result, run_id=run_id)
                 _push_event(run_id, "result", cancel_result)
                 _push_event(run_id, "done", {"run_id": run_id, "status": "cancelled", "awaiting_user_input": False})
                 return
             with _pending_lock:
                 _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="failed", error=err_msg)
+            _persist_channel_chat_turn(
+                payload,
+                user_text=str(payload.get("text") or ""),
+                assistant_text="Error: " + str(err_msg),
+                context_limit=payload.get("context_limit"),
+            )
             _persist_project_chat_result(payload, error=err_msg, run_id=run_id)
             _push_event(run_id, "error", {"message": err_msg})
             _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
@@ -1865,6 +2450,12 @@ def _start_run_background(run_id: str, payload: dict) -> None:
             err = str(exc)
             with _pending_lock:
                 _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="failed", error=err)
+            _persist_channel_chat_turn(
+                payload,
+                user_text=str(payload.get("text") or ""),
+                assistant_text="Error: " + str(err),
+                context_limit=payload.get("context_limit"),
+            )
             _persist_project_chat_result(payload, error=err, run_id=run_id)
             _push_event(run_id, "error", {"message": err})
             _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
@@ -1872,6 +2463,12 @@ def _start_run_background(run_id: str, payload: dict) -> None:
             err = traceback.format_exc()
             with _pending_lock:
                 _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="failed", error=str(exc))
+            _persist_channel_chat_turn(
+                payload,
+                user_text=str(payload.get("text") or ""),
+                assistant_text="Error: " + str(exc),
+                context_limit=payload.get("context_limit"),
+            )
             _persist_project_chat_result(payload, error=str(exc), run_id=run_id)
             _push_event(run_id, "error", {"message": str(exc)})
             _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
@@ -1925,6 +2522,12 @@ def _start_standalone_run_background(run_id: str, payload: dict) -> None:
             result.setdefault("output_dir", result.get("project_root", ""))
             with _pending_lock:
                 _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="completed", result=result)
+            _persist_channel_chat_turn(
+                payload,
+                user_text=str(payload.get("text") or payload.get("description") or ""),
+                assistant_text=_project_chat_result_text(result),
+                context_limit=payload.get("context_limit"),
+            )
             _persist_project_chat_result(payload, result=result, run_id=run_id)
             _push_event(run_id, "result", result)
             _push_event(run_id, "done", {"run_id": run_id, "status": "completed"})
@@ -1932,6 +2535,12 @@ def _start_standalone_run_background(run_id: str, payload: dict) -> None:
             err = str(exc)
             with _pending_lock:
                 _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="failed", error=err)
+            _persist_channel_chat_turn(
+                payload,
+                user_text=str(payload.get("text") or payload.get("description") or ""),
+                assistant_text="Error: " + err,
+                context_limit=payload.get("context_limit"),
+            )
             _persist_project_chat_result(payload, error=err, run_id=run_id)
             _push_event(run_id, "error", {"message": err})
             _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
@@ -1977,6 +2586,11 @@ def _start_simple_chat_stream_background(run_id: str, payload: dict) -> None:
             if not isinstance(local_paths, list):
                 local_paths = []
             history = payload.get("history") if isinstance(payload.get("history"), list) else []
+            context = _sync_channel_chat_context(
+                payload,
+                supplied_history=history,
+                context_limit=payload.get("context_limit"),
+            )
 
             provider = provider_override or get_active_provider()
             model = model_override or get_model_for_provider(provider)
@@ -2011,9 +2625,12 @@ def _start_simple_chat_stream_background(run_id: str, payload: dict) -> None:
             )
             if attachment_notes:
                 system_ctx += "\n\nAttached local context:\n" + "\n\n".join(attachment_notes)
+            summary_block = _build_chat_context_block(context.get("summary_text", ""), context.get("history", []))
+            if summary_block:
+                system_ctx += "\n\nChat continuity context:\n" + summary_block
 
             messages = [SystemMessage(content=system_ctx)]
-            for item in history[-14:]:
+            for item in (context.get("history") or [])[-14:]:
                 if not isinstance(item, dict):
                     continue
                 role = str(item.get("role") or "").strip().lower()
@@ -2052,12 +2669,24 @@ def _start_simple_chat_stream_background(run_id: str, payload: dict) -> None:
             }
             with _pending_lock:
                 _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="completed", result=result)
+            _persist_channel_chat_turn(
+                payload,
+                user_text=text,
+                assistant_text=answer,
+                context_limit=payload.get("context_limit"),
+            )
             _push_event(run_id, "result", result)
             _push_event(run_id, "done", {"run_id": run_id, "status": "completed", "awaiting_user_input": False})
         except Exception as exc:
             err = str(exc)
             with _pending_lock:
                 _pending_runs[run_id] = _pending_run_state(run_id, payload=payload, status="failed", error=err)
+            _persist_channel_chat_turn(
+                payload,
+                user_text=str(payload.get("text") or payload.get("message") or ""),
+                assistant_text="Error: " + err,
+                context_limit=payload.get("context_limit"),
+            )
             _push_event(run_id, "error", {"message": err})
             _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
 
@@ -2237,6 +2866,7 @@ a:hover { text-decoration: underline; }
 .mode-pill { border:1px solid var(--border); background:var(--bg); color:var(--muted); border-radius:999px; padding:7px 12px; font-size:12px; font-weight:600; cursor:pointer; transition:all .15s; }
 .mode-pill:hover { border-color: var(--teal); color: var(--teal); }
 .mode-pill.active { background: rgba(0,201,167,0.12); border-color: rgba(0,201,167,0.45); color: var(--teal); }
+.mode-pill:disabled { cursor:not-allowed; opacity:.45; border-color: var(--border); color: var(--muted); background: rgba(255,255,255,0.03); }
 .deep-research-panel { display:none; margin-bottom:12px; padding:14px; border:1px solid rgba(0,201,167,0.18); border-radius:12px; background:linear-gradient(180deg, rgba(0,201,167,0.06), rgba(83,82,237,0.05)); }
 .deep-research-panel.visible { display:block; max-height:min(46vh, 560px); overflow-y:auto; }
 .deep-research-panel.collapsed { max-height:none; overflow:visible; }
@@ -2499,15 +3129,16 @@ a:hover { text-decoration: underline; }
       <div class="dr-body" id="deepResearchPanelBody">
       <div class="dr-grid">
         <div class="dr-field">
-          <label for="drPages">Page Target</label>
+          <label for="drPages">Approx. Length</label>
           <select id="drPages" class="dr-select" onchange="updateDeepResearchPanelSummary()">
-            <option value="10">10 pages</option>
-            <option value="25" selected>25 pages</option>
-            <option value="50">50 pages</option>
-            <option value="100">100 pages</option>
-            <option value="150">150 pages</option>
-            <option value="200">200 pages</option>
+            <option value="10">~10 pages</option>
+            <option value="25" selected>~25 pages</option>
+            <option value="50">~50 pages</option>
+            <option value="100">~100 pages</option>
+            <option value="150">~150 pages</option>
+            <option value="200">~200 pages</option>
           </select>
+          <div class="dr-note">This is a soft target. Final length can shift with citations, formatting, and source density.</div>
         </div>
         <div class="dr-field">
           <label for="drCitation">Citation Style</label>
@@ -2690,6 +3321,12 @@ let deepResearchPanelCollapsed = (localStorage.getItem('kendr_deep_research_coll
 let _chatActivityFeed = [];
 let _chatPlanState = { total: 0, completed: 0, running: 0, failed: 0 };
 let _chatRunState = { runId: '', status: 'idle', title: '', task: '', startedAt: '', completedAt: '', lastCommand: '', lastCommandMeta: '' };
+let _runStepJournal = {};
+let _runLiveUpdates = {};
+let _runTraceFeed = {};
+let _runWorkingTimers = {};
+let _runRecoveryAttempts = {};
+let _lastFailedRunContext = null;
 let _chatAwaitingContext = null;
 // Track the last completed deep research result for inline file-request handling
 let _lastDeepResearchCard = null;
@@ -2709,11 +3346,24 @@ function _setChatComposerState() {
   const button = document.getElementById('sendBtn');
   if (!input || !button) return;
   const locked = isRunning;
+  const modeButtons = [
+    'modeDirectToolsBtn',
+    'modePlanModeBtn',
+    'modeAutoBtn',
+    'modeDeepResearchBtn',
+    'modeSecurityBtn',
+  ];
   input.readOnly = locked;
   input.classList.toggle('locked', locked);
   button.disabled = isStopping;
   button.classList.toggle('stop-mode', locked && !isStopping);
   button.classList.toggle('cancelling', isStopping);
+  modeButtons.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.disabled = locked;
+    el.title = locked ? 'Mode changes are disabled while a run is active.' : '';
+  });
   if (locked) {
     button.innerHTML = '&#x25A0;';
     button.title = isStopping ? 'Stopping active run…' : 'Stop active run';
@@ -2815,6 +3465,105 @@ function _renderChatActivityList() {
   }).join('');
 }
 
+function _runTraceKey(item) {
+  return [
+    item.id || '',
+    item.title || '',
+    item.status || '',
+    item.command || '',
+    item.detail || '',
+    item.started_at || item.timestamp || '',
+    item.completed_at || '',
+  ].join('|');
+}
+
+function _recordRunTraceEvents(runId, items, defaults = {}) {
+  if (!runId) return;
+  const next = Array.isArray(items) ? items.map(item => _normalizeChatActivity(item, defaults)) : [];
+  if (!next.length) return;
+  const merged = next.concat(_runTraceFeed[runId] || []);
+  const deduped = [];
+  const seen = new Set();
+  for (const item of merged.sort((a, b) => _chatActivitySortValue(b) - _chatActivitySortValue(a))) {
+    const key = _runTraceKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+    if (deduped.length >= 40) break;
+  }
+  _runTraceFeed[runId] = deduped;
+}
+
+function _runTraceListHtml(items) {
+  const normalized = Array.isArray(items) ? items.slice(0, 10) : [];
+  if (!normalized.length) {
+    return '<div style="font-size:12px;color:var(--muted)">Research trace will appear here as searches, evidence fetches, drafting, and exports run.</div>';
+  }
+  return normalized.map(item => {
+    const status = String(item.status || 'info').toLowerCase();
+    const title = String(item.title || item.kind || 'Activity').trim() || 'Activity';
+    const detail = String(item.detail || '').trim();
+    const command = String(item.command || '').trim();
+    const metadata = (item && typeof item.metadata === 'object' && item.metadata) ? item.metadata : {};
+    const phase = String(metadata.phase || '').trim();
+    const searchQuery = String(metadata.search_query || '').trim();
+    const searchProvider = String(metadata.search_provider || '').trim();
+    const providersTried = Array.isArray(metadata.search_providers_tried) ? metadata.search_providers_tried.filter(Boolean) : [];
+    const candidateUrls = Array.isArray(metadata.candidate_urls) ? metadata.candidate_urls.filter(Boolean) : [];
+    const viewedUrls = Array.isArray(metadata.viewed_urls) ? metadata.viewed_urls.filter(Boolean) : [];
+    const failedUrls = Array.isArray(metadata.failed_urls) ? metadata.failed_urls.filter(Boolean) : [];
+    const displayCommand = command || searchQuery;
+    const meta = _chatActivityMetaParts(item).map(esc).join(' &middot; ');
+    const color = status === 'failed' ? 'var(--crimson)' : status === 'completed' ? 'var(--teal)' : status === 'running' ? 'var(--amber)' : '#9aa4b2';
+    const badge = status === 'failed' ? 'failed' : status === 'completed' ? 'done' : status === 'running' ? 'live' : 'info';
+    const phaseHtml = phase ? '<span style="padding:2px 7px;border-radius:999px;background:rgba(255,255,255,0.06);font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">' + esc(String(phase).replace(/_/g, ' ')) + '</span>' : '';
+    const statusHtml = '<span style="padding:2px 7px;border-radius:999px;background:' + (badge === 'failed' ? 'rgba(255,71,87,0.12)' : badge === 'done' ? 'rgba(0,201,167,0.12)' : badge === 'live' ? 'rgba(255,179,71,0.12)' : 'rgba(255,255,255,0.06)') + ';font-size:10px;color:' + color + ';text-transform:uppercase;letter-spacing:.06em">' + esc(status) + '</span>';
+    const providerHtml = searchProvider
+      ? '<div style="margin-top:6px;font-size:11px;color:var(--muted)">Search provider: <span style="color:var(--text)">' + esc(searchProvider) + '</span>' + (providersTried.length ? ' &middot; tried: ' + esc(providersTried.join(', ')) : '') + '</div>'
+      : '';
+    const commandHtml = displayCommand
+      ? '<div style="margin-top:7px;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:rgba(0,0,0,0.16);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#d7e3ff;white-space:pre-wrap;word-break:break-word">' + esc(displayCommand) + '</div>'
+      : '';
+    const detailHtml = detail && detail !== displayCommand
+      ? '<div style="margin-top:6px;font-size:11px;color:var(--muted);line-height:1.5;white-space:pre-wrap;word-break:break-word">' + esc(detail) + '</div>'
+      : '';
+    const listBlock = (label, urls, tone) => {
+      if (!urls.length) return '';
+      const itemColor = tone === 'bad' ? 'var(--crimson)' : tone === 'good' ? '#9ad7ff' : 'var(--text)';
+      return '<div style="margin-top:8px">'
+        + '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">' + esc(label) + '</div>'
+        + urls.slice(0, 6).map(url => '<div style="font-size:11px;color:' + itemColor + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(url) + '</div>').join('')
+        + '</div>';
+    };
+    return '<div style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.05)">'
+      + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">'
+      + '<div>'
+      + '<div style="font-size:12px;font-weight:700;color:var(--text)">' + esc(title) + '</div>'
+      + (meta ? '<div style="margin-top:3px;font-size:10px;color:var(--muted)">' + meta + '</div>' : '')
+      + '</div>'
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">' + phaseHtml + statusHtml + '</div>'
+      + '</div>'
+      + providerHtml
+      + detailHtml
+      + commandHtml
+      + listBlock('Search results', candidateUrls, 'good')
+      + listBlock('Viewed links', viewedUrls, 'good')
+      + listBlock('Failed links', failedUrls, 'bad')
+      + '</div>';
+  }).join('');
+}
+
+function _upsertRunTracePanel(runId, title = '') {
+  if (!runId) return;
+  const panel = document.getElementById('stream-trace-' + runId);
+  if (!panel) return;
+  const items = Array.isArray(_runTraceFeed[runId]) ? _runTraceFeed[runId] : [];
+  const runningCount = items.filter(item => String(item.status || '').toLowerCase() === 'running').length;
+  const heading = title || (runningCount > 1 ? 'Live Research Trace · overlapping tasks' : 'Live Research Trace');
+  panel.innerHTML = '<div style="font-size:11px;font-weight:700;color:var(--amber);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px">' + esc(heading) + '</div>'
+    + _runTraceListHtml(items);
+}
+
 function _recordChatActivities(items, defaults = {}) {
   const next = Array.isArray(items) ? items.map(item => _normalizeChatActivity(item, defaults)) : [];
   if (!next.length) return;
@@ -2846,6 +3595,8 @@ function _resetChatInspectorState() {
   _chatActivityFeed = [];
   _chatPlanState = { total: 0, completed: 0, running: 0, failed: 0 };
   _chatRunState = { runId: '', workflowId: '', attemptId: '', status: 'idle', title: '', task: '', startedAt: '', completedAt: '', lastCommand: '', lastCommandMeta: '' };
+  _runTraceFeed = {};
+  _runRecoveryAttempts = {};
   _renderChatActivityList();
   _renderChatInspector();
   isStopping = false;
@@ -2945,6 +3696,7 @@ function _renderChatInspector() {
 }
 
 function setResearchMode(mode) {
+  if (isRunning) return;
   researchMode = mode || 'auto';
   const autoBtn = document.getElementById('modeAutoBtn');
   const drBtn = document.getElementById('modeDeepResearchBtn');
@@ -2966,6 +3718,7 @@ function setResearchMode(mode) {
 }
 
 function setExecutionMode(mode) {
+  if (isRunning) return;
   const normalized = String(mode || 'direct_tools').toLowerCase();
   executionMode = normalized === 'plan' ? 'plan' : (normalized === 'adaptive' ? 'adaptive' : 'direct_tools');
   localStorage.setItem('kendr_execution_mode', executionMode);
@@ -2992,7 +3745,7 @@ function updateDeepResearchPanelSummary() {
   if (body) body.style.display = deepResearchPanelCollapsed ? 'none' : '';
   if (toggleBtn) toggleBtn.textContent = deepResearchPanelCollapsed ? 'Expand' : 'Collapse';
   if (!summary) return;
-  const pages = ((document.getElementById('drPages') || {}).value || '50') + ' pages';
+  const pages = '~' + (((document.getElementById('drPages') || {}).value || '50')) + ' pages';
   const citation = ((document.getElementById('drCitation') || {}).value || 'apa').toUpperCase();
   const maxSources = parseInt((document.getElementById('drMaxSources') || {}).value || '0', 10) || 0;
   const formatCount = _selectedDeepResearchFormats().length;
@@ -3147,6 +3900,7 @@ function toggleShellMode() {
 }
 
 function setSecurityMode(on) {
+  if (isRunning) return;
   securityMode = !!on;
   const btn = document.getElementById('modeSecurityBtn');
   const panel = document.getElementById('securityPanel');
@@ -3678,6 +4432,16 @@ function _chatResumePathFromRun(run) {
   ).trim();
 }
 
+function _isRunActiveStatus(status) {
+  const normalized = String(status || '').toLowerCase();
+  return normalized === 'running' || normalized === 'started' || normalized === 'cancelling';
+}
+
+function _isRetryCommand(text) {
+  const normalized = String(text || '').trim().toLowerCase();
+  return normalized === 'retry' || normalized === 'resume' || normalized === 'continue';
+}
+
 function _isControlReplyText(text) {
   const value = String(text || '').trim().toLowerCase();
   if (!value) return true;
@@ -3821,7 +4585,29 @@ async function loadRun(runId, sessionIdOverride) {
       msgs.appendChild(logCard);
     }
 
-    if (status === 'awaiting_user_input') {
+    if (_isRunActiveStatus(status)) {
+      currentRunId = runId;
+      currentWorkflowId = d.workflow_id || runId;
+      _syncChatSessionId(sessionIdOverride || _chatSessionIdFromRun(d));
+      _chatRunState = {
+        runId,
+        workflowId: d.workflow_id || runId,
+        attemptId: d.attempt_id || runId,
+        status,
+        title: query ? (query.substring(0, 80) + (query.length > 80 ? '…' : '')) : 'Active run',
+        task: query || _chatRunState.task || '',
+        startedAt: d.created_at || d.started_at || new Date().toISOString(),
+        completedAt: '',
+        lastCommand: _chatRunState.lastCommand || '',
+        lastCommandMeta: _chatRunState.lastCommandMeta || '',
+      };
+      createStreamingRow(runId, query || 'Running…');
+      updateStreamStatus(runId, status === 'cancelling' ? 'Stopping run…' : 'Reconnecting to active run…');
+      isRunning = true;
+      isStopping = status === 'cancelling';
+      _setChatComposerState();
+      openEventStream(runId);
+    } else if (status === 'awaiting_user_input') {
       const runWorkDir = _chatResumePathFromRun(d);
       _setChatAwaitingContext({
         runId,
@@ -3834,25 +4620,6 @@ async function loadRun(runId, sessionIdOverride) {
         scope: ((d.task_session || {}).approval_pending_scope || ''),
       });
     }
-
-    try {
-      const ar = await fetch(API + '/api/runs/' + runId + '/artifacts');
-      const artifacts = await ar.json();
-      if (Array.isArray(artifacts) && artifacts.length > 0) {
-        const artCard = document.createElement('div');
-        artCard.style.cssText = 'margin:8px 0 0 52px;padding:10px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;';
-        artCard.innerHTML = '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">&#x1F4C1; Artifacts</div>' +
-          artifacts.map(a => {
-            const name = esc(a.name || a.artifact_id || 'file');
-            const kind = esc(a.kind || '');
-            const isFile = a.kind !== 'error' && a.kind !== 'text';
-            return `<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12px">` +
-              (isFile ? `<a href="/api/artifacts/download?run_id=${encodeURIComponent(runId)}&name=${encodeURIComponent(a.name||'')}" download="${name}" style="color:var(--teal);text-decoration:underline">&#x1F4C4; ${name}</a>` : `<span style="color:var(--muted)">&#x1F4CB; ${name}</span>`) +
-              (kind ? `<span style="color:var(--muted);font-size:10px">[${kind}]</span>` : '') + `</div>`;
-          }).join('');
-        msgs.appendChild(artCard);
-      }
-    } catch(_) {}
 
     scrollDown();
     await _hydrateChatInspectorRunData(runId);
@@ -4095,6 +4862,9 @@ function formatOutput(text) {
 function createStreamingRow(runId, taskText = '') {
   const w = document.getElementById('welcome');
   if (w) w.remove();
+  _runStepJournal[runId] = {};
+  _runLiveUpdates[runId] = [];
+  _runTraceFeed[runId] = [];
   const msgs = document.getElementById('messages');
   const row = document.createElement('div');
   row.className = 'message-row kendr';
@@ -4109,9 +4879,17 @@ function createStreamingRow(runId, taskText = '') {
     + '<span class="spinner" style="width:14px;height:14px;flex-shrink:0"></span>'
     + '<div class="streaming-status" id="stream-status-' + runId + '" style="font-size:12px;color:var(--teal);font-weight:600">Starting agents\u2026</div>'
     + '</div>'
+    + '<div id="run-worklog-' + runId + '" style="margin:8px 0 10px;padding:8px 0;border-top:1px solid rgba(255,255,255,0.08)">'
+    + '<div id="run-working-' + runId + '" style="font-size:12px;color:var(--muted);margin-bottom:8px">Working for 0s</div>'
+    + '<div id="run-work-items-' + runId + '" style="display:flex;flex-direction:column"></div>'
+    + '</div>'
+    + '<div id="stream-trace-' + runId + '" style="margin:10px 0 12px;padding:12px 14px;background:rgba(255,179,71,0.05);border:1px solid rgba(255,179,71,0.2);border-radius:10px"></div>'
     + '<div class="steps-wrapper" id="stream-steps-' + runId + '" style="display:flex;flex-direction:column;gap:6px"></div>'
     + '<div id="stream-result-' + runId + '"></div></div>';
   msgs.appendChild(row);
+  _startRunWorkingTimer(runId);
+  _pushRunLiveUpdate(runId, 'Run started', taskText || 'Preparing execution context.');
+  _upsertRunTracePanel(runId);
   scrollDown();
   return row;
 }
@@ -4165,9 +4943,155 @@ function _formatStepDuration(step) {
   return hours + 'h ' + (minutes % 60) + 'm';
 }
 
+function _formatElapsedMs(ms) {
+  const safe = Math.max(0, Number(ms) || 0);
+  const totalSec = Math.floor(safe / 1000);
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  if (!mins) return secs + 's';
+  if (mins < 60) return mins + 'm ' + secs + 's';
+  const hrs = Math.floor(mins / 60);
+  return hrs + 'h ' + (mins % 60) + 'm';
+}
+
+function _renderRunLiveUpdates(runId) {
+  const container = document.getElementById('run-work-items-' + runId);
+  if (!container) return;
+  const entries = (_runLiveUpdates[runId] || []).slice(0, 6);
+  if (!entries.length) {
+    container.innerHTML = '<div style="font-size:12px;color:var(--muted)">Preparing execution…</div>';
+    return;
+  }
+  container.innerHTML = entries.map(item => {
+    const detail = item.detail
+      ? '<div style="margin-top:2px;font-size:12px;color:var(--muted);line-height:1.45">' + esc(item.detail) + '</div>'
+      : '';
+    return '<div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.05)">'
+      + '<div style="font-size:13px;color:var(--text);line-height:1.45">' + esc(item.text) + '</div>'
+      + detail
+      + '</div>';
+  }).join('');
+}
+
+function _pushRunLiveUpdate(runId, text, detail = '') {
+  if (!runId) return;
+  const summary = String(text || '').trim();
+  const extra = String(detail || '').trim();
+  if (!summary) return;
+  if (!_runLiveUpdates[runId]) _runLiveUpdates[runId] = [];
+  const feed = _runLiveUpdates[runId];
+  const previous = feed[0];
+  if (previous && previous.text === summary && previous.detail === extra) return;
+  feed.unshift({ text: summary, detail: extra, ts: Date.now() });
+  if (feed.length > 14) feed.length = 14;
+  _renderRunLiveUpdates(runId);
+}
+
+function _startRunWorkingTimer(runId) {
+  _stopRunWorkingTimer(runId);
+  const startedAt = Date.now();
+  const tick = () => {
+    const el = document.getElementById('run-working-' + runId);
+    if (!el) return;
+    el.textContent = 'Working for ' + _formatElapsedMs(Date.now() - startedAt);
+  };
+  tick();
+  _runWorkingTimers[runId] = setInterval(tick, 1000);
+}
+
+function _stopRunWorkingTimer(runId, completed = false) {
+  const timer = _runWorkingTimers[runId];
+  if (timer) {
+    clearInterval(timer);
+    delete _runWorkingTimers[runId];
+  }
+  const el = document.getElementById('run-working-' + runId);
+  if (el && completed) {
+    const current = String(el.textContent || '').replace(/^Working/, 'Worked');
+    el.textContent = current || 'Completed';
+  }
+}
+
+function _stepJournalKey(step) {
+  if (!step || typeof step !== 'object') return 'unknown-step';
+  const raw = step.execution_id
+    || [step.agent || step.name || 'agent', step.started_at || step.timestamp || '', step.reason || ''].join(':');
+  return String(raw || 'unknown-step').replace(/[^a-zA-Z0-9:_-]/g, '_').slice(0, 140);
+}
+
+function _recordRunStep(runId, step) {
+  if (!runId || !step || typeof step !== 'object') return;
+  if (!_runStepJournal[runId]) _runStepJournal[runId] = {};
+  const key = _stepJournalKey(step);
+  const existing = _runStepJournal[runId][key] || {};
+  _runStepJournal[runId][key] = {
+    key,
+    agent: step.agent || step.name || existing.agent || 'agent',
+    status: step.status || existing.status || 'running',
+    reason: step.reason || existing.reason || '',
+    message: step.message || existing.message || '',
+    started_at: step.started_at || existing.started_at || '',
+    completed_at: step.completed_at || existing.completed_at || '',
+    duration_label: step.duration_label || existing.duration_label || '',
+    duration_ms: step.duration_ms || existing.duration_ms || 0,
+  };
+}
+
+function _runStepSummary(runId) {
+  const entries = Object.values(_runStepJournal[runId] || {});
+  if (!entries.length) return { total: 0, completed: 0, running: 0, failed: 0, entries: [] };
+  const completed = entries.filter(s => ['done', 'completed', 'success'].includes(String(s.status || '').toLowerCase())).length;
+  const failed = entries.filter(s => ['failed', 'error'].includes(String(s.status || '').toLowerCase())).length;
+  const running = entries.filter(s => ['running', 'started'].includes(String(s.status || '').toLowerCase())).length;
+  const ordered = entries.slice().sort((a, b) => {
+    const ta = Date.parse(a.started_at || '') || 0;
+    const tb = Date.parse(b.started_at || '') || 0;
+    return ta - tb;
+  });
+  return { total: entries.length, completed, running, failed, entries: ordered };
+}
+
+function _renderRunExecutionSummary(runId) {
+  const summary = _runStepSummary(runId);
+  if (!summary.total) return '';
+  const headline = `${summary.completed}/${summary.total} tasks completed`
+    + (summary.running ? ` · ${summary.running} running` : '')
+    + (summary.failed ? ` · ${summary.failed} failed` : '');
+  const top = summary.entries.slice(-8).map(step => {
+    const agent = _agentDisplayName(step.agent || 'agent');
+    const reason = String(step.reason || step.message || '').trim();
+    const reasonShort = reason ? (reason.length > 160 ? reason.slice(0, 160) + '…' : reason) : 'Progress update received.';
+    const status = String(step.status || 'running').toLowerCase();
+    const icon = ['done', 'completed', 'success'].includes(status) ? '&#x2713;' : (['failed', 'error'].includes(status) ? '&#x2717;' : '&#x2022;');
+    const tone = ['done', 'completed', 'success'].includes(status) ? 'var(--teal)' : (['failed', 'error'].includes(status) ? 'var(--crimson)' : 'var(--amber)');
+    return '<div style="display:flex;align-items:flex-start;gap:8px;padding:4px 0;font-size:12px">'
+      + '<span style="color:' + tone + ';font-weight:700;line-height:1.2">' + icon + '</span>'
+      + '<div><span style="font-weight:600;color:var(--text)">' + esc(agent) + ':</span> <span style="color:var(--muted)">' + esc(reasonShort) + '</span></div>'
+      + '</div>';
+  }).join('');
+  return '<div style="margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px">'
+    + '<div style="font-size:11px;font-weight:700;color:var(--teal);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">&#x1F4CB; Execution Summary</div>'
+    + '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">' + esc(headline) + '</div>'
+    + top
+    + '</div>';
+}
+
 function addStreamStep(runId, step) {
   const container = document.getElementById('stream-steps-' + runId);
   if (!container) return;
+  _recordRunStep(runId, step);
+  const runState = _runStepSummary(runId);
+  const agentLabel = _agentDisplayName(step.agent || step.name || 'agent');
+  const reasonText = String(step.reason || step.message || '').trim();
+  const statusNorm = String(step.status || 'running').toLowerCase();
+  if (['completed', 'done', 'success'].includes(statusNorm)) {
+    _pushRunLiveUpdate(runId, agentLabel + ' completed a task', reasonText || 'Step finished successfully.');
+  } else if (['failed', 'error'].includes(statusNorm)) {
+    _pushRunLiveUpdate(runId, agentLabel + ' reported a failure', reasonText || 'Step failed. Review details below.');
+  } else {
+    const progressText = runState.total ? (runState.completed + '/' + runState.total + ' tasks completed') : 'Task in progress';
+    _pushRunLiveUpdate(runId, agentLabel + ' is working', reasonText || progressText);
+  }
   const rawStatus = step.status || 'running';
   const agentName = step.agent || step.name || 'agent';
   const isMcp = agentName.startsWith('mcp_') && agentName.endsWith('_agent');
@@ -4175,7 +5099,10 @@ function addStreamStep(runId, step) {
   const isDone = rawStatus === 'done' || rawStatus === 'completed' || rawStatus === 'success';
   const isFailed = rawStatus === 'failed' || rawStatus === 'error';
   const cssClass = isRunning ? 'running' : isDone ? 'done' : isFailed ? 'failed' : rawStatus;
-  const existingId = 'step-' + runId + '-' + (step.execution_id || agentName);
+  const idSeed = step.execution_id
+    || [agentName, step.started_at || step.timestamp || '', step.reason || '', step.message || ''].join(':');
+  const safeSeed = String(idSeed || agentName).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
+  const existingId = 'step-' + runId + '-' + safeSeed;
   const existing = document.getElementById(existingId);
   let div = existing || document.createElement('div');
   if (!existing) {
@@ -4476,7 +5403,14 @@ function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpI
   const resolvedStatus = error ? 'failed' : (finalStatus || _chatRunState.status || (isAwaitingInput ? 'awaiting_user_input' : 'completed'));
   _chatRunState.status = resolvedStatus;
   _chatRunState.completedAt = ['completed', 'failed', 'cancelled'].includes(resolvedStatus) ? new Date().toISOString() : '';
+  _stopRunWorkingTimer(runId, resolvedStatus !== 'awaiting_user_input' && resolvedStatus !== 'cancelling');
   if (error) {
+    _lastFailedRunContext = {
+      runId,
+      workflowId: currentWorkflowId || _chatRunState.workflowId || runId,
+      task: _chatRunState.task || _chatRunState.title || '',
+    };
+    _pushRunLiveUpdate(runId, resolvedStatus === 'cancelled' ? 'Run stopped by user' : 'Run failed', error);
     _recordChatActivity({
       title: resolvedStatus === 'cancelled' ? 'Run stopped' : 'Run failed',
       status: resolvedStatus === 'cancelled' ? 'cancelled' : 'failed',
@@ -4485,6 +5419,7 @@ function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpI
       task: _chatRunState.task || _chatRunState.title,
     });
   } else {
+    _lastFailedRunContext = null;
     const activityStatus = resolvedStatus === 'awaiting_user_input'
       ? 'pending'
       : resolvedStatus === 'cancelled'
@@ -4506,11 +5441,19 @@ function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpI
       completed_at: _chatRunState.completedAt,
       task: _chatRunState.task || _chatRunState.title,
     });
+    _pushRunLiveUpdate(
+      runId,
+      resolvedStatus === 'awaiting_user_input' ? 'Waiting for your input' : resolvedStatus === 'cancelled' ? 'Run stopped' : 'Run completed',
+      activityDetail,
+    );
   }
   _renderChatInspector();
   if (resultEl) {
     if (error) {
       resultEl.innerHTML = '<div class="error-banner" style="margin-top:8px">\u26A0\uFE0F ' + esc(error) + '</div>';
+      if (_lastFailedRunContext && _lastFailedRunContext.runId === runId) {
+        resultEl.innerHTML += '<div style="margin-top:10px"><button onclick="sendQuickReply(\'retry\')" style="padding:8px 12px;border:none;border-radius:8px;background:#fbbf24;color:#1f1400;font-weight:700;cursor:pointer">Retry From Checkpoint</button></div>';
+      }
     } else if (output) {
       resultEl.innerHTML = '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">' + formatOutput(output) + '</div>';
     }
@@ -4529,22 +5472,13 @@ function finalizeStreamRow(runId, output, error, artifactFiles, testReport, mcpI
     if (docExports && docExports.length > 0) {
       resultEl.innerHTML += renderDocumentDownloadCard(runId, docExports);
     }
+    const executionSummary = _renderRunExecutionSummary(runId);
+    if (executionSummary) {
+      resultEl.innerHTML += executionSummary;
+    }
     // Remember last completed run for inline file-request handling
     if (deepResearchCard && deepResearchCard.kind === 'result') { _lastDeepResearchCard = deepResearchCard; _lastCompletedRunId = runId; }
     if (docExports && docExports.length) { _lastDocExports = docExports; _lastCompletedRunId = runId; }
-    const nonDocFiles = (artifactFiles || []).filter(f => {
-      if (!docExports || !docExports.length) return true;
-      return !docExports.some(ex => ex.name === f.name);
-    });
-    if (nonDocFiles.length > 0) {
-      let artHtml = '<div style="margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px"><div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">\ud83d\udcc1 Artifact Files</div>';
-      artHtml += nonDocFiles.map(f => '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">' +
-        '<span style="color:var(--teal)">\ud83d\udcc4</span>' +
-        '<a href="/api/artifacts/download?run_id=' + encodeURIComponent(runId) + '&name=' + encodeURIComponent(f.name) + '" download="' + esc(f.name) + '" style="color:var(--teal);text-decoration:underline">' + esc(f.name) + '</a>' +
-        (f.size ? '<span style="color:var(--muted)">(' + (f.size > 1024 ? Math.round(f.size/1024) + ' KB' : f.size + ' B') + ')</span>' : '') + '</div>').join('');
-      artHtml += '</div>';
-      resultEl.innerHTML += artHtml;
-    }
   }
   const meta = document.createElement('div');
   meta.className = 'bubble-meta';
@@ -4714,24 +5648,32 @@ function startActivityPolling(runId) {
       const events = Array.isArray(summary.execution_trace) ? summary.execution_trace : [];
       if (!events.length) return;
       if (summary.active_task || summary.objective) _chatRunState.task = summary.active_task || summary.objective || _chatRunState.task;
+      _recordRunTraceEvents(runId, events, { run_id: runId, task: summary.active_task || summary.objective || '' });
       _recordChatActivities(events, { run_id: runId, task: summary.active_task || summary.objective || '' });
-      const wrapper = document.getElementById('stream-steps-' + runId);
-      if (!wrapper) return;
-      const panelId = 'activity-panel-' + runId;
-      let panel = document.getElementById(panelId);
-      if (!panel) {
-        panel = document.createElement('div');
-        panel.id = panelId;
-        panel.style.cssText = 'background:rgba(255,179,71,0.05);border:1px solid rgba(255,179,71,0.2);border-radius:10px;padding:12px 14px;margin:10px 0 6px;';
-        wrapper.appendChild(panel);
-      }
-      panel.innerHTML = _renderTraceActivity(runId, session);
+      _upsertRunTracePanel(runId, summary.active_task || summary.objective || '');
     } catch(_) {}
   }, 2000);
 }
 
 function stopActivityPolling() {
   if (_activityPollInterval) { clearInterval(_activityPollInterval); _activityPollInterval = null; }
+}
+
+function _markRunDisconnected(runId, reason = '') {
+  const activeRunId = String(runId || currentRunId || '').trim();
+  if (!activeRunId) return;
+  sessionStorage.removeItem('kendr_active_run_id');
+  const message = reason || 'Connection to the server was lost. Retry to resume from the last checkpoint.';
+  _lastFailedRunContext = {
+    runId: activeRunId,
+    workflowId: currentWorkflowId || activeRunId,
+    task: _chatRunState.task || _chatRunState.title || '',
+  };
+  _chatRunState.status = 'failed';
+  finalizeStreamRow(activeRunId, '', message, [], null, null, null, null, 'failed');
+  isRunning = false;
+  isStopping = false;
+  _setChatComposerState();
 }
 
 function openEventStream(runId) {
@@ -4751,6 +5693,7 @@ function openEventStream(runId) {
         _chatRunState.status = 'cancelling';
       }
       if (d.message || d.status) {
+        _pushRunLiveUpdate(runId, 'Runtime update', d.message || d.status || '');
         _recordChatActivity({
           title: 'Runtime status updated',
           status: normalizedStatus === 'cancelling' ? 'pending' : 'running',
@@ -4764,10 +5707,30 @@ function openEventStream(runId) {
     } catch(_) {}
   });
 
+  evtSrc.addEventListener('activity', e => {
+    try {
+      const item = JSON.parse(e.data);
+      const title = String(item.title || item.kind || 'Activity').trim();
+      const detail = String(item.detail || '').trim();
+      const command = String(item.command || '').trim();
+      _pushRunLiveUpdate(runId, title, detail || command || '');
+      _recordRunTraceEvents(runId, [item], { run_id: runId, task: _chatRunState.task || _chatRunState.title });
+      _upsertRunTracePanel(runId);
+      _recordChatActivity(Object.assign({}, item, { run_id: runId, task: _chatRunState.task || _chatRunState.title }));
+    } catch(_) {}
+  });
+
   evtSrc.addEventListener('step', e => {
     try {
       const step = JSON.parse(e.data);
       addStreamStep(runId, step);
+      const summary = _runStepSummary(runId);
+      if (summary.total > 0) {
+        const progress = summary.completed + '/' + summary.total + ' tasks done'
+          + (summary.running > 0 ? ' · ' + summary.running + ' running' : '')
+          + (summary.failed > 0 ? ' · ' + summary.failed + ' failed' : '');
+        updateStreamStatus(runId, progress);
+      }
       _recordChatActivity({
         title: (step.agent || step.name || 'agent') + ' step',
         status: step.status || 'running',
@@ -4835,6 +5798,7 @@ function openEventStream(runId) {
     }
     stopPlanPolling();
     stopActivityPolling();
+    _stopRunWorkingTimer(runId, true);
     evtSrc.close();
     activeEvtSource = null;
     isRunning = false;
@@ -4859,8 +5823,10 @@ function openEventStream(runId) {
         sessionStorage.removeItem('kendr_active_run_id');
       }
     } catch(_) { sessionStorage.removeItem('kendr_active_run_id'); }
+    delete _runRecoveryAttempts[runId];
     stopPlanPolling();
     stopActivityPolling();
+    _stopRunWorkingTimer(runId, true);
     evtSrc.close();
     activeEvtSource = null;
     isRunning = false;
@@ -4871,15 +5837,14 @@ function openEventStream(runId) {
 
   evtSrc.addEventListener('ping', () => {});
 
-  evtSrc.onerror = () => {
-    sessionStorage.removeItem('kendr_active_run_id');
-    if (evtSrc.readyState === EventSource.CLOSED) {
-      stopPlanPolling();
-      stopActivityPolling();
-      isRunning = false;
-      isStopping = false;
-      _setChatComposerState();
-    }
+  evtSrc.onerror = async () => {
+    stopPlanPolling();
+    stopActivityPolling();
+    _stopRunWorkingTimer(runId, true);
+    try { evtSrc.close(); } catch (_) {}
+    activeEvtSource = null;
+    _markRunDisconnected(runId, 'Connection lost. Server or gateway restarted. Type retry to resume from the last checkpoint.');
+    loadRuns();
   };
 }
 
@@ -5053,6 +6018,7 @@ async function sendMessage() {
   const rawText = input.value.trim();
   const text = _buildTextWithAttachments(rawText, _mainChatAttachments);
   if (!text || isRunning) return;
+  const retryRequested = _isRetryCommand(rawText) && !!_lastFailedRunContext;
 
   input.value = '';
   autoResize(input);
@@ -5139,6 +6105,21 @@ async function sendMessage() {
       attempt_id: runId,
       working_directory: workingDir
     };
+    if (retryRequested && _lastFailedRunContext) {
+      const failedResp = await fetch(API + '/api/runs/' + encodeURIComponent(_lastFailedRunContext.runId));
+      const failedRun = await failedResp.json();
+      const retryResumeDir = _chatResumePathFromRun(failedRun);
+      if (!failedResp.ok || !failedRun || !failedRun.run_id || !retryResumeDir) {
+        throw new Error('Missing checkpoint for retry');
+      }
+      endpoint = API + '/api/chat/resume';
+      payload.run_id = _lastFailedRunContext.runId;
+      payload.workflow_id = _lastFailedRunContext.workflowId || failedRun.workflow_id || workflowId;
+      payload.resume_dir = retryResumeDir;
+      payload.output_folder = retryResumeDir;
+      payload.resume_output_dir = retryResumeDir;
+      payload.force = true;
+    }
     payload.execution_mode = executionMode;
     if (executionMode === 'plan') {
       payload.planner_mode = 'always';
@@ -5213,7 +6194,51 @@ async function sendMessage() {
     }
 
     if (d.streaming) {
-      openEventStream(runId);
+      const streamRunId = d.run_id || runId;
+      currentRunId = streamRunId;
+      currentWorkflowId = d.workflow_id || currentWorkflowId || workflowId;
+      _chatRunState.runId = streamRunId;
+      _chatRunState.workflowId = currentWorkflowId;
+      _chatRunState.attemptId = d.attempt_id || _chatRunState.attemptId || streamRunId;
+      sessionStorage.setItem('kendr_active_run_id', streamRunId);
+      if (streamRunId !== runId) {
+        if (_runStepJournal[runId]) {
+          _runStepJournal[streamRunId] = _runStepJournal[runId];
+          delete _runStepJournal[runId];
+        }
+        if (_runLiveUpdates[runId]) {
+          _runLiveUpdates[streamRunId] = _runLiveUpdates[runId];
+          delete _runLiveUpdates[runId];
+        }
+        if (_runTraceFeed[runId]) {
+          _runTraceFeed[streamRunId] = _runTraceFeed[runId];
+          delete _runTraceFeed[runId];
+        }
+        if (_runWorkingTimers[runId]) {
+          _runWorkingTimers[streamRunId] = _runWorkingTimers[runId];
+          delete _runWorkingTimers[runId];
+        }
+        const row = document.getElementById('stream-row-' + runId);
+        if (row) row.id = 'stream-row-' + streamRunId;
+        const bubble = document.getElementById('stream-bubble-' + runId);
+        if (bubble) bubble.id = 'stream-bubble-' + streamRunId;
+        const statusEl = document.getElementById('stream-status-' + runId);
+        if (statusEl) statusEl.id = 'stream-status-' + streamRunId;
+        const worklog = document.getElementById('run-worklog-' + runId);
+        if (worklog) worklog.id = 'run-worklog-' + streamRunId;
+        const working = document.getElementById('run-working-' + runId);
+        if (working) working.id = 'run-working-' + streamRunId;
+        const workItems = document.getElementById('run-work-items-' + runId);
+        if (workItems) workItems.id = 'run-work-items-' + streamRunId;
+        const trace = document.getElementById('stream-trace-' + runId);
+        if (trace) trace.id = 'stream-trace-' + streamRunId;
+        const steps = document.getElementById('stream-steps-' + runId);
+        if (steps) steps.id = 'stream-steps-' + streamRunId;
+        const result = document.getElementById('stream-result-' + runId);
+        if (result) result.id = 'stream-result-' + streamRunId;
+      }
+      if (retryRequested) _lastFailedRunContext = null;
+      openEventStream(streamRunId);
     } else {
       const output = d.final_output || d.output || d.draft_response || '(Run completed)';
       finalizeStreamRow(runId, output, '', d.artifact_files || [], d.test_report || null, d.mcp_invocations || null, d.long_document_exports || null, d.deep_research_result_card || null);
@@ -5257,7 +6282,7 @@ setInterval(loadProjContext, 60000);
     const run = await r.json();
     if (!run || !run.run_id) { sessionStorage.removeItem('kendr_active_run_id'); return; }
     const status = (run.status || '').toLowerCase();
-    if (status === 'running' || status === 'started') {
+    if (_isRunActiveStatus(status)) {
       currentRunId = run.run_id;
       _syncChatSessionId(_chatSessionIdFromRun(run));
       currentWorkflowId = run.workflow_id || run.run_id;
@@ -5281,9 +6306,9 @@ setInterval(loadProjContext, 60000);
       _renderChatActivityList();
       _renderChatInspector();
       createStreamingRow(run.run_id, query);
-      updateStreamStatus(run.run_id, 'Reconnecting to active run\u2026');
+      updateStreamStatus(run.run_id, status === 'cancelling' ? 'Stopping run…' : 'Reconnecting to active run\u2026');
       isRunning = true;
-      isStopping = false;
+      isStopping = status === 'cancelling';
       _setChatComposerState();
       openEventStream(run.run_id);
     } else if (status === 'awaiting_user_input' || status === 'completed' || status === 'failed' || status === 'cancelled') {
@@ -11587,6 +12612,29 @@ strong { color: var(--text); }
         if path == "/api/health":
             self._json(200, {"service": "kendr-ui", "status": "ok"})
             return
+        if path == "/api/machine/status":
+            params = parse_qs(parsed.query or "")
+            working_directory = str((params.get("working_directory") or [""])[0] or "").strip()
+            if not working_directory:
+                working_directory = os.path.abspath(os.getcwd())
+            try:
+                status = machine_sync_status(working_directory)
+                self._json(200, {"working_directory": working_directory, "status": status})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+            return
+        if path == "/api/machine/details":
+            params = parse_qs(parsed.query or "")
+            working_directory = str((params.get("working_directory") or [""])[0] or "").strip()
+            if not working_directory:
+                working_directory = os.path.abspath(os.getcwd())
+            try:
+                max_files_raw = str((params.get("max_files") or [""])[0] or "").strip()
+                max_files = max(100, min(int(max_files_raw or 20000), 50000))
+                self._json(200, machine_sync_details(working_directory, max_files=max_files))
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+            return
         if path == "/api/models":
             try:
                 from kendr.llm_router import (
@@ -11657,6 +12705,14 @@ strong { color: var(--text); }
                     "running": running,
                     "models": models,
                 })
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+            return
+        if path == "/api/models/guide":
+            try:
+                params = parse_qs(parsed.query or "")
+                force = str((params.get("refresh") or [""])[0] or "").strip().lower() in {"1", "true", "yes"}
+                self._json(200, _get_model_guide(force=force))
             except Exception as exc:
                 self._json(500, {"error": str(exc)})
             return
@@ -12061,6 +13117,28 @@ strong { color: var(--text); }
         if path == "/api/chat":
             self._handle_chat(body)
             return
+        if path == "/api/chat/compact":
+            self._handle_chat_compact(body)
+            return
+        if path == "/api/machine/sync":
+            working_directory = str(body.get("working_directory", "") or "").strip()
+            if not working_directory:
+                working_directory = os.path.abspath(os.getcwd())
+            scope = str(body.get("scope", "machine") or "machine").strip().lower()
+            roots = body.get("roots")
+            if not isinstance(roots, list):
+                roots = []
+            try:
+                result = run_machine_sync(
+                    working_directory=working_directory,
+                    scope=scope,
+                    roots=[str(item) for item in roots if str(item).strip()],
+                    max_files=int(body.get("max_files", 250000) or 250000),
+                )
+                self._json(200, result)
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+            return
         if path == "/api/chat/resume":
             self._handle_chat_resume(body)
             return
@@ -12109,6 +13187,9 @@ strong { color: var(--text); }
             return
         if path == "/api/models/ollama/pull":
             self._handle_ollama_pull(body)
+            return
+        if path == "/api/models/ollama/delete":
+            self._handle_ollama_delete(body)
             return
         if path == "/api/models/ollama/pull/cancel":
             self._handle_ollama_pull_cancel()
@@ -12330,6 +13411,8 @@ strong { color: var(--text); }
             value = str(body.get(key) or "").strip()
             if value:
                 payload[key] = value
+        if body.get("context_limit") is not None:
+            payload["context_limit"] = body.get("context_limit")
         if project_build_mode:
             payload["project_build_mode"] = True
         for key in ("project_id", "project_name", "project_stack", "stack", "project_root",
@@ -12393,6 +13476,12 @@ strong { color: var(--text); }
             if project_name and not payload.get("project_name"):
                 payload["project_name"] = project_name
 
+        _sync_channel_chat_context(
+            payload,
+            supplied_history=body.get("history") if isinstance(body.get("history"), list) else None,
+            context_limit=body.get("context_limit"),
+        )
+
         gateway_up = _gateway_ready(timeout=0.5)
         if not gateway_up and not project_build_mode:
             if channel_name == "project_ui":
@@ -12435,6 +13524,34 @@ strong { color: var(--text); }
                 "status": "started",
             },
         )
+
+    def _handle_chat_compact(self, body: dict) -> None:
+        channel = str(body.get("channel") or "webchat").strip().lower() or "webchat"
+        payload = {
+            "channel": channel,
+            "sender_id": str(body.get("sender_id") or ("desktop_user" if channel == "webchat" else "ui_user")),
+            "chat_id": str(body.get("chat_id") or body.get("project_id") or "").strip(),
+            "workspace_id": str(body.get("workspace_id") or "").strip(),
+        }
+        if channel == "project_ui" and not payload["chat_id"]:
+            payload["chat_id"] = str(body.get("project_id") or "").strip()
+        if not payload["chat_id"]:
+            self._json(400, {"error": "missing_chat_id"})
+            return
+        context = _sync_channel_chat_context(
+            payload,
+            supplied_history=body.get("history") if isinstance(body.get("history"), list) else None,
+            context_limit=body.get("context_limit"),
+            compact_increment=1,
+        )
+        self._json(200, {
+            "ok": True,
+            "chat_id": payload["chat_id"],
+            "summary_file": context.get("summary_file", ""),
+            "summary_tokens": int(context.get("summary_tokens", 0) or 0),
+            "message_count": len(context.get("history") or []),
+            "compaction_level": int(context.get("compaction_level", 0) or 0),
+        })
 
     def _handle_chat_resume(self, body: dict) -> None:
         text = str(body.get("text") or body.get("message") or "").strip()
@@ -12496,7 +13613,24 @@ strong { color: var(--text); }
             )
 
         def _run() -> None:
-            _push_event(run_id, "status", {"status": "running", "message": "Resuming run..."})
+            _push_event(run_id, "status", {"status": "running", "message": "Continuing approved plan..."})
+            _launch_step_stream_poller(run_id)
+            heartbeat_stop = threading.Event()
+
+            def _heartbeat() -> None:
+                phases = (
+                    "Loading paused checklist...",
+                    "Running remaining checklist steps...",
+                    "Wrapping up final answer...",
+                )
+                idx = 0
+                while not heartbeat_stop.wait(12.0):
+                    phase = phases[min(idx, len(phases) - 1)]
+                    _push_event(run_id, "status", {"status": "running", "message": phase})
+                    idx += 1
+
+            heartbeat = threading.Thread(target=_heartbeat, daemon=True)
+            heartbeat.start()
             try:
                 resume_payload = {
                     "text": text,
@@ -12535,6 +13669,12 @@ strong { color: var(--text); }
                 _run_awaiting = _run_status == "awaiting_user_input"
                 with _pending_lock:
                     _pending_runs[run_id] = _pending_run_state(run_id, payload=resume_payload, status=_run_status, result=result)
+                _persist_channel_chat_turn(
+                    resume_payload,
+                    user_text=text,
+                    assistant_text=_project_chat_result_text(result),
+                    context_limit=body.get("context_limit"),
+                )
                 _push_event(run_id, "result", result)
                 _push_event(run_id, "done", {"run_id": run_id, "status": _run_status, "awaiting_user_input": _run_awaiting})
             except urllib.error.HTTPError as exc:
@@ -12557,19 +13697,39 @@ strong { color: var(--text); }
                     }
                     with _pending_lock:
                         _pending_runs[run_id] = _pending_run_state(run_id, payload=resume_payload, status="cancelled", result=cancel_result)
+                    _persist_channel_chat_turn(
+                        resume_payload,
+                        user_text=text,
+                        assistant_text=_project_chat_result_text(cancel_result),
+                        context_limit=body.get("context_limit"),
+                    )
                     _push_event(run_id, "result", cancel_result)
                     _push_event(run_id, "done", {"run_id": run_id, "status": "cancelled", "awaiting_user_input": False})
                     return
                 with _pending_lock:
                     _pending_runs[run_id] = _pending_run_state(run_id, payload=resume_payload, status="failed", error=err_msg)
+                _persist_channel_chat_turn(
+                    resume_payload,
+                    user_text=text,
+                    assistant_text="Error: " + str(err_msg),
+                    context_limit=body.get("context_limit"),
+                )
                 _push_event(run_id, "error", {"message": err_msg})
                 _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
             except Exception as exc:
                 err = str(exc)
                 with _pending_lock:
                     _pending_runs[run_id] = _pending_run_state(run_id, payload=resume_payload, status="failed", error=err)
+                _persist_channel_chat_turn(
+                    resume_payload,
+                    user_text=text,
+                    assistant_text="Error: " + err,
+                    context_limit=body.get("context_limit"),
+                )
                 _push_event(run_id, "error", {"message": err})
                 _push_event(run_id, "done", {"run_id": run_id, "status": "failed"})
+            finally:
+                heartbeat_stop.set()
 
         import threading as _threading
         t = _threading.Thread(target=_run, daemon=True)
@@ -12787,6 +13947,11 @@ strong { color: var(--text); }
     def _handle_ollama_pull(self, body: dict) -> None:
         model_name = str(body.get("model", "")).strip()
         ok, payload, status = _start_ollama_pull_job(model_name)
+        self._json(status, payload)
+
+    def _handle_ollama_delete(self, body: dict) -> None:
+        model_name = str(body.get("model", "")).strip()
+        _ok, payload, status = _delete_ollama_model(model_name)
         self._json(status, payload)
 
     def _handle_ollama_pull_cancel(self) -> None:
@@ -13429,11 +14594,23 @@ strong { color: var(--text); }
         if not isinstance(local_paths, list):
             local_paths = []
         history = body.get("history") if isinstance(body.get("history"), list) else []
+        payload = {
+            "channel": str(body.get("channel") or "webchat"),
+            "sender_id": str(body.get("sender_id") or "desktop_user"),
+            "chat_id": str(body.get("chat_id") or ""),
+            "workspace_id": str(body.get("workspace_id") or ""),
+            "context_limit": body.get("context_limit"),
+        }
 
         try:
             from kendr.llm_router import build_llm, get_active_provider, get_model_for_provider
             from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+            context = _sync_channel_chat_context(
+                payload,
+                supplied_history=history,
+                context_limit=body.get("context_limit"),
+            )
             provider = provider_override or get_active_provider()
             model = model_override or get_model_for_provider(provider)
             llm = build_llm(provider, model)
@@ -13467,9 +14644,12 @@ strong { color: var(--text); }
             )
             if attachment_notes:
                 system_ctx += "\n\nAttached local context:\n" + "\n\n".join(attachment_notes)
+            summary_block = _build_chat_context_block(context.get("summary_text", ""), context.get("history", []))
+            if summary_block:
+                system_ctx += "\n\nChat continuity context:\n" + summary_block
 
             messages = [SystemMessage(content=system_ctx)]
-            for item in history[-14:]:
+            for item in (context.get("history") or [])[-14:]:
                 if not isinstance(item, dict):
                     continue
                 role = str(item.get("role") or "").strip().lower()
@@ -13483,8 +14663,20 @@ strong { color: var(--text); }
             messages.append(HumanMessage(content=text))
             response = llm.invoke(messages)
             answer = response.content if hasattr(response, "content") else str(response)
+            _persist_channel_chat_turn(
+                payload,
+                user_text=text,
+                assistant_text=answer,
+                context_limit=body.get("context_limit"),
+            )
             self._json(200, {"answer": answer, "provider": provider, "model": model})
         except Exception as exc:
+            _persist_channel_chat_turn(
+                payload,
+                user_text=text,
+                assistant_text="Error: " + str(exc),
+                context_limit=body.get("context_limit"),
+            )
             self._json(500, {"error": str(exc)})
 
     def _handle_assistants_create(self, body: dict) -> None:

@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect, useCallback, useReducer } from 'react'
+import React, { useState, useRef, useEffect, useCallback, useMemo, useReducer } from 'react'
 import { useApp } from '../contexts/AppContext'
-import { basename, resolveSelectedModel } from '../lib/modelSelection'
+import { basename, resolveAgentCapability, resolveContextWindow, resolveSelectedModel } from '../lib/modelSelection'
 
 // ─── Chat history persistence ────────────────────────────────────────────────
 const CHAT_HISTORY_KEY = 'kendr_chat_history_v1'
@@ -20,7 +20,10 @@ function loadHistory() {
 function saveHistory(messages) {
   try {
     const toSave = messages
-      .filter(m => m.status === 'done' || m.status === 'error' || m.role === 'user')
+      .filter(m => (
+        m.role === 'user'
+        || (m.role === 'assistant' && ['thinking', 'streaming', 'awaiting', 'done', 'error'].includes(String(m.status || '')))
+      ))
       .slice(-MAX_STORED_MESSAGES)
     localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(toSave))
   } catch (_) {}
@@ -63,7 +66,7 @@ function formatRelTime(dateStr) {
 
 // ─── Chat-local state ────────────────────────────────────────────────────────
 const initChat = {
-  messages: [],          // [{id,role,content,steps,status,runId,artifacts,ts}]
+  messages: [],          // [{id,role,content,steps,status,runId,artifacts,progress,ts}]
   streaming: false,
   activeRunId: null,
   mode: 'chat',          // chat | agent | research | security
@@ -89,6 +92,31 @@ function chatReducer(s, a) {
         if (idx >= 0) { steps[idx] = { ...steps[idx], ...a.step } }
         else steps.push(a.step)
         return { ...m, steps }
+      })
+      return { ...s, messages: msgs }
+    }
+    case 'ADD_PROGRESS': {
+      const msgs = s.messages.map(m => {
+        if (m.id !== a.msgId) return m
+        const item = {
+          id: String(a.item?.id || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+          ts: a.item?.ts || new Date().toISOString(),
+          title: String(a.item?.title || '').trim(),
+          detail: String(a.item?.detail || '').trim(),
+          kind: String(a.item?.kind || '').trim(),
+          status: String(a.item?.status || '').trim(),
+          command: String(a.item?.command || '').trim(),
+          cwd: String(a.item?.cwd || '').trim(),
+          actor: String(a.item?.actor || '').trim(),
+          durationLabel: String(a.item?.durationLabel || '').trim(),
+          exitCode: a.item?.exitCode,
+        }
+        if (!item.title && !item.detail) return m
+        const prev = Array.isArray(m.progress) ? m.progress : []
+        const last = prev[0]
+        if (last && last.title === item.title && last.detail === item.detail) return m
+        const next = [item, ...prev].slice(0, 14)
+        return { ...m, progress: next }
       })
       return { ...s, messages: msgs }
     }
@@ -175,6 +203,81 @@ function modeLabel(mode) {
   return 'Chat'
 }
 
+function normalizeChecklistStatus(value) {
+  const status = String(value || '').trim().toLowerCase()
+  if (['completed', 'done', 'success', 'ok'].includes(status)) return 'completed'
+  if (['running', 'in_progress', 'started', 'active'].includes(status)) return 'running'
+  if (['awaiting_approval', 'awaiting_input', 'awaiting'].includes(status)) return 'awaiting'
+  if (['failed', 'error'].includes(status)) return 'failed'
+  if (['blocked'].includes(status)) return 'blocked'
+  if (['skipped'].includes(status)) return 'skipped'
+  return status || 'pending'
+}
+
+function sanitizeStatusMessage(message) {
+  const raw = String(message || '').trim()
+  const normalized = raw.toLowerCase()
+  if (!raw) return ''
+  if (normalized === 'resuming run...') return 'Continuing approved plan...'
+  if (normalized === 'restoring context from the paused run...') return 'Loading paused checklist...'
+  if (normalized === 'executing queued tasks...') return 'Running remaining checklist steps...'
+  if (normalized === 'collecting outputs and preparing the final response...') return 'Wrapping up final answer...'
+  return raw
+}
+
+function extractChecklist(result) {
+  if (!result || typeof result !== 'object') return []
+  const shellSteps = Array.isArray(result.shell_plan_steps) ? result.shell_plan_steps : []
+  if (shellSteps.length) {
+    return shellSteps.map((step, index) => ({
+      step: Number(step.step || (index + 1)),
+      title: String(step.title || step.description || `Step ${index + 1}`).trim() || `Step ${index + 1}`,
+      status: normalizeChecklistStatus(step.status || (step.done ? 'completed' : 'pending')),
+      detail: String(step.detail || step.reason || '').trim(),
+      command: String(step.command || '').trim(),
+      stdout: String(step.stdout || '').trim(),
+      stderr: String(step.stderr || '').trim(),
+      reason: String(step.reason || '').trim(),
+      optional: !!step.optional,
+      done: !!step.done || ['completed', 'skipped'].includes(normalizeChecklistStatus(step.status)),
+      returnCode: step.return_code,
+    }))
+  }
+
+  const planSteps = Array.isArray(result.plan_steps) ? result.plan_steps : []
+  if (planSteps.length) {
+    const activeIndex = Math.max(0, Number(result.plan_step_index || 0))
+    return planSteps.map((step, index) => {
+      const rawStatus = normalizeChecklistStatus(step.status || '')
+      const status = rawStatus || (index < activeIndex ? 'completed' : index === activeIndex ? 'running' : 'pending')
+      return {
+        step: index + 1,
+        title: String(step.title || step.name || step.description || `Step ${index + 1}`).trim() || `Step ${index + 1}`,
+        status,
+        detail: String(step.success_criteria || step.description || '').trim(),
+        command: '',
+        stdout: '',
+        stderr: '',
+        reason: String(step.reason || '').trim(),
+        optional: false,
+        done: ['completed', 'skipped'].includes(status),
+        returnCode: null,
+      }
+    })
+  }
+
+  return []
+}
+
+function latestChecklistMessage(messages) {
+  const safe = Array.isArray(messages) ? messages : []
+  for (let i = safe.length - 1; i >= 0; i -= 1) {
+    const msg = safe[i]
+    if (msg?.role === 'assistant' && Array.isArray(msg?.checklist) && msg.checklist.length) return msg
+  }
+  return null
+}
+
 function buildSimpleHistory(messages, maxTurns = 12) {
   const safe = Array.isArray(messages) ? messages : []
   return safe
@@ -190,6 +293,15 @@ function buildSimpleHistory(messages, maxTurns = 12) {
     }))
 }
 
+function estimateObjectTokens(value) {
+  try {
+    const raw = JSON.stringify(value)
+    return Math.max(0, Math.round(String(raw || '').length / 4))
+  } catch {
+    return 0
+  }
+}
+
 function formatDuration(totalSeconds) {
   const s = Math.max(0, Number(totalSeconds) || 0)
   const h = Math.floor(s / 3600)
@@ -200,6 +312,130 @@ function formatDuration(totalSeconds) {
   return `${sec}s`
 }
 
+function isShellProgressItem(item) {
+  if (!item || typeof item !== 'object') return false
+  const kind = String(item.kind || '').toLowerCase()
+  const title = String(item.title || '').toLowerCase()
+  const detail = String(item.detail || '').toLowerCase()
+  const command = String(item.command || '').trim()
+  if (command) return true
+  if (kind.includes('command') || kind.includes('shell')) return true
+  return /\bshell command\b|\brunning command\b|\bos[_\s-]?agent\b/.test(`${title} ${detail}`)
+}
+
+function shellCardFromProgress(progress = []) {
+  const items = (Array.isArray(progress) ? progress : []).filter(isShellProgressItem)
+  if (!items.length) return null
+  const running = items.find((it) => ['running', 'started', 'in_progress'].includes(String(it.status || '').toLowerCase()))
+  const primary = running || items[0]
+  if (!primary) return null
+
+  const primaryStatus = String(primary.status || '').toLowerCase()
+  const command = String(primary.command || '').trim()
+  let output = ''
+  if (['completed', 'failed', 'error'].includes(primaryStatus)) {
+    output = String(primary.detail || '').trim()
+  } else if (command) {
+    const companion = items.find((it) => (
+      it !== primary
+      && String(it.command || '').trim() === command
+      && ['completed', 'failed', 'error'].includes(String(it.status || '').toLowerCase())
+      && String(it.detail || '').trim()
+    ))
+    if (companion) output = String(companion.detail || '').trim()
+  }
+
+  return {
+    title: String(primary.title || 'Shell command').trim() || 'Shell command',
+    command,
+    output,
+    status: primaryStatus || 'running',
+    cwd: String(primary.cwd || '').trim(),
+    durationLabel: String(primary.durationLabel || '').trim(),
+    exitCode: primary.exitCode,
+  }
+}
+
+function inferExecutionBlockers({ msg, shellCard, progress = [], checklist = [] }) {
+  const textParts = []
+  const addText = (value) => {
+    const raw = String(value || '').trim()
+    if (raw) textParts.push(raw)
+  }
+
+  addText(msg?.content)
+  addText(shellCard?.output)
+  for (const item of Array.isArray(progress) ? progress : []) {
+    addText(item?.title)
+    addText(item?.detail)
+  }
+  for (const item of Array.isArray(checklist) ? checklist : []) {
+    addText(item?.title)
+    addText(item?.detail)
+    addText(item?.reason)
+    addText(item?.stdout)
+    addText(item?.stderr)
+  }
+
+  const observedMatch = String(msg?.content || '').match(/Observed blockers:\s*([\s\S]*?)(?:\n\s*\n|$)/i)
+  if (observedMatch?.[1]) {
+    for (const line of observedMatch[1].split('\n')) {
+      const cleaned = line.replace(/^\s*-\s*/, '').trim()
+      if (cleaned) textParts.push(cleaned)
+    }
+  }
+
+  const corpus = textParts.join('\n').toLowerCase()
+  if (!corpus.trim()) return []
+
+  const chips = []
+  const pushChip = (key, label, tone = 'warn') => {
+    if (chips.some((item) => item.key === key)) return
+    chips.push({ key, label, tone })
+  }
+
+  if (
+    /dockerdesktoplinuxengine|docker engine\/desktop was not actually running|docker engine not responding|cannot connect to the docker daemon|docker daemon|the system cannot find the file specified.*docker/i.test(corpus)
+  ) {
+    pushChip('engine-down', 'Engine Down', 'err')
+  }
+  if (
+    /wrong shell|not a valid statement separator|\/dev\/null|command -v|planner emitted syntax for the wrong shell|powershell plan uses|is not recognized as the name of a cmdlet|unexpected token '\|\|'/i.test(corpus)
+  ) {
+    pushChip('wrong-shell', 'Wrong Shell', 'err')
+  }
+  if (
+    /required app\/tool was missing|not discoverable from this machine|cannot find the file specified|was not found|could not find|not recognized as the name of a cmdlet|no such file or directory|missing or not discoverable/i.test(corpus)
+  ) {
+    pushChip('app-missing', 'App Missing', 'warn')
+  }
+  if (
+    /outside the allowed execution scope|outside the allowed scope|blocked by execution policy|policy block|approval_required|requires your approval/i.test(corpus)
+  ) {
+    pushChip('policy-block', 'Policy Block', 'warn')
+  }
+  if (
+    /permission denied|access is denied|administrator|elevation required|sudo|operation not permitted/i.test(corpus)
+  ) {
+    pushChip('permission', 'Need Permission', 'warn')
+  }
+  if (
+    /timed out|timeout|could not resolve|temporary failure in name resolution|connection refused|network is unreachable|failed to fetch/i.test(corpus)
+  ) {
+    pushChip('network', 'Network Issue', 'warn')
+  }
+
+  const blockedSteps = (Array.isArray(checklist) ? checklist : []).filter((item) => {
+    const status = normalizeChecklistStatus(item?.status)
+    return status === 'blocked' || status === 'failed'
+  }).length
+  if (!chips.length && blockedSteps > 0) {
+    pushChip('blocked', blockedSteps > 1 ? 'Steps Blocked' : 'Step Blocked', 'warn')
+  }
+
+  return chips.slice(0, 4)
+}
+
 function readBlobAsDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -207,6 +443,25 @@ function readBlobAsDataUrl(blob) {
     reader.onerror = () => reject(reader.error || new Error('read_failed'))
     reader.readAsDataURL(blob)
   })
+}
+
+function detectAttachmentType(filePath, fallback = 'file') {
+  const raw = String(filePath || '').trim().toLowerCase()
+  if (!raw) return fallback
+  if (/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(raw)) return 'image'
+  return fallback
+}
+
+function attachmentPreviewSrc(item) {
+  if (!item || item.type !== 'image') return ''
+  const preview = String(item.previewUrl || '').trim()
+  if (preview) return preview
+  const rawPath = String(item.path || '').trim()
+  if (!rawPath) return ''
+  const normalized = rawPath.replace(/\\/g, '/')
+  if (/^[a-z]:\//i.test(normalized)) return `file:///${normalized}`
+  if (normalized.startsWith('/')) return `file://${normalized}`
+  return rawPath
 }
 
 // ─── Deep Research default settings ─────────────────────────────────────────
@@ -228,6 +483,7 @@ const DR_DEFAULTS = {
 // ─── Component ───────────────────────────────────────────────────────────────
 export default function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }) {
   const { state: appState, dispatch: appDispatch, refreshModelInventory } = useApp()
+  const api = window.kendrAPI
   const [chat, dispatch] = useReducer(chatReducer, undefined, () => ({ ...initChat, messages: loadHistory() }))
   const [input, setInput] = useState('')
   const [resumeInput, setResumeInput] = useState('')
@@ -237,27 +493,49 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
   const [mcpEnabled, setMcpEnabled] = useState(false)
   const [mcpServerCount, setMcpServerCount] = useState(0)
   const [mcpUndiscovered, setMcpUndiscovered] = useState(0)
+  const [machineStatus, setMachineStatus] = useState(null)
+  const [machineStatusLoaded, setMachineStatusLoaded] = useState(false)
+  const [machineSyncRunning, setMachineSyncRunning] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [sessions, setSessions] = useState(() => loadSessions())
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
   const esRef = useRef(null)
+  const resumeAttemptedRunRef = useRef('')
   const apiBase = appState.backendUrl || 'http://127.0.0.1:2151'
   const updateDr = (patch) => setDr(s => ({ ...s, ...patch }))
   const selectedModelMeta = resolveSelectedModel(appState.selectedModel)
   const isSimpleStudioChat = studioMode && chat.mode === 'chat'
   const modelInventory = appState.modelInventory
-  const contextLimit = Number(modelInventory?.active_context_window || modelInventory?.context_window || 128000) || 128000
-  const estimatedContextTokens = Math.max(
-    0,
-    Math.round(
-      (
-        chat.messages.reduce((sum, m) => sum + String(m?.content || '').length, 0)
-        + String(input || '').length
-      ) / 4
-    ),
-  )
+  const selectedModelAgentCapable = resolveAgentCapability(appState.selectedModel, modelInventory)
+  const contextLimit = resolveContextWindow(appState.selectedModel, modelInventory)
+  const payloadPreview = useMemo(() => {
+    const draftText = String(input || '').trim()
+    const body = buildPayload(
+      draftText,
+      chatId,
+      'ctx-preview',
+      appState.projectRoot,
+      chat.mode,
+      dr,
+      attachments,
+      studioMode,
+      mcpEnabled,
+    )
+    body.history = buildSimpleHistory(chat.messages, 14)
+    if (appState.selectedModel) {
+      const selected = resolveSelectedModel(appState.selectedModel)
+      if (selected.provider) body.provider = selected.provider
+      if (selected.model) body.model = selected.model
+    }
+    body.context_limit = contextLimit
+    if (isSimpleStudioChat) body.stream = true
+    return body
+  }, [input, chatId, appState.projectRoot, chat.mode, dr, attachments, studioMode, mcpEnabled, chat.messages, appState.selectedModel, isSimpleStudioChat, contextLimit])
+  const estimatedContextTokens = estimateObjectTokens(payloadPreview)
   const contextPct = Math.min(100, Math.round((estimatedContextTokens / Math.max(contextLimit, 1)) * 100))
+  const stickyChecklistMsg = useMemo(() => latestChecklistMessage(chat.messages), [chat.messages])
+  const stickyChecklist = Array.isArray(stickyChecklistMsg?.checklist) ? stickyChecklistMsg.checklist : []
 
   // Close the SSE stream when the panel unmounts (e.g. explicit new-chat remount)
   useEffect(() => {
@@ -265,13 +543,23 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
   }, [])
 
   useEffect(() => {
+    if (!appState.activeRunId) resumeAttemptedRunRef.current = ''
+  }, [appState.activeRunId])
+
+  useEffect(() => {
+    if (chat.mode === 'agent' && !selectedModelAgentCapable) {
+      dispatch({ type: 'SET_MODE', mode: 'chat' })
+    }
+  }, [chat.mode, selectedModelAgentCapable])
+
+  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [chat.messages])
 
-  // Persist chat history whenever messages settle
+  // Persist chat history continuously so an active run survives panel remounts.
   useEffect(() => {
-    if (!chat.streaming) saveHistory(chat.messages)
-  }, [chat.messages, chat.streaming])
+    saveHistory(chat.messages)
+  }, [chat.messages])
 
   useEffect(() => {
     refreshModelInventory(false)
@@ -315,38 +603,49 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     setChatId(`chat-${Date.now()}`)
   }, [saveCurrentSession])
 
-  const compactContext = useCallback(() => {
-    if (!chat.messages.length) return
+  const compactContext = useCallback(async () => {
+    if (!chat.messages.length || chat.streaming) return
     saveCurrentSession()
-    const preserve = chat.messages.slice(-6)
-    const older = chat.messages.slice(0, -6).filter(m => String(m?.content || '').trim())
-    const compactedAt = new Date()
-    const summaryLines = older.slice(-24).map((m) => {
-      const who = m.role === 'user' ? 'User' : 'Assistant'
-      const snippet = String(m.content || '').replace(/\s+/g, ' ').trim().slice(0, 180)
-      return `- ${who}: ${snippet}${snippet.length >= 180 ? '…' : ''}`
-    })
-    const summary = [
-      `Context compacted at ${compactedAt.toLocaleString()}.`,
-      `Summarized ${older.length} earlier message(s) and kept the latest ${preserve.length}.`,
-      '',
-      'Compressed summary:',
-      ...(summaryLines.length ? summaryLines : ['- No prior content to summarize.']),
-    ].join('\n')
-    const summaryMsg = {
-      id: `c-${Date.now()}`,
-      role: 'assistant',
-      content: summary,
-      status: 'done',
-      mode: 'chat',
-      modeLabel: 'Compacted',
-      ts: compactedAt,
+    try {
+      const resp = await fetch(`${apiBase}/api/chat/compact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: 'webchat',
+          sender_id: 'desktop_user',
+          chat_id: chatId,
+          history: buildSimpleHistory(chat.messages, 200),
+          context_limit: contextLimit,
+        }),
+      })
+      const data = await resp.json().catch(() => ({}))
+      if (!resp.ok || data.error) throw new Error(data.error || data.detail || resp.statusText)
+      const note = {
+        id: `c-${Date.now()}`,
+        role: 'assistant',
+        content: `Context compacted into ${data.summary_file || 'summary.md'} (${Number(data.summary_tokens || 0).toLocaleString()} tokens, level ${data.compaction_level || 0}).`,
+        status: 'done',
+        mode: 'chat',
+        modeLabel: 'Compacted',
+        ts: new Date(),
+      }
+      dispatch({ type: 'ADD_MSG', msg: note })
+      saveHistory([...chat.messages, note])
+      setShowHistory(false)
+    } catch (err) {
+      const note = {
+        id: `c-${Date.now()}`,
+        role: 'assistant',
+        content: `Context compaction failed: ${err.message}`,
+        status: 'error',
+        mode: 'chat',
+        modeLabel: 'Compacted',
+        ts: new Date(),
+      }
+      dispatch({ type: 'ADD_MSG', msg: note })
+      saveHistory([...chat.messages, note])
     }
-    dispatch({ type: 'LOAD_MSGS', messages: [summaryMsg, ...preserve] })
-    saveHistory([summaryMsg, ...preserve])
-    setChatId(`chat-${Date.now()}`)
-    setShowHistory(false)
-  }, [chat.messages, saveCurrentSession])
+  }, [apiBase, chat.messages, chat.streaming, chatId, contextLimit, saveCurrentSession])
 
   const loadSession = useCallback((session) => {
     esRef.current?.close()
@@ -385,6 +684,79 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       .catch(() => {})
   }, [apiBase, mcpEnabled])
 
+  const syncWorkingDirectory = (appState.projectRoot || appState.settings?.projectRoot || '').trim()
+
+  const fetchMachineStatus = useCallback(async () => {
+    if (!apiBase) return null
+    try {
+      const q = syncWorkingDirectory ? `?working_directory=${encodeURIComponent(syncWorkingDirectory)}` : ''
+      const resp = await fetch(`${apiBase}/api/machine/status${q}`)
+      if (!resp.ok) {
+        setMachineStatusLoaded(true)
+        return null
+      }
+      const data = await resp.json().catch(() => ({}))
+      const status = data?.status && typeof data.status === 'object' ? data.status : null
+      if (status) setMachineStatus(status)
+      setMachineStatusLoaded(true)
+      return status
+    } catch (_) {
+      setMachineStatusLoaded(true)
+      return null
+    }
+  }, [apiBase, syncWorkingDirectory])
+
+  const triggerMachineSync = useCallback(async (scope = 'machine', isAuto = false) => {
+    if (machineSyncRunning) return
+    setMachineSyncRunning(true)
+    try {
+      const resp = await fetch(`${apiBase}/api/machine/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scope,
+          working_directory: syncWorkingDirectory || undefined,
+        }),
+      })
+      const data = await resp.json().catch(() => ({}))
+      if (resp.ok && data?.status && typeof data.status === 'object') {
+        setMachineStatus(data.status)
+        if (api?.settings?.set) {
+          const nowIso = new Date().toISOString()
+          await api.settings.set('machineLastAutoSyncAt', nowIso)
+          appDispatch({ type: 'SET_SETTINGS', settings: { machineLastAutoSyncAt: nowIso } })
+        }
+      }
+    } catch (_) {
+    } finally {
+      setMachineSyncRunning(false)
+      if (!isAuto) fetchMachineStatus()
+    }
+  }, [apiBase, syncWorkingDirectory, machineSyncRunning, api, appDispatch, fetchMachineStatus])
+
+  useEffect(() => {
+    fetchMachineStatus()
+  }, [fetchMachineStatus])
+
+  useEffect(() => {
+    const id = setInterval(() => { fetchMachineStatus() }, 60 * 1000)
+    return () => clearInterval(id)
+  }, [fetchMachineStatus])
+
+  useEffect(() => {
+    const enabled = !!appState.settings?.machineAutoSyncEnabled
+    if (!enabled) return
+    if (machineSyncRunning) return
+    const intervalDays = Math.max(1, Math.min(30, Number(appState.settings?.machineAutoSyncIntervalDays || 7)))
+    const lastRaw = String(appState.settings?.machineLastAutoSyncAt || '').trim()
+    const lastTs = lastRaw ? Date.parse(lastRaw) : 0
+    const dueMs = intervalDays * 24 * 60 * 60 * 1000
+    const now = Date.now()
+    if (!lastTs || Number.isNaN(lastTs) || now - lastTs >= dueMs) {
+      triggerMachineSync('machine', true)
+    }
+  }, [appState.settings, machineSyncRunning, triggerMachineSync])
+
   // ── Send message ────────────────────────────────────────────────────────────
   const send = useCallback(async (text, isResume = false) => {
     const msg = (typeof text === 'string' ? text.trim() : '') || input.trim()
@@ -394,20 +766,63 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
 
     const runId = `ui-${Date.now().toString(36)}`
     const userMsgId = `u-${runId}`
-    const asstMsgId = `a-${runId}`
+    const resumeMessageId = String(chat.awaitingContext?.messageId || '').trim()
+    const asstMsgId = isResume && resumeMessageId ? resumeMessageId : `a-${runId}`
 
     const currentMode = chat.mode
     const currentModeLabel = modeLabel(currentMode)
-
-    dispatch({ type: 'ADD_MSG', msg: { id: userMsgId, role: 'user', content: msg, mode: currentMode, modeLabel: currentModeLabel, ts: new Date() } })
-    dispatch({ type: 'SET_STREAMING', val: true })
-    dispatch({ type: 'SET_RUN', id: runId })
-    dispatch({ type: 'CLEAR_AWAITING' })
+    const sentAttachments = Array.isArray(attachments) ? attachments.map((item) => ({ ...item })) : []
 
     dispatch({
       type: 'ADD_MSG',
-      msg: { id: asstMsgId, role: 'assistant', content: '', steps: [], status: 'thinking', runId: isSimpleStudioChat ? null : runId, mode: currentMode, modeLabel: currentModeLabel, ts: new Date() }
+      msg: {
+        id: userMsgId,
+        role: 'user',
+        content: msg,
+        attachments: sentAttachments,
+        mode: currentMode,
+        modeLabel: currentModeLabel,
+        ts: new Date(),
+      },
     })
+    dispatch({ type: 'SET_STREAMING', val: true })
+    dispatch({ type: 'SET_RUN', id: runId })
+    dispatch({ type: 'CLEAR_AWAITING' })
+    setAttachments([])
+
+    if (isResume && resumeMessageId) {
+      dispatch({
+        type: 'UPD_MSG',
+        id: asstMsgId,
+        patch: {
+          content: '',
+          status: 'thinking',
+          runId: isSimpleStudioChat ? null : runId,
+          runStartedAt: new Date().toISOString(),
+          mode: currentMode,
+          modeLabel: currentModeLabel,
+          statusText: 'Continuing approved plan...',
+        },
+      })
+    } else {
+      dispatch({
+        type: 'ADD_MSG',
+        msg: {
+          id: asstMsgId,
+          role: 'assistant',
+          content: '',
+          steps: [],
+          progress: [],
+          checklist: [],
+          status: 'thinking',
+          runId: isSimpleStudioChat ? null : runId,
+          runStartedAt: new Date().toISOString(),
+          mode: currentMode,
+          modeLabel: currentModeLabel,
+          ts: new Date(),
+        }
+      })
+    }
 
     appDispatch({ type: 'SET_STREAMING', streaming: true })
 
@@ -425,15 +840,18 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
             text:        msg,
             channel:     'webchat',
           }
-        : buildPayload(msg, chatId, runId, appState.projectRoot, chat.mode, dr, attachments, studioMode, mcpEnabled)
+        : buildPayload(msg, chatId, runId, appState.projectRoot, chat.mode, dr, sentAttachments, studioMode, mcpEnabled)
       if (!isResume && appState.selectedModel) {
         const selected = resolveSelectedModel(appState.selectedModel)
         if (selected.provider) body.provider = selected.provider
         if (selected.model) body.model = selected.model
       }
+      if (!isResume) {
+        body.history = buildSimpleHistory(chat.messages, 14)
+        body.context_limit = contextLimit
+      }
 
       if (isSimpleStudioChat && !isResume) {
-        body.history = buildSimpleHistory(chat.messages, 14)
         body.stream = true
         const resp = await fetch(endpoint, {
           method:  'POST',
@@ -453,6 +871,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
           const effectiveRunId = data.run_id || runId
           dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { runId: effectiveRunId, status: 'thinking' } })
           dispatch({ type: 'SET_RUN', id: effectiveRunId })
+          appDispatch({ type: 'SET_ACTIVE_RUN', runId: effectiveRunId })
           openStream(effectiveRunId, asstMsgId)
           return
         } else {
@@ -483,6 +902,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
 
       dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { runId: effectiveRunId, status: 'thinking' } })
       dispatch({ type: 'SET_RUN', id: effectiveRunId })
+      appDispatch({ type: 'SET_ACTIVE_RUN', runId: effectiveRunId })
 
       openStream(effectiveRunId, asstMsgId)
     } catch (err) {
@@ -491,7 +911,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       dispatch({ type: 'SET_STREAMING', val: false })
       appDispatch({ type: 'SET_STREAMING', streaming: false })
     }
-  }, [input, chat.streaming, chat.awaitingContext, chat.mode, apiBase, appState.projectRoot, appState.selectedModel, chatId, dr, attachments, studioMode, isSimpleStudioChat, mcpEnabled, appDispatch, refreshModelInventory])
+  }, [input, chat.streaming, chat.awaitingContext, chat.mode, apiBase, appState.projectRoot, appState.selectedModel, chatId, dr, attachments, studioMode, isSimpleStudioChat, mcpEnabled, appDispatch, refreshModelInventory, contextLimit])
 
   // ── SSE stream ──────────────────────────────────────────────────────────────
   const openStream = useCallback((runId, asstMsgId) => {
@@ -507,7 +927,18 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       try {
         const d = JSON.parse(e.data)
         if (d.status && d.status !== 'connected') {
-          dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { statusText: d.message || d.status } })
+          dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { statusText: sanitizeStatusMessage(d.message || d.status) } })
+          dispatch({
+            type: 'ADD_PROGRESS',
+            msgId: asstMsgId,
+            item: {
+              id: `status-${Date.now()}`,
+              title: 'Runtime update',
+              detail: sanitizeStatusMessage(d.message || d.status || ''),
+              kind: 'status',
+              status: d.status || 'running',
+            },
+          })
         }
       } catch (_) {}
     })
@@ -529,7 +960,50 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
             startedAt:     step.started_at || '',
           }
         })
+        const agent = String(step.agent || step.name || 'agent').trim()
+        const reason = String(step.reason || step.message || '').trim()
+        const stepStatus = String(step.status || 'running').toLowerCase()
+        const title = ['completed', 'done', 'success'].includes(stepStatus)
+          ? `${agent} completed a task`
+          : ['failed', 'error'].includes(stepStatus)
+            ? `${agent} reported a failure`
+            : `${agent} is working`
+        dispatch({
+          type: 'ADD_PROGRESS',
+          msgId: asstMsgId,
+          item: {
+            id: stepId,
+            title,
+            detail: reason || '',
+            kind: 'step',
+            status: step.status || 'running',
+          },
+        })
         dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { status: 'streaming' } })
+      } catch (_) {}
+    })
+
+    es.addEventListener('activity', e => {
+      try {
+        const item = JSON.parse(e.data)
+        const title = String(item.title || item.kind || 'Activity').trim()
+        const detail = String(item.detail || item.command || '').trim()
+        dispatch({
+          type: 'ADD_PROGRESS',
+          msgId: asstMsgId,
+          item: {
+            id: item.id || `activity-${Date.now()}`,
+            title,
+            detail,
+            kind: item.kind || 'activity',
+            status: item.status || 'running',
+            command: item.command || '',
+            cwd: item.cwd || '',
+            actor: item.actor || '',
+            durationLabel: item.duration_label || '',
+            exitCode: item.exit_code,
+          },
+        })
       } catch (_) {}
     })
 
@@ -552,20 +1026,22 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
           (d.approval_request && Object.keys(d.approval_request).length > 0)
         )
         if (awaiting) {
+          const checklist = extractChecklist(d)
           dispatch({
             type: 'SET_AWAITING',
             ctx: {
               runId,
               workflowId: d.workflow_id || runId,
+              messageId: asstMsgId,
               prompt: d.pending_user_question || output || 'Waiting for your input.',
               kind:   d.pending_user_input_kind || '',
               scope: d.approval_pending_scope || '',
               approvalRequest: d.approval_request || null,
             }
           })
-          dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { content: output, status: 'awaiting', artifacts: d.artifact_files || [] } })
+          dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { content: output, status: 'awaiting', artifacts: d.artifact_files || [], checklist } })
         } else {
-          dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { content: output, status: 'done', artifacts: d.artifact_files || [] } })
+          dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { content: output, status: 'done', artifacts: d.artifact_files || [], checklist: extractChecklist(d) } })
         }
       } catch (_) {}
     })
@@ -583,6 +1059,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       closeClean()
       dispatch({ type: 'SET_STREAMING', val: false })
       appDispatch({ type: 'SET_STREAMING', streaming: false })
+      appDispatch({ type: 'SET_ACTIVE_RUN', runId: null })
     })
 
     es.addEventListener('error', e => {
@@ -596,6 +1073,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       closeClean()
       dispatch({ type: 'SET_STREAMING', val: false })
       appDispatch({ type: 'SET_STREAMING', streaming: false })
+      appDispatch({ type: 'SET_ACTIVE_RUN', runId: null })
     })
 
     es.onerror = () => {
@@ -605,8 +1083,65 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       closeClean()
       dispatch({ type: 'SET_STREAMING', val: false })
       appDispatch({ type: 'SET_STREAMING', streaming: false })
+      appDispatch({ type: 'SET_ACTIVE_RUN', runId: null })
     }
-  }, [apiBase, appDispatch, chat.messages, refreshModelInventory])
+  }, [apiBase, appDispatch, refreshModelInventory])
+
+  // Re-attach to an active background run when returning to chat view.
+  useEffect(() => {
+    const activeRunId = String(appState.activeRunId || '').trim()
+    if (!activeRunId) return
+    if (resumeAttemptedRunRef.current === activeRunId) return
+    resumeAttemptedRunRef.current = activeRunId
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(activeRunId)}`)
+        const data = await resp.json().catch(() => ({}))
+        if (cancelled) return
+        if (!resp.ok) return
+        const status = String(data?.status || '').toLowerCase()
+        if (['completed', 'failed', 'cancelled'].includes(status)) {
+          appDispatch({ type: 'SET_STREAMING', streaming: false })
+          appDispatch({ type: 'SET_ACTIVE_RUN', runId: null })
+          return
+        }
+
+        let asstMsgId = ''
+        const existing = (chat.messages || []).find(m => String(m.runId || '') === activeRunId)
+        if (existing?.id) {
+          asstMsgId = existing.id
+          dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { status: status === 'awaiting_user_input' ? 'awaiting' : 'streaming' } })
+        } else {
+          asstMsgId = `a-${activeRunId}-resume`
+          dispatch({
+            type: 'ADD_MSG',
+            msg: {
+              id: asstMsgId,
+              role: 'assistant',
+              content: '',
+              steps: [],
+              progress: [],
+              status: status === 'awaiting_user_input' ? 'awaiting' : 'thinking',
+              runId: activeRunId,
+              runStartedAt: data?.started_at || new Date().toISOString(),
+              mode: chat.mode,
+              modeLabel: modeLabel(chat.mode),
+              ts: new Date(),
+            },
+          })
+        }
+        dispatch({ type: 'SET_RUN', id: activeRunId })
+        dispatch({ type: 'SET_STREAMING', val: status !== 'awaiting_user_input' })
+        appDispatch({ type: 'SET_STREAMING', streaming: status !== 'awaiting_user_input' })
+        openStream(activeRunId, asstMsgId)
+      } catch (_) {
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [appState.activeRunId, apiBase, openStream, chat.messages, chat.mode, appDispatch])
 
   // ── Stop run ────────────────────────────────────────────────────────────────
   const stopRun = useCallback(async () => {
@@ -625,6 +1160,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     }
     dispatch({ type: 'SET_STREAMING', val: false })
     appDispatch({ type: 'SET_STREAMING', streaming: false })
+    appDispatch({ type: 'SET_ACTIVE_RUN', runId: null })
   }, [chat.activeRunId, chat.messages, apiBase, appDispatch])
 
   const submitSkillApproval = useCallback(async (scope, note = '') => {
@@ -677,7 +1213,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       const next = [...prev]
       for (const filePath of paths) {
         if (seen.has(filePath)) continue
-        next.push({ path: filePath, type: 'file', name: basename(filePath) })
+        next.push({ path: filePath, type: detectAttachmentType(filePath), name: basename(filePath) })
         seen.add(filePath)
       }
       return next
@@ -768,8 +1304,9 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
         {MODES.map(m => (
           <button
             key={m.id}
-            className={`kc-mode-pill ${chat.mode === m.id ? 'kc-mode-pill--active' : ''}`}
-            onClick={() => dispatch({ type: 'SET_MODE', mode: m.id })}
+            className={`kc-mode-pill ${chat.mode === m.id ? 'kc-mode-pill--active' : ''} ${m.id === 'agent' && !selectedModelAgentCapable ? 'kc-mode-pill--disabled' : ''}`}
+            onClick={() => { if (m.id === 'agent' && !selectedModelAgentCapable) return; dispatch({ type: 'SET_MODE', mode: m.id }) }}
+            title={m.id === 'agent' && !selectedModelAgentCapable ? 'Selected model cannot run as agent.' : ''}
           >{m.label}</button>
         ))}
       </div>
@@ -825,6 +1362,13 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
             </div>
           </div>
         </div>
+      )}
+
+      {stickyChecklist.length > 0 && (
+        <StickyChecklist
+          checklist={stickyChecklist}
+          title={stickyChecklistMsg?.status === 'awaiting' ? 'Checklist waiting' : 'Checklist'}
+        />
       )}
 
       {/* ── Input area ── */}
@@ -950,7 +1494,7 @@ function DeepResearchPanel({ dr, updateDr }) {
       <div className="dr-panel-header" onClick={() => updateDr({ collapsed: !dr.collapsed })}>
         <span className="dr-panel-title">🔬 Deep Research Settings</span>
         <div className="dr-summary">
-          <span className="dr-sum-pill">{dr.pages}p</span>
+          <span className="dr-sum-pill">~{dr.pages}p</span>
           <span className="dr-sum-pill">{dr.citationStyle.toUpperCase()}</span>
           <span className="dr-sum-pill">{dr.outputFormats.join('·')}</span>
           {!dr.webSearchEnabled && <span className="dr-sum-pill dr-sum-warn">Local only</span>}
@@ -963,13 +1507,14 @@ function DeepResearchPanel({ dr, updateDr }) {
           {/* Row 1 */}
           <div className="dr-grid">
             <div className="dr-field">
-              <label className="dr-label">Page Target</label>
+              <label className="dr-label">Approx. Length</label>
               <select className="dr-select" value={dr.pages} onChange={e => updateDr({ pages: +e.target.value })}>
-                <option value={10}>10 pages</option>
-                <option value={25}>25 pages</option>
-                <option value={50}>50 pages</option>
-                <option value={100}>100 pages</option>
+                <option value={10}>~10 pages</option>
+                <option value={25}>~25 pages</option>
+                <option value={50}>~50 pages</option>
+                <option value={100}>~100 pages</option>
               </select>
+              <div className="dr-note">Aiming near this length; citations and formatting can shift the final page count.</div>
             </div>
             <div className="dr-field">
               <label className="dr-label">Citation Style</label>
@@ -1109,6 +1654,8 @@ function WelcomeScreen({ onSuggest }) {
 
 // ─── User message ─────────────────────────────────────────────────────────────
 function UserMessage({ msg }) {
+  const attachments = Array.isArray(msg.attachments) ? msg.attachments : []
+  const imageAttachments = attachments.filter((item) => item?.type === 'image')
   return (
     <div className="kc-row kc-row--user">
       <div className="kc-bubble kc-bubble--user">
@@ -1118,6 +1665,30 @@ function UserMessage({ msg }) {
           </div>
         )}
         <div className="kc-bubble-text">{msg.content}</div>
+        {attachments.length > 0 && (
+          <div className="kc-msg-attachments">
+            {imageAttachments.length > 0 && (
+              <div className="kc-msg-image-grid">
+                {imageAttachments.map((item) => {
+                  const src = attachmentPreviewSrc(item)
+                  return (
+                    <div key={`img-${item.path}`} className="kc-msg-image-card" title={item.path}>
+                      {src ? <img src={src} alt={item.name || 'attached image'} className="kc-msg-image" /> : <div className="kc-msg-image-fallback">🖼</div>}
+                      <div className="kc-msg-image-name">{item.name}</div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+            <div className="kc-msg-attach-list">
+              {attachments.map((item) => (
+                <span key={item.path} className="kc-msg-attach-chip" title={item.path}>
+                  {item.type === 'folder' ? '📁' : item.type === 'image' ? '🖼' : '📄'} {item.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="kc-bubble-ts">{formatTs(msg.ts)}</div>
       </div>
       <div className="kc-avatar kc-avatar--user">👤</div>
@@ -1136,7 +1707,27 @@ function AssistantMessage({ msg }) {
     const timer = setInterval(() => setNowMs(Date.now()), 1000)
     return () => clearInterval(timer)
   }, [msg?.runId, msg?.status])
-  const elapsedSeconds = msg?.runId ? Math.max(0, Math.floor((nowMs - new Date(msg.ts || Date.now()).getTime()) / 1000)) : 0
+  const elapsedSeconds = msg?.runId ? Math.max(0, Math.floor((nowMs - new Date(msg.runStartedAt || msg.ts || Date.now()).getTime()) / 1000)) : 0
+  const progress = Array.isArray(msg.progress) ? msg.progress : []
+  const shellCard = shellCardFromProgress(progress)
+  const visibleProgress = progress.filter((item) => !isShellProgressItem(item))
+  const checklist = Array.isArray(msg.checklist) ? msg.checklist : []
+  const blockerChips = inferExecutionBlockers({ msg, shellCard, progress: visibleProgress, checklist })
+  const progressSummary = (() => {
+    if (!visibleProgress.length) return ''
+    let searches = 0
+    let files = 0
+    for (const item of visibleProgress) {
+      const kind = String(item.kind || '').toLowerCase()
+      const text = `${item.title || ''} ${item.detail || ''}`.toLowerCase()
+      if (kind.includes('search') || /\b(search|query|grep|rg|ripgrep)\b/.test(text)) searches += 1
+      if (kind.includes('file') || /\b(file|read|scan|inspect|inventory)\b/.test(text)) files += 1
+    }
+    const parts = []
+    if (files) parts.push(`${files} file${files === 1 ? '' : 's'}`)
+    if (searches) parts.push(`${searches} search${searches === 1 ? '' : 'es'}`)
+    return parts.length ? `Exploring ${parts.join(', ')}` : ''
+  })()
 
   return (
     <div className="kc-row kc-row--assistant">
@@ -1168,11 +1759,61 @@ function AssistantMessage({ msg }) {
           </div>
         )}
 
+        {shellCard && (
+          <div className={`kc-shell-card kc-shell-card--${shellCard.status || 'running'}`}>
+            <div className="kc-shell-card-head">
+              <span className="kc-shell-card-label">Shell</span>
+              <span className="kc-shell-card-title">{shellCard.title}</span>
+            </div>
+            {shellCard.command && (
+              <pre className="kc-shell-card-code"><code>$ {shellCard.command}</code></pre>
+            )}
+            {shellCard.output && (
+              <pre className="kc-shell-card-output"><code>{shellCard.output}</code></pre>
+            )}
+            {(shellCard.cwd || shellCard.durationLabel || (shellCard.exitCode !== null && shellCard.exitCode !== undefined)) && (
+              <div className="kc-shell-card-meta">
+                {shellCard.cwd && <span>{shellCard.cwd}</span>}
+                {shellCard.durationLabel && <span>{shellCard.durationLabel}</span>}
+                {shellCard.exitCode !== null && shellCard.exitCode !== undefined && <span>exit {shellCard.exitCode}</span>}
+              </div>
+            )}
+          </div>
+        )}
+
+        {blockerChips.length > 0 && (
+          <div className="kc-blocker-strip">
+            {blockerChips.map((item) => (
+              <span key={item.key} className={`kc-blocker-chip kc-blocker-chip--${item.tone || 'warn'}`}>{item.label}</span>
+            ))}
+          </div>
+        )}
+
+        {/* Codex-style worklog */}
+        {msg.runId && (['thinking', 'streaming', 'awaiting'].includes(String(msg.status || '')) || visibleProgress.length > 0) && (
+          <div className="kc-worklog">
+            <div className="kc-worklog-head">Working for {formatDuration(elapsedSeconds)}</div>
+            {progressSummary && <div className="kc-worklog-summary">{progressSummary}</div>}
+            <div className="kc-worklog-items">
+              {visibleProgress.slice(0, 6).map(item => (
+                <div key={item.id} className="kc-worklog-item">
+                  <div className="kc-worklog-title">{item.title}</div>
+                  {item.detail && <div className="kc-worklog-detail">{item.detail}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Step timeline */}
         {msg.steps?.length > 0 && (
           <div className="kc-steps">
             {msg.steps.map(step => <StepCard key={step.stepId} step={step} />)}
           </div>
+        )}
+
+        {checklist.length > 0 && (
+          <ChecklistCard checklist={checklist} />
         )}
 
         {/* Final content */}
@@ -1185,16 +1826,6 @@ function AssistantMessage({ msg }) {
               content={msg.content}
               isStreaming={['thinking', 'streaming'].includes(String(msg.status || ''))}
             />
-          </div>
-        )}
-
-        {/* Artifacts */}
-        {msg.artifacts?.length > 0 && (
-          <div className="kc-artifacts">
-            <div className="kc-artifacts-label">Artifacts</div>
-            {msg.artifacts.map((a, i) => (
-              <div key={i} className="kc-artifact">{typeof a === 'string' ? a : (a.name || a.path || JSON.stringify(a))}</div>
-            ))}
           </div>
         )}
 
@@ -1214,6 +1845,77 @@ function AssistantMessage({ msg }) {
   )
 }
 
+function ChecklistCard({ checklist }) {
+  return (
+    <div className="kc-checklist-card">
+      <div className="kc-checklist-title">Checklist</div>
+      <div className="kc-checklist-list">
+        {checklist.map((item) => (
+          <ChecklistItem key={`${item.step}-${item.title}`} item={item} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function StickyChecklist({ checklist, title }) {
+  return (
+    <div className="kc-sticky-checklist">
+      <div className="kc-sticky-checklist-head">
+        <span>{title}</span>
+        <span>{checklist.filter(item => item.done).length}/{checklist.length}</span>
+      </div>
+      <div className="kc-checklist-list">
+        {checklist.map((item) => (
+          <ChecklistItem key={`sticky-${item.step}-${item.title}`} item={item} compact />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ChecklistItem({ item, compact = false }) {
+  const state = normalizeChecklistStatus(item.status)
+  const icon = state === 'completed' ? '✓'
+    : state === 'skipped' ? '↷'
+    : state === 'running' ? '…'
+    : state === 'awaiting' ? '!'
+    : state === 'failed' || state === 'blocked' ? '✗'
+    : '·'
+  const detail = String(item.detail || item.reason || item.stdout || item.stderr || '').trim()
+  const doneLike = state === 'completed' || state === 'skipped'
+
+  return (
+    <div className={`kc-checklist-item kc-checklist-item--${state}${doneLike ? ' kc-checklist-item--done' : ''}`}>
+      <div className="kc-checklist-mark">{icon}</div>
+      <div className="kc-checklist-body">
+        <div className="kc-checklist-row">
+          <span className="kc-checklist-step">{item.step}.</span>
+          <span className="kc-checklist-text">{item.title}</span>
+        </div>
+        {!compact && item.command && <div className="kc-checklist-command">$ {item.command}</div>}
+        {detail && <div className="kc-checklist-detail">{detail}</div>}
+      </div>
+    </div>
+  )
+}
+
+function parseMcpAgentMeta(agentName) {
+  const raw = String(agentName || '').trim()
+  if (!raw.startsWith('mcp_') || !raw.endsWith('_agent')) return null
+  const inner = raw.slice(4, -6)
+  const parts = inner.split('_')
+  if (!parts.length) return null
+  const server = parts[0] || ''
+  const tool = parts.slice(1).join('_') || ''
+  return {
+    server,
+    tool,
+    serverLabel: server.replace(/_/g, ' '),
+    toolLabel: tool.replace(/_/g, ' '),
+  }
+}
+
 // ─── Step card ────────────────────────────────────────────────────────────────
 function StepCard({ step }) {
   const [open, setOpen] = useState(false)
@@ -1221,6 +1923,7 @@ function StepCard({ step }) {
             : step.status === 'failed'    || step.status === 'error'   ? 'failed'
             : step.status === 'running'                                ? 'running'
             : 'pending'
+  const mcpMeta = parseMcpAgentMeta(step.agent)
 
   const ICON = { done: '✓', failed: '✗', running: '●', pending: '·' }
 
@@ -1229,13 +1932,24 @@ function StepCard({ step }) {
       <div className="kc-step-dot">{ICON[cls]}</div>
       <div className="kc-step-inner">
         <div className="kc-step-header" onClick={() => (step.reason || step.message) && setOpen(o => !o)}>
-          <span className="kc-step-agent">{step.agent}</span>
+          {mcpMeta ? (
+            <>
+              <span className="kc-step-agent kc-step-agent--mcp">🔌 MCP</span>
+              <span className="kc-step-chip">{mcpMeta.serverLabel}</span>
+              <span className="kc-step-agent">{mcpMeta.toolLabel || step.agent}</span>
+            </>
+          ) : (
+            <span className="kc-step-agent">{step.agent}</span>
+          )}
           {step.message && <span className="kc-step-msg">{step.message.slice(0, 80)}</span>}
           {step.durationLabel && <span className="kc-step-dur">{step.durationLabel}</span>}
           {(step.reason || step.message) && (
             <span className="kc-step-toggle">{open ? '▾' : '▸'}</span>
           )}
         </div>
+        {mcpMeta && (
+          <div className="kc-step-reason kc-step-reason--inline">Ran MCP tool `{mcpMeta.toolLabel}` via `{mcpMeta.serverLabel}`.</div>
+        )}
         {open && step.reason && (
           <div className="kc-step-reason">{step.reason}</div>
         )}

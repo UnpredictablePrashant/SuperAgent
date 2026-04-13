@@ -165,6 +165,36 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertIn("os_command", updates)
         self.assertIn("/mnt/d", str(updates.get("os_command", "")))
 
+    def test_largest_file_query_routes_to_os_agent_not_research_pipeline(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("kendr.connector_registry.build_connector_catalog", return_value=[]),
+            patch("kendr.connector_registry.connector_catalog_prompt_block", return_value=""),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("what is the largest file in the folder edscanner?")
+            state["plan_steps"] = []
+            state["plan_ready"] = False
+            state["last_agent"] = "os_agent"
+
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "os_agent")
+        self.assertIn("local command execution workflow", routed_state["orchestrator_reason"].lower())
+        self.assertFalse(mock_invoke.called, "Direct os_agent routing should not call orchestrator LLM.")
+        self.assertTrue(routed_state.get("a2a", {}).get("tasks"))
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "os_agent")
+        updates = task.get("state_updates", {})
+        self.assertIn("os_command", updates)
+        self.assertIn("find ", str(updates.get("os_command", "")))
+        self.assertFalse(bool(routed_state.get("research_pipeline_enabled", False)))
+
     def test_direct_tool_mode_finishes_via_direct_tool_runtime(self):
         with (
             patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
@@ -740,7 +770,13 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertIn("kendr agents list", routed_state.get("final_output", ""))
 
     def test_explicit_os_command_routes_to_os_agent(self):
-        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Run a local command to inspect the repository.")
             state["os_command"] = "Get-Location"
@@ -751,6 +787,231 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertTrue(routed_state.get("a2a", {}).get("tasks"))
         task = routed_state["a2a"]["tasks"][-1]
         self.assertEqual(task["recipient"], "os_agent")
+
+    def test_vscode_install_check_routes_directly_to_os_agent_with_hint(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Can you check if VS Code is installed on my laptop?")
+            state["plan_steps"] = []
+            state["plan_ready"] = False
+            state["last_agent"] = ""
+
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "os_agent")
+        self.assertIn("local command execution workflow", routed_state["orchestrator_reason"].lower())
+        self.assertFalse(mock_invoke.called, "Direct os_agent routing should not call orchestrator LLM.")
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "os_agent")
+        updates = task.get("state_updates", {})
+        self.assertIn("os_command", updates)
+        self.assertIn("code", str(updates.get("os_command", "")).lower())
+
+    def test_vscode_do_i_have_query_routes_directly_to_os_agent_with_hint(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("do i have the vscode in my laptop?")
+            state["plan_steps"] = []
+            state["plan_ready"] = False
+            state["last_agent"] = ""
+
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "os_agent")
+        self.assertFalse(mock_invoke.called, "Direct os_agent routing should not call orchestrator LLM.")
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "os_agent")
+        updates = task.get("state_updates", {})
+        self.assertIn("os_command", updates)
+        self.assertIn("code", str(updates.get("os_command", "")).lower())
+
+    def test_successful_os_agent_local_command_finishes_without_redispatch(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("do i have the vscode in my laptop?")
+            state["last_agent"] = "os_agent"
+            state["os_success"] = True
+            state["draft_response"] = "installed:C:\\Users\\Prashant Dey\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+            state["last_agent_output"] = state["draft_response"]
+            state["agent_history"] = [{"agent": "os_agent", "status": "success"}]
+
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "__finish__")
+        self.assertIn("yes.", routed_state.get("final_output", "").lower())
+        self.assertIn("Code.exe", routed_state.get("final_output", ""))
+        self.assertFalse(mock_invoke.called, "Successful local command workflows should not re-enter orchestrator LLM routing.")
+
+    def test_orchestrator_finishes_immediately_on_deterministic_scope_block(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("check if vscode installed")
+            state["deterministic_failure"] = {
+                "agent": "os_agent",
+                "kind": "policy_blocked_outside_scope",
+                "reason": "Working directory is outside the allowed path scope.",
+                "working_directory": "D:\\",
+            }
+            routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "__finish__")
+        self.assertIn("dispatch loop", routed_state.get("final_output", "").lower())
+        self.assertIn("allowed path", routed_state.get("final_output", "").lower())
+
+    def test_multistep_shell_setup_routes_to_shell_plan_agent(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state(
+                "Run docker container; if docker is not running, start it; if not installed, install it and then pull nginx."
+            )
+            state["plan_steps"] = []
+            state["plan_ready"] = False
+            state["last_agent"] = ""
+
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "shell_plan_agent")
+        self.assertIn("shell_plan_agent", routed_state["orchestrator_reason"])
+        self.assertFalse(mock_invoke.called, "Shell-plan direct routing should not call orchestrator LLM.")
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "shell_plan_agent")
+
+    def test_shell_plan_result_finishes_without_replanning_loop(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("start docker and run nginx")
+            state["last_agent"] = "shell_plan_agent"
+            state["shell_plan_result"] = "Docker engine not running."
+            state["draft_response"] = "Docker engine not running."
+            state["shell_plan_steps"] = [
+                {"step": 1, "status": "failed"},
+                {"step": 2, "status": "blocked"},
+            ]
+
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "__finish__")
+        self.assertIn("docker engine not running", routed_state.get("final_output", "").lower())
+        self.assertFalse(mock_invoke.called, "Completed shell-plan runs should not be replanned.")
+
+    def test_software_inventory_sync_routes_to_os_agent_with_bulk_hint(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Refresh software inventory cache for installed tools.")
+            state["plan_steps"] = []
+            state["plan_ready"] = False
+            state["last_agent"] = ""
+
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "os_agent")
+        self.assertFalse(mock_invoke.called, "Direct os_agent routing should not call orchestrator LLM.")
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "os_agent")
+        updates = task.get("state_updates", {})
+        self.assertEqual(updates.get("os_command"), "__KENDR_SYNC_MACHINE__")
+        self.assertEqual(updates.get("machine_sync_scope"), "software")
+
+    def test_machine_sync_query_routes_to_os_agent_with_internal_sync_command(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("sync my machine and track recent file changes")
+            state["plan_steps"] = []
+            state["plan_ready"] = False
+            state["last_agent"] = ""
+
+            with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "os_agent")
+        self.assertFalse(mock_invoke.called, "Direct os_agent routing should not call orchestrator LLM.")
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "os_agent")
+        updates = task.get("state_updates", {})
+        self.assertEqual(updates.get("os_command"), "__KENDR_SYNC_MACHINE__")
+
+    def test_session_history_summary_renders_recent_user_assistant_turns(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state(
+                "Continue.",
+                session_history=[
+                    {"role": "user", "content": "First question"},
+                    {"role": "assistant", "content": "First answer"},
+                    {"role": "system", "content": "ignored"},
+                ],
+            )
+            summary = runtime._session_history_as_text(state)
+        self.assertIn("user: First question", summary)
+        self.assertIn("assistant: First answer", summary)
+        self.assertNotIn("system", summary)
+
+    def test_session_history_summary_includes_persisted_summary_file_context(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state(
+                "Continue.",
+                session_history=[{"role": "user", "content": "Most recent question"}],
+                session_history_summary="# summary.md\n\n- Latest user intent: Build the dashboard.\n",
+            )
+            summary = runtime._session_history_as_text(state)
+        self.assertIn("Persisted summary.md context", summary)
+        self.assertIn("Build the dashboard", summary)
+        self.assertIn("Recent raw chat turns", summary)
 
     def test_local_drive_request_routes_to_planner_first(self):
         with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
@@ -815,6 +1076,7 @@ class RuntimeRoutingTests(unittest.TestCase):
     def test_deep_research_confirmation_scope_only_pauses_execution(self):
         with (
             patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("kendr.runtime.append_privileged_audit_event"),
             patch("tasks.a2a_protocol.upsert_agent_card"),
             patch("tasks.a2a_protocol.insert_message"),
             patch("tasks.a2a_protocol.upsert_task"),
@@ -835,6 +1097,31 @@ class RuntimeRoutingTests(unittest.TestCase):
 
         self.assertEqual(routed_state["next_agent"], "__finish__")
         self.assertIn("approve", routed_state["final_output"].lower())
+
+    def test_long_document_subplan_scope_only_pauses_execution(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("kendr.runtime.append_privileged_audit_event"),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Create a 50-page market report.")
+            state["workflow_type"] = "deep_research"
+            state["pending_user_input_kind"] = ""
+            state["approval_pending_scope"] = "long_document_plan"
+            state["pending_user_question"] = "Approve the section plan."
+            state["approval_request"] = {
+                "scope": "long_document_plan",
+                "summary": "Review the section plan before long-form execution.",
+            }
+
+            routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "__finish__")
+        self.assertIn("section plan", routed_state["final_output"].lower())
 
     def test_build_initial_state_approves_pending_plan_from_session(self):
         with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
@@ -886,7 +1173,14 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertIn("Plan revision instructions", state["current_objective"])
 
     def test_build_initial_state_approves_pending_long_document_subplan(self):
-        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("kendr.runtime.append_privileged_audit_event"),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
             runtime = AgentRuntime(build_registry())
             prior_state = {
                 "last_plan": "Summary: test plan",
@@ -908,6 +1202,36 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertFalse(state["long_document_plan_waiting_for_approval"])
         self.assertEqual(state["long_document_plan_status"], "approved")
         self.assertTrue(state["long_document_execute_from_saved_outline"])
+
+    def test_build_initial_state_revisions_pending_long_document_subplan(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("kendr.runtime.append_privileged_audit_event"),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            prior_state = {
+                "last_plan": "Summary: test plan",
+                "last_plan_data": {"summary": "test", "steps": [{"id": "step-1", "agent": "long_document_agent", "task": "Write report"}]},
+                "last_plan_steps": [{"id": "step-1", "agent": "long_document_agent", "task": "Write report"}],
+                "last_objective": "Create a 50-page market report.",
+                "awaiting_user_input": True,
+                "pending_user_input_kind": "subplan_approval",
+                "approval_pending_scope": "long_document_plan",
+                "pending_user_question": "Approve the section plan.",
+                "plan_approval_status": "approved",
+                "long_document_plan_waiting_for_approval": True,
+                "long_document_plan_status": "pending",
+            }
+            state = runtime.build_initial_state("Change the section flow to emphasize market sizing first.", channel_session={"state": prior_state})
+
+        self.assertTrue(state["plan_ready"])
+        self.assertEqual(state["long_document_plan_status"], "revision_requested")
+        self.assertTrue(state["long_document_replan_requested"])
+        self.assertIn("market sizing first", state["long_document_plan_feedback"].lower())
 
     def test_build_initial_state_preserves_session_id_for_pending_skill_approval(self):
         with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
@@ -940,6 +1264,7 @@ class RuntimeRoutingTests(unittest.TestCase):
     def test_build_initial_state_restores_scope_only_pending_deep_research_confirmation(self):
         with (
             patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("kendr.runtime.append_privileged_audit_event"),
             patch("tasks.a2a_protocol.upsert_agent_card"),
             patch("tasks.a2a_protocol.insert_message"),
             patch("tasks.a2a_protocol.upsert_task"),

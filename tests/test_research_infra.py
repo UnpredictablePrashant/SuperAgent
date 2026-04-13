@@ -5,10 +5,69 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from tasks.research_infra import parse_document, parse_documents
+from tasks.research_infra import fetch_search_results, parse_document, parse_documents
 
 
 class ResearchInfraTests(unittest.TestCase):
+    def test_fetch_search_results_falls_back_to_duckduckgo_and_fetches_evidence(self):
+        with (
+            patch("tasks.research_infra.serp_search", side_effect=RuntimeError("no serp")),
+            patch(
+                "tasks.research_infra.duckduckgo_html_search",
+                return_value={
+                    "results": [
+                        {
+                            "title": "Fallback result",
+                            "url": "https://example.com/a",
+                            "snippet": "snippet a",
+                            "source": "DuckDuckGo",
+                            "date": "",
+                        }
+                    ]
+                },
+            ),
+            patch(
+                "tasks.research_infra.fetch_url_content",
+                return_value={"content_type": "text/html", "text": "evidence body"},
+            ),
+        ):
+            result = fetch_search_results("fallback query", num=3, fetch_pages=1)
+
+        self.assertEqual(result["provider"], "duckduckgo_html")
+        self.assertEqual(result["providers_tried"], ["serpapi", "duckduckgo_html"])
+        self.assertEqual(result["results"][0]["url"], "https://example.com/a")
+        self.assertEqual(result["viewed_pages"][0]["url"], "https://example.com/a")
+        self.assertIn("evidence body", result["viewed_pages"][0]["excerpt"])
+
+    def test_fetch_search_results_falls_back_to_browser_when_free_search_fails(self):
+        with (
+            patch("tasks.research_infra.serp_search", side_effect=RuntimeError("no serp")),
+            patch("tasks.research_infra.duckduckgo_html_search", side_effect=RuntimeError("no ddg")),
+            patch(
+                "tasks.research_infra.browser_search",
+                return_value={
+                    "results": [
+                        {
+                            "title": "Browser result",
+                            "url": "https://example.com/b",
+                            "snippet": "snippet b",
+                            "source": "DuckDuckGo browser",
+                            "date": "",
+                        }
+                    ]
+                },
+            ),
+            patch(
+                "tasks.research_infra.fetch_url_content",
+                return_value={"content_type": "text/html", "text": "browser evidence"},
+            ),
+        ):
+            result = fetch_search_results("browser fallback", num=2, fetch_pages=1)
+
+        self.assertEqual(result["provider"], "playwright_browser")
+        self.assertEqual(result["providers_tried"], ["serpapi", "duckduckgo_html", "playwright_browser"])
+        self.assertEqual(result["results"][0]["url"], "https://example.com/b")
+
     def test_parse_document_uses_excel_pdf_fallback_when_primary_read_fails(self):
         with TemporaryDirectory() as tmp:
             excel_path = Path(tmp) / "model.xlsx"

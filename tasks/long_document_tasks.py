@@ -23,7 +23,7 @@ from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.coding_tasks import _extract_output_text
 from tasks.file_memory import bootstrap_file_memory, update_planning_file
 from tasks.planning_tasks import build_plan_approval_prompt, normalize_plan_data, plan_as_markdown
-from tasks.research_infra import fetch_url_content, llm_json, llm_text, serp_search
+from tasks.research_infra import fetch_search_results, fetch_url_content, llm_json, llm_text
 from tasks.utils import OUTPUT_DIR, log_task_update, model_selection_for_agent, write_text_file, resolve_output_path
 
 
@@ -951,6 +951,7 @@ def _collect_user_url_evidence(objective: str, state: dict, *, max_items: int = 
         metadata={
             "phase": "provided_urls",
             "urls": _trace_url_list(ok_urls or urls[:max_items]),
+            "viewed_urls": _trace_url_list(ok_urls),
             "failed_urls": _trace_url_list(failed_urls),
             "parallelism": fetch_parallelism,
         },
@@ -1012,22 +1013,30 @@ Write a structured evidence memo that includes:
 
 
 def _collect_google_search_evidence(query: str, *, num: int = 10) -> dict:
-    try:
-        payload = serp_search(query, num=num)
-    except Exception as exc:
-        return {"results": [], "error": str(exc)}
-    results = []
-    for item in payload.get("organic_results", [])[:num]:
-        results.append(
-            {
-                "title": str(item.get("title", "")).strip(),
-                "url": str(item.get("link", "")).strip(),
-                "snippet": str(item.get("snippet", "")).strip(),
-                "source": str(item.get("source", "")).strip(),
-                "date": str(item.get("date", "")).strip(),
-            }
-        )
-    return {"results": results, "raw": payload, "error": ""}
+    payload = fetch_search_results(query, num=num, fetch_pages=min(max(num, 1), 3))
+    results = list(payload.get("results", []) or [])
+    viewed_pages = list(payload.get("viewed_pages", []) or [])
+    viewed_map = {
+        str(item.get("url", "")).strip(): item
+        for item in viewed_pages
+        if str(item.get("url", "")).strip()
+    }
+    for item in results:
+        url = str(item.get("url", "")).strip()
+        if url and url in viewed_map:
+            evidence = viewed_map[url]
+            item["evidence_excerpt"] = str(evidence.get("excerpt", "")).strip()
+            item["content_type"] = str(evidence.get("content_type", "")).strip()
+            if evidence.get("error"):
+                item["view_error"] = str(evidence.get("error", "")).strip()
+    return {
+        "results": results,
+        "viewed_pages": viewed_pages,
+        "provider": str(payload.get("provider", "")).strip(),
+        "providers_tried": list(payload.get("providers_tried", []) or []),
+        "raw": payload.get("raw", {}),
+        "error": str(payload.get("error", "")).strip(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1310,17 +1319,20 @@ def _sources_from_search_results(results: list[dict], *, prefix: str = "S") -> l
 def _search_results_markdown(results: list[dict]) -> str:
     if not results:
         return "No web search results were available."
-    lines = ["Web search results (SerpAPI):"]
+    lines = ["Web search results:"]
     for item in results:
         title = str(item.get("title", "")).strip() or "Untitled"
         url = str(item.get("url", "")).strip()
         snippet = str(item.get("snippet", "")).strip()
+        evidence_excerpt = str(item.get("evidence_excerpt", "")).strip()
         line = f"- {title}"
         if snippet:
             line += f": {snippet}"
         if url:
             line += f" ({url})"
         lines.append(line)
+        if evidence_excerpt:
+            lines.append(f"  - Viewed evidence: {evidence_excerpt}")
     return "\n".join(lines)
 
 
@@ -3051,6 +3063,14 @@ def _record_section_research_package(
                 "section_index": index,
                 "section_title": section_title,
                 "search_query": search_query,
+                "search_provider": str((section_search_results or {}).get("provider", "")).strip(),
+                "search_providers_tried": list((section_search_results or {}).get("providers_tried", []) or []),
+                "candidate_urls": _trace_url_list(
+                    [str(item.get("url", "")).strip() for item in (section_search_results or {}).get("results", [])]
+                ),
+                "viewed_urls": _trace_url_list(
+                    [str(item.get("url", "")).strip() for item in (section_search_results or {}).get("viewed_pages", [])]
+                ),
                 "urls": _trace_url_list(
                     [str(item.get("url", "")).strip() for item in (section_search_results or {}).get("results", [])]
                 ),
@@ -4179,6 +4199,10 @@ def long_document_agent(state):
                     metadata={
                         "phase": "evidence_bank_search",
                         "search_query": objective,
+                        "search_provider": str((search_results or {}).get("provider", "")).strip(),
+                        "search_providers_tried": list((search_results or {}).get("providers_tried", []) or []),
+                        "candidate_urls": _trace_url_list([str(item.get("url", "")).strip() for item in (search_results or {}).get("results", [])]),
+                        "viewed_urls": _trace_url_list([str(item.get("url", "")).strip() for item in (search_results or {}).get("viewed_pages", [])]),
                         "urls": _trace_url_list([str(item.get("url", "")).strip() for item in (search_results or {}).get("results", [])]),
                     },
                     subtask="Search for shared report evidence",
@@ -4558,6 +4582,10 @@ def long_document_agent(state):
                     "section_index": index,
                     "section_title": section_title,
                     "search_query": search_query,
+                    "search_provider": str((section_search_results or {}).get("provider", "")).strip(),
+                    "search_providers_tried": list((section_search_results or {}).get("providers_tried", []) or []),
+                    "candidate_urls": _trace_url_list([str(item.get("url", "")).strip() for item in (section_search_results or {}).get("results", [])]),
+                    "viewed_urls": _trace_url_list([str(item.get("url", "")).strip() for item in (section_search_results or {}).get("viewed_pages", [])]),
                     "urls": _trace_url_list([str(item.get("url", "")).strip() for item in (section_search_results or {}).get("results", [])]),
                 },
                 subtask=f"Search for {section_title}",

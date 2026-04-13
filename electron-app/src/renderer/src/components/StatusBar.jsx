@@ -16,6 +16,8 @@ export default function StatusBar() {
 
   const { ui, gateway, pid, error } = state.backendServices
   const activeTab = state.openTabs.find(t => t.path === state.activeTabPath)
+  const activeRunId = String(state.activeRunId || '').trim()
+  const runLabel = activeRunId ? activeRunId.slice(-8) : ''
 
   const handleServiceClick = async () => {
     if (ui === 'running' && gateway === 'running') return
@@ -53,6 +55,17 @@ export default function StatusBar() {
 
       {/* Center – streaming indicator */}
       <div className="status-bar-center">
+        {activeRunId && (
+          <button
+            className="status-item status-bg-run"
+            title={`Background run active (${activeRunId}). Click to open Studio.`}
+            onClick={() => dispatch({ type: 'SET_VIEW', view: 'studio' })}
+          >
+            <span className="pulse-dot" />
+            <span>Background run</span>
+            <span className="status-bg-run-id">#{runLabel}</span>
+          </button>
+        )}
         {state.streaming && (
           <span className="status-item status-streaming">
             <span className="pulse-dot" /> Agent running…

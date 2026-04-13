@@ -190,10 +190,13 @@ def classify_command(command: str) -> dict:
 def extract_path_references(command: str) -> list[str]:
     text = str(command or "")
     refs: set[str] = set()
-    unix_matches = re.findall(r"(?:^|\s)(/[A-Za-z0-9._\-/]+)", text)
+    unix_matches = re.findall(r"(?:^|\s)(/[\w.\-]+(?:/[\w.\-]+)+)", text)
     win_matches = re.findall(r"([A-Za-z]:\\[^\s\"']+)", text)
     for item in unix_matches + win_matches:
-        refs.add(item.strip())
+        normalized = item.strip()
+        if normalized.lower() in {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin"}:
+            continue
+        refs.add(normalized)
     return sorted(refs)
 
 
@@ -226,16 +229,23 @@ def ensure_command_allowed(command: str, working_directory: str, policy: dict) -
     auto_approve = policy.get("auto_approve", False)
 
     if policy.get("require_approvals", True):
-        if auto_approve:
-            if not policy.get("approval_note", ""):
-                raise PermissionError("Shell automation mode active but approval_note is missing.")
-        else:
-            if not policy.get("approved", False) or not policy.get("approval_note", ""):
-                raise PermissionError(
-                    "approval_required: Shell execution requires explicit approval. "
-                    "Enable Shell Automation mode in the chat header, or pass "
-                    "privileged_approved=True and a privileged_approval_note."
-                )
+        # Read-only/safe commands should not force an approval gate.
+        needs_approval = bool(
+            classification["mutating"]
+            or classification["root_requested"]
+            or classification["destructive"]
+        )
+        if needs_approval:
+            if auto_approve:
+                if not policy.get("approval_note", ""):
+                    raise PermissionError("Shell automation mode active but approval_note is missing.")
+            else:
+                if not policy.get("approved", False) or not policy.get("approval_note", ""):
+                    raise PermissionError(
+                        "approval_required: Shell execution requires explicit approval. "
+                        "Enable Shell Automation mode in the chat header, or pass "
+                        "privileged_approved=True and a privileged_approval_note."
+                    )
 
     if policy.get("read_only", False) and classification["mutating"]:
         raise PermissionError("Read-only mode is active — mutating commands are blocked.")

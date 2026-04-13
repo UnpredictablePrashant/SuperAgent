@@ -422,6 +422,27 @@ class ExtensionHostIsolationTests(unittest.TestCase):
         self.assertEqual(marketplace["sandbox_runtime"]["provider"], "bubblewrap")
         self.assertIn("install_hint", marketplace["sandbox_runtime"])
 
+    def test_marketplace_hides_unusable_or_unimplemented_catalog_skills(self):
+        def _sandbox(*, skill_type="", catalog_id=""):
+            if catalog_id == "shell-command":
+                return {"mode": "blocked"}
+            return {"mode": "process_isolated_only"}
+
+        with patch("kendr.skill_manager.list_user_skills", return_value=[]):
+            with patch("kendr.skill_manager.extension_sandbox.describe_skill_sandbox", side_effect=_sandbox):
+                marketplace = get_marketplace()
+
+        ids = {item["id"] for item in marketplace["catalog"]}
+        self.assertIn("web-search", ids)
+        self.assertIn("pdf-reader", ids)
+        self.assertIn("api-caller", ids)
+        self.assertNotIn("shell-command", ids)
+        self.assertNotIn("spreadsheet", ids)
+        self.assertNotIn("image-analysis", ids)
+        self.assertNotIn("data-analysis", ids)
+        self.assertNotIn("doc-writer", ids)
+        self.assertNotIn("image-gen", ids)
+
     def test_marketplace_uses_catalog_permissions_for_installed_core_skill(self):
         stale_installed = {
             "skill_id": "installed-web-search",

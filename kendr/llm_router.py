@@ -179,13 +179,26 @@ _PROVIDER_API_KEY_ENV: dict[str, str] = {
 
 # Known context-window sizes (tokens) per model name substring
 _CONTEXT_WINDOWS: dict[str, int] = {
+    "gpt-5.4": 400000,
+    "gpt-5.3": 400000,
+    "gpt-5.2": 400000,
+    "gpt-5.1": 400000,
+    "gpt-5-mini": 400000,
+    "gpt-5-nano": 400000,
+    "gpt-5": 400000,
+    "gpt-4.1": 1047576,
     "o1": 200000, "o3": 200000,
+    "o4-mini": 200000,
     "gpt-4o": 128000,
     "gpt-4-turbo": 128000,
     "gpt-4": 8192,
     "gpt-3.5": 16385,
     "claude": 200000,
+    "claude-sonnet-4": 200000,
+    "claude-opus-4": 200000,
     "gemini-2.0-flash": 1048576,
+    "gemini-2.5-pro": 1048576,
+    "gemini-2.5-flash": 1048576,
     "gemini-1.5-pro": 2097152,
     "gemini-1.5-flash": 1048576,
     "gemini": 1048576,
@@ -223,6 +236,14 @@ def get_model_capabilities(model: str) -> dict[str, bool]:
         if needle in name:
             return {**default, **capabilities}
     return default
+
+
+def is_agent_capable_model(model: str, provider: str = "") -> bool:
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider == PROVIDER_OLLAMA:
+        return False
+    capabilities = get_model_capabilities(model)
+    return bool(capabilities.get("tool_calling"))
 
 
 # ── provider detection ────────────────────────────────────────────────────────
@@ -439,6 +460,7 @@ def provider_status(provider: str) -> dict:
     if provider == PROVIDER_OLLAMA:
         running = is_ollama_running()
         models = list_ollama_models() if running else []
+        selectable = [m.get("name", "") for m in models if str(m.get("name", "")).strip()]
         return {
             "provider": provider,
             "ready": running,
@@ -446,7 +468,16 @@ def provider_status(provider: str) -> dict:
             "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             "model": model,
             "local_models": [m.get("name", "") for m in models],
-            "selectable_models": [m.get("name", "") for m in models if str(m.get("name", "")).strip()],
+            "selectable_models": selectable,
+            "selectable_model_details": [
+                {
+                    "name": name,
+                    "capabilities": get_model_capabilities(name),
+                    "agent_capable": False,
+                }
+                for name in selectable
+            ],
+            "agent_capable": False,
             "note": "Running" if running else "Not running — start with: ollama serve",
         }
 
@@ -475,7 +506,16 @@ def provider_status(provider: str) -> dict:
         "base_url": base_url,
         "model": model,
         "model_capabilities": get_model_capabilities(model),
+        "agent_capable": is_agent_capable_model(model, provider),
         "selectable_models": selectable,
+        "selectable_model_details": [
+            {
+                "name": item,
+                "capabilities": get_model_capabilities(item),
+                "agent_capable": is_agent_capable_model(item, provider),
+            }
+            for item in selectable
+        ],
         "api_key_env": api_key_env,
         "model_badges": _model_badges_for_provider(provider, selectable) if has_key else {},
         "model_fetch_error": remote_error,

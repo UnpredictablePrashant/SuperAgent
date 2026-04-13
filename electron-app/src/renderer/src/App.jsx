@@ -10,6 +10,7 @@ import ProjectWorkspace from './panels/ProjectWorkspace'
 import HomePanel from './panels/HomePanel'
 import BuildHub from './panels/BuildHub'
 import IntegrationsHub from './panels/IntegrationsHub'
+import MachineHub from './panels/MachineHub'
 import MemoryHub from './panels/MemoryHub'
 import SettingsHub from './panels/SettingsHub'
 
@@ -17,6 +18,7 @@ const PRIMARY_NAV = [
   { id: 'home', label: 'Home' },
   { id: 'studio', label: 'Studio' },
   { id: 'build', label: 'Build' },
+  { id: 'machine', label: 'Machine' },
   { id: 'memory', label: 'Memory' },
   { id: 'integrations', label: 'Integrations' },
   { id: 'runs', label: 'Runs' },
@@ -86,6 +88,8 @@ function RenderActiveView() {
       return <StudioLayout />
     case 'build':
       return <BuildHub />
+    case 'machine':
+      return <MachineHub />
     case 'memory':
       return <MemoryHub />
     case 'integrations':

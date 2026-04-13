@@ -6,6 +6,7 @@ from pathlib import Path
 from tasks.privileged_control import (
     build_privileged_policy,
     ensure_command_allowed,
+    extract_path_references,
     path_allowed,
 )
 
@@ -60,6 +61,23 @@ class PrivilegedControlTests(unittest.TestCase):
             }
             policy = build_privileged_policy(state)
             ensure_command_allowed("ls -la", tmp, policy)
+
+    def test_allows_safe_command_without_approval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = {
+                "working_directory": tmp,
+                "privileged_mode": True,
+                "privileged_require_approvals": True,
+                "privileged_approved": False,
+                "privileged_approval_note": "",
+                "privileged_allowed_paths": [tmp],
+            }
+            policy = build_privileged_policy(state)
+            ensure_command_allowed("ls -la", tmp, policy)
+
+    def test_extract_path_references_ignores_switches_and_dev_null(self):
+        refs = extract_path_references('findstr /I "nginx" >nul 2>&1 && echo ok && cat /dev/null')
+        self.assertEqual(refs, [])
 
 
 if __name__ == "__main__":

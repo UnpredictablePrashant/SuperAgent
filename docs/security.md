@@ -76,6 +76,19 @@ Optional local tooling for deeper authorized assessments:
 - `Playwright`
 - `NVD_API_KEY` for higher-rate CVE lookup
 
+For streamlined local setup in this repository:
+
+```bash
+./scripts/setup-security-tools.sh --auto-install
+./scripts/preflight-security-tools.sh
+```
+
+Default scan settings live in `config/security-tools.env`, and an authorized scan can be started with:
+
+```bash
+./scripts/scan-website.sh https://example.com
+```
+
 ## Privileged Execution Controls
 
 The runtime includes privileged-mode guardrails for sensitive local automation.
