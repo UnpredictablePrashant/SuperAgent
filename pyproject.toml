@@ -44,7 +44,7 @@ dependencies = [
   # Environment and config
   "python-dotenv>=1.0",
   # Database persistence
-  "sqlalchemy>=2.0",
+  "sqlalchemy>=2.0.49",
   # Vector search (default ChromaDB, no server required)
   "chromadb>=0.5",
   # MCP protocol
