@@ -93,7 +93,7 @@ full = [
 
 # Development and testing
 dev = [
-  "pytest>=8,<9",
+  "pytest>=9.0.3,<10",
   "pytest-asyncio>=0.23",
   "ruff>=0.4",
 ]
