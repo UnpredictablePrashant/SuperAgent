@@ -8,6 +8,16 @@ This guide covers local setup, environment configuration, Docker services, and v
 - network access for configured APIs
 - optional Docker for Qdrant and MCP services
 
+## Desktop Installers
+
+If you want the packaged desktop app instead of the editable Python runtime, download a release artifact:
+
+- Windows: `Kendr Setup <version>.exe`
+- macOS: `Kendr-<version>-mac-*.dmg`
+- Linux: `Kendr-<version>.AppImage` or `kendr-desktop_<version>_amd64.deb`
+
+These installers bundle the Electron shell and the Kendr backend together. End users do not need a separate Python install for the desktop app.
+
 ## Environment Baseline
 
 Start from `.env.example`.
@@ -77,6 +87,27 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_choco.ps1
 python3 -m pip install -e ".[dev]"
 python3 scripts/bootstrap_local_state.py
 ```
+
+## Build Desktop Installers From Source
+
+Requirements for release builders:
+
+- Node.js 18 or newer
+- Python 3.10 or newer
+
+Build commands:
+
+```bash
+./scripts/build-release.sh
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
+```
+
+Artifacts are written to `electron-app/dist/`.
 
 ## Setup Commands
 

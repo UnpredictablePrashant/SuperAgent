@@ -51,12 +51,19 @@ info "Checking prerequisites…"
 
 command -v node  >/dev/null 2>&1 || die "Node.js is required. Install from https://nodejs.org"
 command -v npm   >/dev/null 2>&1 || die "npm is required. Install from https://nodejs.org"
+command -v python3 >/dev/null 2>&1 || die "Python 3.10+ is required to build the bundled backend."
 
 NODE_VER=$(node --version | sed 's/v//')
 NODE_MAJOR=$(echo "$NODE_VER" | cut -d. -f1)
 [[ "$NODE_MAJOR" -ge 18 ]] || die "Node.js 18+ required. Found: v$NODE_VER"
+PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
+PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
+if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 10 ]]; }; then
+  die "Python 3.10+ required. Found: $PY_VER"
+fi
 
-ok "Node $(node --version), npm $(npm --version)"
+ok "Node $(node --version), npm $(npm --version), Python $PY_VER"
 
 # ── 2. Ensure app icons exist ────────────────────────────────────────────────
 info "Checking app icons…"
@@ -75,22 +82,29 @@ if [[ ${#MISSING_ICONS[@]} -gt 0 ]]; then
   echo ""
 fi
 
-# ── 3. Install Node dependencies ─────────────────────────────────────────────
+# ── 3. Install Python release-build dependencies ─────────────────────────────
+info "Installing Python packaging dependencies…"
+cd "$ROOT_DIR"
+python3 -m pip install --quiet --upgrade pip
+python3 -m pip install --quiet -e ".[bundle]"
+ok "Python bundling dependencies installed"
+
+# ── 4. Install Node dependencies ─────────────────────────────────────────────
 info "Installing Node dependencies…"
 cd "$ELECTRON_DIR"
-npm install --silent
+npm ci --silent
 ok "Node dependencies installed"
 
 # Rebuild native modules for the target Electron version
 info "Rebuilding native modules (node-pty)…"
 npm run rebuild 2>&1 | tail -3 || warn "Rebuild had warnings (may be OK)"
 
-# ── 4. Build Electron (Vite transpile) ───────────────────────────────────────
+# ── 5. Build Electron (Vite transpile) ───────────────────────────────────────
 info "Transpiling with electron-vite…"
 npm run build
 ok "Electron build complete"
 
-# ── 5. Code signing / notarization env (macOS) ───────────────────────────────
+# ── 6. Code signing / notarization env (macOS) ───────────────────────────────
 if [[ "$NO_SIGN" -eq 0 ]] && [[ "$(uname)" == "Darwin" ]]; then
   if [[ -z "${CSC_LINK:-}" ]]; then
     warn "CSC_LINK not set — macOS build will be unsigned."
@@ -102,12 +116,16 @@ if [[ "$NO_SIGN" -eq 0 ]] && [[ "$(uname)" == "Darwin" ]]; then
   fi
 fi
 
-# ── 6. Package with electron-builder ─────────────────────────────────────────
+# ── 7. Package with electron-builder ─────────────────────────────────────────
 info "Packaging with electron-builder ${TARGET:-(current platform)}…"
-# shellcheck disable=SC2086
-npx electron-builder $TARGET
+if [[ -n "$TARGET" ]]; then
+  # shellcheck disable=SC2086
+  npm run package -- $TARGET
+else
+  npm run package
+fi
 
-# ── 7. Report output ─────────────────────────────────────────────────────────
+# ── 8. Report output ─────────────────────────────────────────────────────────
 echo ""
 ok "${BOLD}Build complete!${RESET}  Artifacts in ${TEAL}electron-app/dist/${RESET}"
 echo ""

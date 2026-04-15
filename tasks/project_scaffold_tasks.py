@@ -8,6 +8,7 @@ import json
 import shutil
 from pathlib import Path
 
+from kendr.path_utils import application_root
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.privileged_control import (
     append_privileged_audit_event,
@@ -225,7 +226,7 @@ def _write_if_empty(path: Path, content: str) -> bool:
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return application_root()
 
 
 def _load_stack_template(stack_name: str) -> dict | None:

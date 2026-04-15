@@ -31,7 +31,7 @@ from kendr.chat_context import (
     normalize_chat_messages as _normalize_chat_messages,
     summary_file_path as _chat_summary_file_path,
 )
-from kendr.path_utils import normalize_host_path_str
+from kendr.path_utils import bundled_resource_path, normalize_host_path_str
 
 from tasks.setup_config_store import (
     apply_setup_env_defaults,
@@ -12438,8 +12438,8 @@ class KendrUIHandler(BaseHTTPRequestHandler):
         self._send(status, "text/html; charset=utf-8", content.encode("utf-8"), cors=False)
 
     def _handle_docs(self) -> None:
-        import re, html as _html_mod, pathlib
-        docs_path = pathlib.Path(__file__).parent.parent / "docs" / "cli.md"
+        import re, html as _html_mod
+        docs_path = bundled_resource_path("docs", "cli.md")
         if not docs_path.exists():
             self._html(404, "<html><body><h1>docs/cli.md not found</h1></body></html>")
             return

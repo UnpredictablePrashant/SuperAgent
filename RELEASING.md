@@ -24,6 +24,7 @@ If Docker is not available locally, confirm the CI run completed successfully be
 Minimum release bar:
 
 - package builds successfully
+- desktop installers start with the bundled backend on Windows, macOS, and Linux
 - `compile`, `unit`, `smoke`, and `docs` pass
 - Docker Compose config validation passes
 - release docs links resolve
@@ -65,10 +66,12 @@ Prefer a few strong examples over long feature inventories.
 - commit the release notes or release-related doc updates
 - create and push a tag in the form `vX.Y.Z`
 - confirm the GitHub release workflow uploaded `dist/*`
+- confirm each desktop artifact includes the bundled backend, not only the Electron shell
 
 ## 6. Post-Release Checks
 
 - install from the published artifact in a clean environment when practical
+- verify the desktop app launches without a preinstalled Python runtime
 - sanity check `kendr --help`
 - sanity check `kendr setup status`
 - sanity check one primary workflow command from [docs/core_workflows.md](docs/core_workflows.md)

@@ -14,10 +14,20 @@ A VS Code–inspired Electron app for the Kendr AI Agent Orchestration platform.
 - **Settings** — Backend URL, Python path, editor font, Git config, GitHub PAT
 - **Command Palette** — `Ctrl+Shift+P` for keyboard-driven commands
 
-## Prerequisites
+## End-User Install
+
+Published desktop installers are self-contained:
+
+- Windows: `Kendr Setup <version>.exe`
+- macOS: `Kendr-<version>-mac-*.dmg`
+- Linux: `Kendr-<version>.AppImage` or `kendr-desktop_<version>_amd64.deb`
+
+They bundle the Electron UI and the Kendr backend together, so users do not need to install Python separately.
+
+## Development Prerequisites
 
 1. **Node.js 18+** and **npm**
-2. **Python 3.10+** with the Kendr backend installed (the parent project)
+2. **Python 3.10+** with the parent Kendr project installed
 3. Optional: **Ollama** for local models
 
 ## Setup
@@ -44,9 +54,20 @@ npm run dev
 ## Production build
 
 ```bash
+python -m pip install -e ".[bundle]"
 npm run package
 # Output goes to: dist/
 ```
+
+Per-platform packaging shortcuts:
+
+```bash
+npm run package:win
+npm run package:mac
+npm run package:linux
+```
+
+The packaging step builds a standalone backend bundle first, then embeds it into the Electron installer.
 
 ## Keyboard Shortcuts
 
@@ -65,6 +86,6 @@ Edit via **Settings panel** (gear icon in Activity Bar) or Command Palette → `
 
 Key settings:
 - **Backend URL**: default `http://127.0.0.1:2151`
-- **Python Path**: path to Python interpreter for auto-starting the backend
+- **Python Path**: only used in development or when falling back to source mode
 - **Project Root**: default workspace folder shown in File Explorer
 - **Auto-start backend**: start Kendr Python server on app launch

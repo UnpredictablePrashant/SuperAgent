@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from kendr.path_utils import application_root
 from kendr.orchestration import MessageBus
 
 _STACK_ALIASES: dict[str, str] = {
@@ -128,7 +129,7 @@ def _copy_template_dir(template_dir: Path, project_root: Path) -> list[str]:
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return application_root()
 
 
 class ProjectGenerationOrchestrator:

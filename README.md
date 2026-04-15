@@ -32,6 +32,19 @@ Kendr is a Python runtime that combines specialized AI agents, a web-based chat 
 
 ## Install
 
+### Desktop installers
+
+If you want a ready-to-install desktop app, use the platform artifacts published on the
+[GitHub Releases](https://github.com/UnpredictablePrashant/Kendr/releases) page:
+
+- **Windows**: `Kendr Setup <version>.exe`
+- **macOS**: `Kendr-<version>-mac-*.dmg`
+- **Linux**: `Kendr-<version>.AppImage` or `kendr-desktop_<version>_amd64.deb`
+
+These desktop builds bundle the Kendr backend, so users do **not** need to preinstall Python just to launch the app.
+
+---
+
 ### Requirements
 
 - **Python 3.10 or newer** — [python.org/downloads](https://python.org/downloads)
@@ -110,6 +123,19 @@ kendr --help
 ```
 
 > **Note:** Running `kendr ui` from a pip install requires the repo to be present for the HTML assets. Clone + install is recommended for the full experience.
+
+---
+
+### Build desktop installers from source
+
+Release builders need **Node.js 18+** and **Python 3.10+**. Then run:
+
+```bash
+./scripts/build-release.sh        # macOS / Linux
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1   # Windows
+```
+
+The build output lands in `electron-app/dist/`.
 
 ---
 

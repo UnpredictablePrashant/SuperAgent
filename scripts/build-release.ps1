@@ -37,12 +37,22 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     Write-Err "npm is required. Install from https://nodejs.org"
 }
+if (-not (Get-Command py -ErrorAction SilentlyContinue) -and -not (Get-Command python -ErrorAction SilentlyContinue)) {
+    Write-Err "Python 3.10+ is required to build the bundled backend."
+}
 
 $nodeVer = (node --version) -replace 'v', ''
 $nodeMajor = [int]($nodeVer.Split('.')[0])
 if ($nodeMajor -lt 18) { Write-Err "Node.js 18+ required. Found: v$nodeVer" }
+$pythonCmd = if (Get-Command py -ErrorAction SilentlyContinue) { 'py' } else { 'python' }
+$pythonArgs = if ($pythonCmd -eq 'py') { @('-3') } else { @() }
+$pythonVer = & $pythonCmd @pythonArgs -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+$verParts = $pythonVer -split '\.'
+if ([int]$verParts[0] -lt 3 -or ([int]$verParts[0] -eq 3 -and [int]$verParts[1] -lt 10)) {
+    Write-Err "Python 3.10+ required. Found: $pythonVer"
+}
 
-Write-Ok "Node $(node --version), npm $(npm --version)"
+Write-Ok "Node $(node --version), npm $(npm --version), Python $pythonVer"
 
 # ── 2. Icon check ────────────────────────────────────────────────────────────
 Write-Info "Checking app icons…"
@@ -60,10 +70,18 @@ if ($missingIcons.Count -gt 0) {
     Write-Host ""
 }
 
-# ── 3. Node dependencies ──────────────────────────────────────────────────────
+# ── 3. Python packaging dependencies ─────────────────────────────────────────
+Write-Info "Installing Python packaging dependencies…"
+Push-Location $RootDir
+& $pythonCmd @pythonArgs -m pip install --quiet --upgrade pip
+& $pythonCmd @pythonArgs -m pip install --quiet -e ".[bundle]"
+Write-Ok "Python bundling dependencies installed"
+Pop-Location
+
+# ── 4. Node dependencies ──────────────────────────────────────────────────────
 Write-Info "Installing Node dependencies…"
 Push-Location $ElectronDir
-npm install --silent
+npm ci --silent
 Write-Ok "Node dependencies installed"
 
 # Rebuild native modules (node-pty)
@@ -71,12 +89,12 @@ Write-Info "Rebuilding native modules (node-pty)…"
 try { npm run rebuild 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "    $_" } }
 catch { Write-Warn "Rebuild had warnings (may be OK)" }
 
-# ── 4. Electron-vite build ────────────────────────────────────────────────────
+# ── 5. Electron-vite build ────────────────────────────────────────────────────
 Write-Info "Transpiling with electron-vite…"
 npm run build
 Write-Ok "Electron build complete"
 
-# ── 5. Code-signing env ───────────────────────────────────────────────────────
+# ── 6. Code-signing env ───────────────────────────────────────────────────────
 if (-not $SkipSign) {
     if (-not $env:CSC_LINK) {
         Write-Warn "CSC_LINK not set — Windows build will be unsigned."
@@ -84,18 +102,16 @@ if (-not $SkipSign) {
     }
 }
 
-# ── 6. electron-builder ───────────────────────────────────────────────────────
-$builderArgs = switch ($Target) {
-    'win'   { '--win' }
-    'mac'   { '--mac' }
-    'linux' { '--linux' }
-    'all'   { '--win --linux' }  # Mac requires a macOS host
+# ── 7. electron-builder ───────────────────────────────────────────────────────
+Write-Info "Packaging with electron-builder ($Target)…"
+switch ($Target) {
+    'win'   { npm run package:win; break }
+    'mac'   { npm run package:mac; break }
+    'linux' { npm run package:linux; break }
+    'all'   { npm run package -- --win --linux; break }  # mac still requires a macOS host
 }
 
-Write-Info "Packaging with electron-builder ($Target)…"
-Invoke-Expression "npx electron-builder $builderArgs"
-
-# ── 7. Report ─────────────────────────────────────────────────────────────────
+# ── 8. Report ─────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Ok "Build complete!  Artifacts in electron-app\dist\"
 Write-Host ""

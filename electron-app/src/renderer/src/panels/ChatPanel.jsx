@@ -1383,11 +1383,10 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     { id: 'agent',    label: '✨ Agent' },
     { id: 'research', label: '🔬 Deep Research' },
   ]
-  const showLandingLayout = minimalStudio && !hasMessages && chat.mode !== 'research'
-  const showResearchIdleLayout = minimalStudio && !hasMessages && chat.mode === 'research'
+  const showLandingLayout = minimalStudio && !hasMessages
 
   return (
-    <div className={`kc-panel${fullWidth ? ' kc-panel--full' : ''}${showLandingLayout ? ' kc-panel--landing' : ''}${showResearchIdleLayout ? ' kc-panel--research-idle' : ''}`}>
+    <div className={`kc-panel${fullWidth ? ' kc-panel--full' : ''}${showLandingLayout ? ' kc-panel--landing' : ''}${chat.mode === 'research' ? ' kc-panel--research-active' : ''}`}>
       {/* ── Header ── */}
       {!hideHeader && <div className="kc-header">
         <div className="kc-logo">K<span>endr</span></div>
@@ -1431,32 +1430,33 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
         </div>
       )}
 
-      {/* ── Deep Research Panel ── */}
-      {chat.mode === 'research' && (
-        <DeepResearchPanel dr={dr} updateDr={updateDr} />
-      )}
-
       {minimalStudio && hasMessages && studioAccessory && (
         <div className="kc-compact-toolbar">
           {studioAccessory}
         </div>
       )}
 
-      {/* ── Messages ── */}
-      <div className="kc-messages">
-        {chat.messages.length === 0 && (
-          <>
-            {minimalStudio && studioAccessory && <div className="kc-landing-accessory">{studioAccessory}</div>}
-            <WelcomeScreen minimal={minimalStudio} onSuggest={s => { setInput(s); inputRef.current?.focus() }} />
-          </>
-        )}
+      <div className={`kc-conversation-shell${chat.mode === 'research' ? ' kc-conversation-shell--research' : ''}`}>
+        {/* ── Messages ── */}
+        <div className="kc-messages">
+          {chat.messages.length === 0 && (
+            <>
+              {minimalStudio && studioAccessory && <div className="kc-landing-accessory">{studioAccessory}</div>}
+              <WelcomeScreen minimal={minimalStudio} onSuggest={s => { setInput(s); inputRef.current?.focus() }} />
+            </>
+          )}
 
-        {chat.messages.map(msg =>
-          msg.role === 'user'
-            ? <UserMessage key={msg.id} msg={msg} />
-            : <AssistantMessage key={msg.id} msg={msg} onQuickReply={(reply) => send(reply, true)} onSendSuggestion={(reply) => send(reply, true)} onOpenArtifact={openArtifact} onReviewArtifact={reviewArtifact} />
+          {chat.messages.map(msg =>
+            msg.role === 'user'
+              ? <UserMessage key={msg.id} msg={msg} />
+              : <AssistantMessage key={msg.id} msg={msg} onQuickReply={(reply) => send(reply, true)} onSendSuggestion={(reply) => send(reply, true)} onOpenArtifact={openArtifact} onReviewArtifact={reviewArtifact} />
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {chat.mode === 'research' && (
+          <DeepResearchPanel dr={dr} updateDr={updateDr} collapsed={dr.collapsed} />
         )}
-        <div ref={messagesEndRef} />
       </div>
 
       <GitDiffPreview
@@ -1704,7 +1704,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
 }
 
 // ─── Deep Research Panel ──────────────────────────────────────────────────────
-function DeepResearchPanel({ dr, updateDr }) {
+function DeepResearchPanel({ dr, updateDr, collapsed = false }) {
   const api = window.kendrAPI
 
   const toggleFormat = (fmt) => {
@@ -1729,7 +1729,7 @@ function DeepResearchPanel({ dr, updateDr }) {
   const removeLocalPath = (p) => updateDr({ localPaths: dr.localPaths.filter(x => x !== p) })
 
   return (
-    <div className="dr-panel">
+    <div className={`dr-panel${collapsed ? ' dr-panel--collapsed' : ''}`}>
       <div className="dr-panel-inner">
         <div className="dr-panel-header" onClick={() => updateDr({ collapsed: !dr.collapsed })}>
           <span className="dr-panel-title">🔬 Deep Research Settings</span>
@@ -1888,13 +1888,12 @@ function WelcomeScreen({ onSuggest, minimal = false }) {
       ]
   return (
     <div className="kc-welcome">
-      {minimal && <div className="kc-welcome-brow">Orchestration</div>}
+      {minimal && <div className="kc-welcome-brow">Orchestrate deep work.</div>}
       {!minimal && <div className="kc-welcome-logo">⚡</div>}
       <h2 className={`kc-welcome-title${minimal ? ' kc-welcome-title--hero' : ''}`}>
         {minimal ? (
           <>
-            <span>Orchestrate</span>
-            <span className="kc-welcome-title-accent"> deep work.</span>
+            <span>Kendr</span>
           </>
         ) : 'Kendr Studio'}
       </h2>

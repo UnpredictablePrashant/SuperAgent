@@ -6,9 +6,9 @@
  *   • UI       →  http://127.0.0.1:2151  (HTTP API used by the Electron renderer)
  *
  * Packaged mode (app.isPackaged === true):
- *   Python source is bundled at process.resourcesPath/kendr-backend/.
- *   A venv is created on first run at ~/.kendr/venv and reused on subsequent runs.
- *   Setup progress is pushed to the renderer via 'backend:setup-progress' events.
+ *   Prefer the standalone backend bundle at process.resourcesPath/kendr-backend/.
+ *   Fall back to packaged Python source at process.resourcesPath/kendr-backend-source/.
+ *   When the source fallback is used, a venv is created on first run at ~/.kendr/venv.
  *
  * Development mode:
  *   Falls back to system Python + gateway_server.py found by walking up dirs.
@@ -16,12 +16,13 @@
 import { spawn, execFile } from 'child_process'
 import http from 'http'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { app } from 'electron'
 import os from 'os'
 
 const UI_PORT      = 2151
 const GATEWAY_PORT = 8790
+const KENDR_HOME_DIR = join(os.homedir(), '.kendr')
 
 /** Semver stored in ~/.kendr/venv-version to detect when the backend was updated */
 const BACKEND_VERSION = (() => {
@@ -81,42 +82,61 @@ export class BackendManager {
       return { ok: true, already: true }
     }
 
-    // ── 1. Locate backend source ─────────────────────────────────────────────
-    const kendrRoot = this._findKendrRoot()
-    if (!kendrRoot) {
-      this._set({
-        gateway: 'error', ui: 'error',
-        error: 'Cannot locate gateway_server.py. Set kendrRoot in Settings.',
-      })
-      return { error: this._status.error }
+    let command
+    let args
+    let cwd
+    let launchRoot
+    let extraEnv = {}
+
+    const bundledExecutable = this._findBundledBackendExecutable()
+    if (bundledExecutable) {
+      command = bundledExecutable
+      args = []
+      cwd = dirname(bundledExecutable)
+      launchRoot = cwd
+      this._log(`[backend] bundled executable: ${bundledExecutable}`)
+    } else {
+      const kendrRoot = this._findKendrRoot()
+      if (!kendrRoot) {
+        this._set({
+          gateway: 'error', ui: 'error',
+          error: 'Cannot locate the packaged backend. Reinstall Kendr or set kendrRoot in Settings.',
+        })
+        return { error: this._status.error }
+      }
+
+      let python
+      try {
+        python = await this._resolvePython(kendrRoot)
+      } catch (err) {
+        this._set({ gateway: 'error', ui: 'error', error: err.message })
+        return { error: err.message }
+      }
+
+      const gatewayScript = join(kendrRoot, 'gateway_server.py')
+      command = python
+      args = [gatewayScript]
+      cwd = kendrRoot
+      launchRoot = kendrRoot
+      extraEnv = { PYTHONPATH: kendrRoot }
+      this._log(`[backend] python: ${python}`)
+      this._log(`[backend] script: ${gatewayScript}`)
     }
 
-    // ── 2. Resolve python executable (venv when packaged) ────────────────────
-    let python
-    try {
-      python = await this._resolvePython(kendrRoot)
-    } catch (err) {
-      this._set({ gateway: 'error', ui: 'error', error: err.message })
-      return { error: err.message }
-    }
-
-    const gatewayScript = join(kendrRoot, 'gateway_server.py')
-    this._log(`[backend] python: ${python}`)
-    this._log(`[backend] script: ${gatewayScript}`)
-    this._set({ gateway: 'starting', ui: 'starting', error: null, kendrRoot, setup: null })
+    this._set({ gateway: 'starting', ui: 'starting', error: null, kendrRoot: launchRoot, setup: null })
 
     return new Promise((resolve) => {
       try {
-        this._proc = spawn(python, [gatewayScript], {
-          cwd: kendrRoot,
+        this._proc = spawn(command, args, {
+          cwd,
           env: {
             ...process.env,
+            ...this._runtimeEnv(),
             KENDR_UI_ENABLED:  '1',
             GATEWAY_PORT:      String(GATEWAY_PORT),
             KENDR_UI_PORT:     String(UI_PORT),
             PYTHONUNBUFFERED:  '1',
-            // Ensure the bundled source is importable when running from venv
-            PYTHONPATH: kendrRoot,
+            ...extraEnv,
             ...this._providerEnv(),
           },
           stdio:       ['ignore', 'pipe', 'pipe'],
@@ -325,9 +345,9 @@ export class BackendManager {
     const saved = this.store.get('kendrRoot')
     if (saved && existsSync(join(saved, 'gateway_server.py'))) return saved
 
-    // 2. Packaged app — bundled source in resources
+    // 2. Packaged app — bundled source fallback in resources
     if (app.isPackaged) {
-      const bundled = join(process.resourcesPath, 'kendr-backend')
+      const bundled = join(process.resourcesPath, 'kendr-backend-source')
       if (existsSync(join(bundled, 'gateway_server.py'))) {
         this.store.set('kendrRoot', bundled)
         return bundled
@@ -354,6 +374,23 @@ export class BackendManager {
       }
     }
     return null
+  }
+
+  _findBundledBackendExecutable() {
+    if (!app.isPackaged) return null
+    const bundleRoot = join(process.resourcesPath, 'kendr-backend')
+    const executable = process.platform === 'win32'
+      ? join(bundleRoot, 'kendr-backend.exe')
+      : join(bundleRoot, 'kendr-backend')
+    return existsSync(executable) ? executable : null
+  }
+
+  _runtimeEnv() {
+    mkdirSync(KENDR_HOME_DIR, { recursive: true })
+    return {
+      KENDR_HOME: KENDR_HOME_DIR,
+      KENDR_DB_PATH: join(KENDR_HOME_DIR, 'agent_workflow.sqlite3'),
+    }
   }
 
   // ── Internals ───────────────────────────────────────────────────────────────

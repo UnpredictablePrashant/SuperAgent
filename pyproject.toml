@@ -73,6 +73,9 @@ browser = ["playwright>=1.44"]
 # Communication integrations
 telegram = ["telethon>=1.36"]
 
+# Desktop backend bundling
+bundle = ["pyinstaller>=6.11"]
+
 # Document export (PDF, DOCX) and flowchart PNG rendering
 # Requires Graphviz binary for PNG fallback: choco install graphviz (admin) or scoop install graphviz
 # Requires mmdc CLI for Mermaid PNG: npm install -g @mermaid-js/mermaid-cli

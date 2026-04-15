@@ -57,6 +57,7 @@ class Store {
 }
 const UI_PORT = 2151;
 const GATEWAY_PORT = 8790;
+const KENDR_HOME_DIR = path.join(os.homedir(), ".kendr");
 const BACKEND_VERSION = (() => {
   try {
     const pkgPath = new URL(require("url").pathToFileURL(__filename).href).pathname.replace(/^\/([A-Z]:)/, "$1").replace(/[\\/]out[\\/]main[\\/]backend\.js$/, "/package.json");
@@ -113,38 +114,57 @@ class BackendManager {
     if (this._status.gateway === "running" && this._status.ui === "running") {
       return { ok: true, already: true };
     }
-    const kendrRoot = this._findKendrRoot();
-    if (!kendrRoot) {
-      this._set({
-        gateway: "error",
-        ui: "error",
-        error: "Cannot locate gateway_server.py. Set kendrRoot in Settings."
-      });
-      return { error: this._status.error };
+    let command;
+    let args;
+    let cwd;
+    let launchRoot;
+    let extraEnv = {};
+    const bundledExecutable = this._findBundledBackendExecutable();
+    if (bundledExecutable) {
+      command = bundledExecutable;
+      args = [];
+      cwd = path.dirname(bundledExecutable);
+      launchRoot = cwd;
+      this._log(`[backend] bundled executable: ${bundledExecutable}`);
+    } else {
+      const kendrRoot = this._findKendrRoot();
+      if (!kendrRoot) {
+        this._set({
+          gateway: "error",
+          ui: "error",
+          error: "Cannot locate the packaged backend. Reinstall Kendr or set kendrRoot in Settings."
+        });
+        return { error: this._status.error };
+      }
+      let python;
+      try {
+        python = await this._resolvePython(kendrRoot);
+      } catch (err) {
+        this._set({ gateway: "error", ui: "error", error: err.message });
+        return { error: err.message };
+      }
+      const gatewayScript = path.join(kendrRoot, "gateway_server.py");
+      command = python;
+      args = [gatewayScript];
+      cwd = kendrRoot;
+      launchRoot = kendrRoot;
+      extraEnv = { PYTHONPATH: kendrRoot };
+      this._log(`[backend] python: ${python}`);
+      this._log(`[backend] script: ${gatewayScript}`);
     }
-    let python;
-    try {
-      python = await this._resolvePython(kendrRoot);
-    } catch (err) {
-      this._set({ gateway: "error", ui: "error", error: err.message });
-      return { error: err.message };
-    }
-    const gatewayScript = path.join(kendrRoot, "gateway_server.py");
-    this._log(`[backend] python: ${python}`);
-    this._log(`[backend] script: ${gatewayScript}`);
-    this._set({ gateway: "starting", ui: "starting", error: null, kendrRoot, setup: null });
+    this._set({ gateway: "starting", ui: "starting", error: null, kendrRoot: launchRoot, setup: null });
     return new Promise((resolve) => {
       try {
-        this._proc = child_process.spawn(python, [gatewayScript], {
-          cwd: kendrRoot,
+        this._proc = child_process.spawn(command, args, {
+          cwd,
           env: {
             ...process.env,
+            ...this._runtimeEnv(),
             KENDR_UI_ENABLED: "1",
             GATEWAY_PORT: String(GATEWAY_PORT),
             KENDR_UI_PORT: String(UI_PORT),
             PYTHONUNBUFFERED: "1",
-            // Ensure the bundled source is importable when running from venv
-            PYTHONPATH: kendrRoot,
+            ...extraEnv,
             ...this._providerEnv()
           },
           stdio: ["ignore", "pipe", "pipe"],
@@ -324,7 +344,7 @@ class BackendManager {
     const saved = this.store.get("kendrRoot");
     if (saved && fs.existsSync(path.join(saved, "gateway_server.py"))) return saved;
     if (electron.app.isPackaged) {
-      const bundled = path.join(process.resourcesPath, "kendr-backend");
+      const bundled = path.join(process.resourcesPath, "kendr-backend-source");
       if (fs.existsSync(path.join(bundled, "gateway_server.py"))) {
         this.store.set("kendrRoot", bundled);
         return bundled;
@@ -346,6 +366,19 @@ class BackendManager {
       }
     }
     return null;
+  }
+  _findBundledBackendExecutable() {
+    if (!electron.app.isPackaged) return null;
+    const bundleRoot = path.join(process.resourcesPath, "kendr-backend");
+    const executable = process.platform === "win32" ? path.join(bundleRoot, "kendr-backend.exe") : path.join(bundleRoot, "kendr-backend");
+    return fs.existsSync(executable) ? executable : null;
+  }
+  _runtimeEnv() {
+    fs.mkdirSync(KENDR_HOME_DIR, { recursive: true });
+    return {
+      KENDR_HOME: KENDR_HOME_DIR,
+      KENDR_DB_PATH: path.join(KENDR_HOME_DIR, "agent_workflow.sqlite3")
+    };
   }
   // ── Internals ───────────────────────────────────────────────────────────────
   _set(patch) {
@@ -713,7 +746,9 @@ electron.ipcMain.handle("git:status", async (_, cwd) => {
 });
 electron.ipcMain.handle("git:diff", async (_, cwd, filePath) => {
   try {
-    const out = await runGit(cwd, filePath ? `diff HEAD -- "${filePath}"` : "diff HEAD");
+    const target = String(filePath || "").trim();
+    const scopedPath = target ? (path.isAbsolute(target) ? path.relative(cwd, target) : target).replace(/\\/g, "/").replace(/"/g, '\\"') : "";
+    const out = await runGit(cwd, scopedPath ? `diff HEAD -- "${scopedPath}"` : "diff HEAD");
     return { diff: out };
   } catch (err) {
     return { error: err.message, diff: "" };

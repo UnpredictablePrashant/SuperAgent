@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-from pathlib import Path
 from typing import Any
 
 _REGISTRY: dict[str, dict[str, Any]] = {}
@@ -20,8 +19,7 @@ def _discover() -> None:
     global _LOADED
     if _LOADED:
         return
-    package_dir = str(Path(__file__).resolve().parent)
-    for finder, module_name, is_pkg in pkgutil.iter_modules([package_dir]):
+    for finder, module_name, is_pkg in pkgutil.iter_modules(__path__):
         if module_name.startswith("_"):
             continue
         try:

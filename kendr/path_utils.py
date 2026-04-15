@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"^([a-zA-Z]):[\\/](.*)$")
@@ -37,3 +38,17 @@ def normalize_host_path(path_value: str, *, base_dir: str | None = None) -> Path
 
 def normalize_host_path_str(path_value: str, *, base_dir: str | None = None) -> str:
     return str(normalize_host_path(path_value, base_dir=base_dir))
+
+
+def application_root() -> Path:
+    """Return the repo root in source mode or the unpacked bundle root when frozen."""
+    if getattr(sys, "frozen", False):
+        bundle_root = str(getattr(sys, "_MEIPASS", "")).strip()
+        if bundle_root:
+            return Path(bundle_root).resolve()
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+def bundled_resource_path(*parts: str) -> Path:
+    return application_root().joinpath(*parts)
