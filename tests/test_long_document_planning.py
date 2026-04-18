@@ -354,6 +354,9 @@ class LongDocumentPlanningTests(unittest.TestCase):
                 "estimated_sources": 50,
                 "estimated_duration_minutes": 120,
                 "requested_target_pages": 10,
+                "depth_mode": "brief",
+                "depth_label": "Focused Brief",
+                "depth_description": "Tight synthesis of the most important findings with a narrower evidence sweep.",
                 "subtopics": ["What data is captured"],
                 "date_range": "all_time",
                 "execution_budget": {"max_tokens": 0, "max_sources": 50, "max_duration_minutes": 0},
@@ -369,7 +372,7 @@ class LongDocumentPlanningTests(unittest.TestCase):
         )
 
         sections = {section["title"]: section["items"] for section in request["sections"]}
-        self.assertIn("Page target: 10.", sections["Overview"])
+        self.assertIn("Research depth: Focused Brief.", sections["Overview"])
         self.assertIn("Max sources: 50.", sections["Session Budget"])
         self.assertIn("Max tokens: not explicitly capped.", sections["Session Budget"])
         self.assertIn("query length suggests broad scope", sections["Why This Tier"][0])
@@ -414,8 +417,7 @@ class LongDocumentPlanningTests(unittest.TestCase):
             result = long_document_agent(state)
 
         sections = {section["title"]: section["items"] for section in result["approval_request"]["sections"]}
-        self.assertIn("Page target: 10.", sections["Overview"])
-        self.assertIn("Estimated pages: 10.", sections["Overview"])
+        self.assertIn("Research depth: Focused Brief.", sections["Overview"])
         self.assertIn("Max sources: 50.", sections["Session Budget"])
 
     def test_long_document_agent_local_only_skips_web_research_and_uses_local_sources(self):

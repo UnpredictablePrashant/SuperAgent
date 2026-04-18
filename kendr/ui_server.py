@@ -3616,16 +3616,16 @@ a:hover { text-decoration: underline; }
       <div class="dr-body" id="deepResearchPanelBody">
       <div class="dr-grid">
         <div class="dr-field">
-          <label for="drPages">Approx. Length</label>
+          <label for="drPages">Research Depth</label>
           <select id="drPages" class="dr-select" onchange="updateDeepResearchPanelSummary()">
-            <option value="10">~10 pages</option>
-            <option value="25" selected>~25 pages</option>
-            <option value="50">~50 pages</option>
-            <option value="100">~100 pages</option>
-            <option value="150">~150 pages</option>
-            <option value="200">~200 pages</option>
+            <option value="10">Focused Brief</option>
+            <option value="25" selected>Standard Report</option>
+            <option value="50">Comprehensive Study</option>
+            <option value="100">Exhaustive Dossier</option>
+            <option value="150">Exhaustive Dossier+</option>
+            <option value="200">Exhaustive Dossier Max</option>
           </select>
-          <div class="dr-note">This is a soft target. Final length can shift with citations, formatting, and source density.</div>
+          <div class="dr-note">This controls how broad and detailed the run should be. Final export length is determined automatically from source density, citations, and report structure.</div>
         </div>
         <div class="dr-field">
           <label for="drCitation">Citation Style</label>
@@ -4340,7 +4340,8 @@ function updateDeepResearchPanelSummary() {
   if (body) body.style.display = deepResearchPanelCollapsed ? 'none' : '';
   if (toggleBtn) toggleBtn.textContent = deepResearchPanelCollapsed ? 'Expand' : 'Collapse';
   if (!summary) return;
-  const pages = '~' + (((document.getElementById('drPages') || {}).value || '50')) + ' pages';
+  const depthModeMap = { '10': 'Focused', '25': 'Standard', '50': 'Comprehensive', '100': 'Exhaustive', '150': 'Exhaustive', '200': 'Exhaustive' };
+  const depth = depthModeMap[String(((document.getElementById('drPages') || {}).value || '50'))] || 'Standard';
   const citation = ((document.getElementById('drCitation') || {}).value || 'apa').toUpperCase();
   const maxSources = parseInt((document.getElementById('drMaxSources') || {}).value || '0', 10) || 0;
   const formatCount = _selectedDeepResearchFormats().length;
@@ -4350,7 +4351,7 @@ function updateDeepResearchPanelSummary() {
   const sourceSummary = (webEnabled ? 'Web on' : 'Local only') + ' · ' + (localCount + linkCount) + ' attached';
   const maxSummary = maxSources > 0 ? String(maxSources) : 'tier default';
   summary.innerHTML = [
-    _deepResearchSummaryPill('Scope', pages),
+    _deepResearchSummaryPill('Depth', depth),
     _deepResearchSummaryPill('Citation', citation),
     _deepResearchSummaryPill('Sources', sourceSummary),
     _deepResearchSummaryPill('Formats', formatCount + ' selected'),
@@ -5967,7 +5968,7 @@ function renderDeepResearchCard(card, runId) {
   if (kind === 'analysis' || kind === 'plan') {
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-top:12px">';
     const metrics = [
-      ['Pages', card.estimated_pages || card.section_count || '—'],
+      ['Depth', card.depth_label || '—'],
       ['Sources', card.estimated_sources || '—'],
       ['Minutes', card.estimated_duration_minutes || '—'],
       ['Style', (card.citation_style || '').toUpperCase() || 'APA']
@@ -5993,7 +5994,7 @@ function renderDeepResearchCard(card, runId) {
   } else {
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin-top:12px">';
     const metrics = [
-      ['Pages', card.pages || '—'],
+      ['Depth', card.depth_label || '—'],
       ['Words', card.words || '—'],
       ['Sources', card.sources || '—'],
       ['Citations', card.citations || '—'],
@@ -6989,6 +6990,12 @@ async function sendMessage() {
       payload.long_document_mode = true;
       payload.workflow_type = 'deep_research';
       payload.long_document_pages = parseInt((document.getElementById('drPages') || {}).value || '25', 10) || 25;
+      payload.research_depth_mode = (function(value) {
+        if (value >= 100) return 'exhaustive';
+        if (value >= 50) return 'comprehensive';
+        if (value >= 20) return 'standard';
+        return 'brief';
+      })(payload.long_document_pages);
       payload.research_output_formats = _selectedDeepResearchFormats();
       payload.research_citation_style = ((document.getElementById('drCitation') || {}).value || 'apa');
       payload.research_enable_plagiarism_check = !!((document.getElementById('drPlagiarism') || {}).checked);
@@ -14332,6 +14339,7 @@ strong { color: var(--text); }
                     "workflow_type", "deep_research_mode",
                     "execution_mode", "planner_mode",
                     "long_document_mode", "long_document_pages", "long_document_title",
+                    "research_depth_mode",
                     "research_model",
                     "research_output_formats", "research_citation_style",
                     "research_enable_plagiarism_check", "research_web_search_enabled", "research_date_range",

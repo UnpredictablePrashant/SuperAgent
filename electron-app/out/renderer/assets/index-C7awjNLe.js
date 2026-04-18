@@ -8647,12 +8647,14 @@ User request: ${text}` : text;
   const remoteSources = dr.webSearchEnabled ? dr.sources : [];
   const mergedLocalPaths = Array.from(/* @__PURE__ */ new Set([...dr.localPaths || [], ...localPaths]));
   const allSources = mergedLocalPaths.length ? Array.from(/* @__PURE__ */ new Set([...remoteSources, "local"])) : remoteSources;
+  const depthPreset = resolveDeepResearchDepthPreset(dr.depthMode, dr.pages);
   const payload = {
     ...base,
     deep_research_mode: true,
     long_document_mode: true,
     workflow_type: "deep_research",
-    long_document_pages: dr.pages,
+    long_document_pages: depthPreset.pages,
+    research_depth_mode: depthPreset.id,
     research_output_formats: dr.outputFormats,
     research_citation_style: dr.citationStyle,
     research_enable_plagiarism_check: dr.plagiarismCheck,
@@ -9373,6 +9375,7 @@ function attachmentPreviewSrc(item) {
   return rawPath;
 }
 const DR_DEFAULTS = {
+  depthMode: "standard",
   pages: 25,
   researchModel: "",
   citationStyle: "apa",
@@ -9392,6 +9395,49 @@ const DR_DEFAULTS = {
   kbTopK: 8,
   collapsed: false
 };
+const DEEP_RESEARCH_DEPTH_PRESETS = [
+  {
+    id: "brief",
+    pages: 10,
+    label: "Focused Brief",
+    summary: "Focused",
+    hint: "Fastest run for a narrower scope and the most important findings."
+  },
+  {
+    id: "standard",
+    pages: 25,
+    label: "Standard Report",
+    summary: "Standard",
+    hint: "Balanced depth for most multi-section research tasks."
+  },
+  {
+    id: "comprehensive",
+    pages: 50,
+    label: "Comprehensive Study",
+    summary: "Comprehensive",
+    hint: "Broader source sweep and deeper synthesis across sections."
+  },
+  {
+    id: "exhaustive",
+    pages: 100,
+    label: "Exhaustive Dossier",
+    summary: "Exhaustive",
+    hint: "Maximum breadth and depth; slower and more resource-intensive."
+  }
+];
+function normalizeDeepResearchDepthMode(value, pages) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (DEEP_RESEARCH_DEPTH_PRESETS.some((item) => item.id === normalized)) return normalized;
+  const numericPages = Number(pages || 0);
+  if (numericPages >= 100) return "exhaustive";
+  if (numericPages >= 50) return "comprehensive";
+  if (numericPages >= 20) return "standard";
+  return "brief";
+}
+function resolveDeepResearchDepthPreset(value, pages) {
+  const mode = normalizeDeepResearchDepthMode(value, pages);
+  return DEEP_RESEARCH_DEPTH_PRESETS.find((item) => item.id === mode) || DEEP_RESEARCH_DEPTH_PRESETS[1];
+}
 function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false, minimalStudio = false, studioAccessory = null }) {
   const { state: appState, dispatch: appDispatch, openFile, refreshModelInventory } = useApp();
   const api = window.kendrAPI;
@@ -9421,6 +9467,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false, 
   const mirroredActivityIdsRef = reactExports.useRef([]);
   const apiBase = appState.backendUrl || "http://127.0.0.1:2151";
   const updateDr = (patch) => setDr((s) => ({ ...s, ...patch }));
+  resolveDeepResearchDepthPreset(dr.depthMode, dr.pages);
   const selectedModelMeta = resolveSelectedModel(appState.selectedModel);
   const isSimpleStudioChat = studioMode && chat.mode === "chat";
   const modelInventory = appState.modelInventory;
@@ -11117,6 +11164,7 @@ function DeepResearchPanel({
 }) {
   const api = window.kendrAPI;
   const [kbSetupState, setKbSetupState] = reactExports.useState({ status: "idle", message: "" });
+  const depthPreset = resolveDeepResearchDepthPreset(dr.depthMode, dr.pages);
   const toggleFormat = (fmt) => {
     const cur = dr.outputFormats;
     const next = cur.includes(fmt) ? cur.filter((f2) => f2 !== fmt) : [...cur, fmt];
@@ -11256,11 +11304,7 @@ function DeepResearchPanel({
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-panel-header", onClick: () => updateDr({ collapsed: !dr.collapsed }), children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-panel-title", children: "🔬 Deep Research Settings" }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-summary", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "dr-sum-pill", children: [
-          "~",
-          dr.pages,
-          "p"
-        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: depthPreset.summary }),
         effectiveModel?.model && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: effectiveModel.model }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: dr.citationStyle.toUpperCase() }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: dr.outputFormats.join("·") }),
@@ -11272,14 +11316,21 @@ function DeepResearchPanel({
     !dr.collapsed && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-body", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-grid", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Approx. Length" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { className: "dr-select", value: dr.pages, onChange: (e) => updateDr({ pages: +e.target.value }), children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 10, children: "~10 pages" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 25, children: "~25 pages" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 50, children: "~50 pages" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 100, children: "~100 pages" })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Aiming near this length; citations and formatting can shift the final page count." })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Research Depth" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "select",
+            {
+              className: "dr-select",
+              value: depthPreset.id,
+              onChange: (e) => {
+                const preset = resolveDeepResearchDepthPreset(e.target.value, 0);
+                updateDr({ depthMode: preset.id, pages: preset.pages });
+              },
+              children: DEEP_RESEARCH_DEPTH_PRESETS.map((preset) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: preset.id, children: preset.label }, preset.id))
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: depthPreset.hint }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Kendr uses this as an execution-depth hint. The final exports are sized automatically from source density, citations, and structure instead of targeting an exact page count." })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Deep Research Model" }),
@@ -15316,15 +15367,15 @@ function TerminalPanel() {
       }
       try {
         const { Terminal } = await __vitePreload(async () => {
-          const { Terminal: Terminal2 } = await import("./xterm-B4ud2_HQ.js").then((n2) => n2.x);
+          const { Terminal: Terminal2 } = await import("./xterm-hpfJQVx7.js").then((n2) => n2.x);
           return { Terminal: Terminal2 };
         }, true ? [] : void 0, import.meta.url);
         const { FitAddon } = await __vitePreload(async () => {
-          const { FitAddon: FitAddon2 } = await import("./addon-fit-DRaODkma.js").then((n2) => n2.a);
+          const { FitAddon: FitAddon2 } = await import("./addon-fit-C-78uEHQ.js").then((n2) => n2.a);
           return { FitAddon: FitAddon2 };
         }, true ? [] : void 0, import.meta.url);
         const { WebLinksAddon } = await __vitePreload(async () => {
-          const { WebLinksAddon: WebLinksAddon2 } = await import("./addon-web-links-CdMeVblW.js").then((n2) => n2.a);
+          const { WebLinksAddon: WebLinksAddon2 } = await import("./addon-web-links-D6DZySQH.js").then((n2) => n2.a);
           return { WebLinksAddon: WebLinksAddon2 };
         }, true ? [] : void 0, import.meta.url);
         if (cancelled) return;

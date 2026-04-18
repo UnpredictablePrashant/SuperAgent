@@ -476,6 +476,7 @@ def _handle_long_document_subplan_gate(runtime: Any, state: dict[str, Any], cont
 def _handle_local_drive_ingestion(runtime: Any, state: dict[str, Any], context: WorkflowPolicyContext) -> dict[str, Any] | None:
     if not (
         not state.get("plan_steps")
+        and not runtime._is_long_document_request(state)
         and runtime._has_local_drive_request(state)
         and runtime._is_agent_available(state, "local_drive_agent")
         and state.get("last_agent") != "local_drive_agent"

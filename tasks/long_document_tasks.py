@@ -36,6 +36,52 @@ DEFAULT_RESEARCH_FORMATS = ["pdf", "docx", "html", "md"]
 SUPPORTED_CITATION_STYLES = {"apa", "mla", "chicago", "ieee", "vancouver", "harvard"}
 DEEP_RESEARCH_LABEL = "Deep Research"
 OPENAI_WEB_SEARCH_TOOL = os.getenv("OPENAI_WEB_SEARCH_TOOL", "web_search").strip() or "web_search"
+DEEP_RESEARCH_DEPTH_PRESETS = {
+    "brief": {
+        "pages": 10,
+        "label": "Focused Brief",
+        "summary": "Focused",
+        "description": "Tight synthesis of the most important findings with a narrower evidence sweep.",
+    },
+    "standard": {
+        "pages": 25,
+        "label": "Standard Report",
+        "summary": "Standard",
+        "description": "Balanced multi-section research with enough room for evidence, tradeoffs, and conclusions.",
+    },
+    "comprehensive": {
+        "pages": 50,
+        "label": "Comprehensive Study",
+        "summary": "Comprehensive",
+        "description": "Broader source coverage and deeper cross-section synthesis for more complex topics.",
+    },
+    "exhaustive": {
+        "pages": 100,
+        "label": "Exhaustive Dossier",
+        "summary": "Exhaustive",
+        "description": "Maximum depth and breadth for heavy research, longer runtimes, and large evidence sets.",
+    },
+}
+
+
+def _normalize_research_depth_mode(value: Any, target_pages: int) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in DEEP_RESEARCH_DEPTH_PRESETS:
+        return normalized
+    if target_pages >= 100:
+        return "exhaustive"
+    if target_pages >= 50:
+        return "comprehensive"
+    if target_pages >= 20:
+        return "standard"
+    return "brief"
+
+
+def _research_depth_config(value: Any, target_pages: int) -> dict[str, Any]:
+    mode = _normalize_research_depth_mode(value, target_pages)
+    config = dict(DEEP_RESEARCH_DEPTH_PRESETS.get(mode, DEEP_RESEARCH_DEPTH_PRESETS["standard"]))
+    config["mode"] = mode
+    return config
 
 
 def _trace_now() -> str:
@@ -134,6 +180,7 @@ AGENT_METADATA = {
             "long_document_section_references",
             "long_document_section_search",
             "long_document_section_search_results",
+            "research_depth_mode",
             "research_model",
             "research_instructions",
             "research_max_tool_calls",
@@ -720,12 +767,14 @@ def _research_depth_analysis(
     objective: str,
     *,
     target_pages: int,
+    depth_mode: str,
     requested_sources: list[str],
     date_range: str,
     max_sources: int = 0,
 ) -> dict[str, Any]:
     text = str(objective or "").strip()
     lowered = text.lower()
+    depth_config = _research_depth_config(depth_mode, target_pages)
     heuristic_tier = 2
     reason_bits: list[str] = []
 
@@ -768,6 +817,9 @@ def _research_depth_analysis(
         "reason": "; ".join(reason_bits) or "heuristic estimate",
         "estimated_sources": estimated_sources,
         "estimated_pages": estimated_pages,
+        "depth_mode": depth_config["mode"],
+        "depth_label": depth_config["label"],
+        "depth_description": depth_config["description"],
         "subtopics": subtopics[:6],
         "requires_deep_research": heuristic_tier >= 3,
         "estimated_duration_minutes": estimated_duration,
@@ -783,6 +835,9 @@ Respond with JSON only:
   "reason": "string",
   "estimated_sources": 40,
   "estimated_pages": 15,
+  "depth_mode": "standard",
+  "depth_label": "Standard Report",
+  "depth_description": "Balanced multi-section research with enough room for evidence, tradeoffs, and conclusions.",
   "subtopics": ["...", "..."],
   "requires_deep_research": true,
   "estimated_duration_minutes": 15
@@ -821,18 +876,23 @@ Heuristic estimate:
         "reason": str(data.get("reason", "")).strip() or fallback["reason"],
         "estimated_sources": estimated_sources,
         "estimated_pages": estimated_pages,
+        "depth_mode": _normalize_research_depth_mode(data.get("depth_mode"), target_pages),
+        "depth_label": str(data.get("depth_label", "")).strip() or depth_config["label"],
+        "depth_description": str(data.get("depth_description", "")).strip() or depth_config["description"],
         "subtopics": subtopics,
         "requires_deep_research": bool(data.get("requires_deep_research", tier >= 3)),
         "estimated_duration_minutes": estimated_duration,
         "budget": budget,
         "execution_budget": execution_budget,
         "requested_target_pages": target_pages,
+        "requested_depth_mode": depth_config["mode"],
         "requested_max_sources": max_sources,
         "requested_sources": requested_sources,
         "date_range": date_range or "all_time",
         "request_signature": {
             "objective": text,
             "target_pages": target_pages,
+            "depth_mode": depth_config["mode"],
             "requested_sources": list(requested_sources),
             "date_range": date_range or "all_time",
             "max_sources": max_sources,
@@ -2665,7 +2725,8 @@ def _deep_research_analysis_markdown(
     provided_url_count: int,
 ) -> str:
     budget = analysis.get("execution_budget", analysis.get("budget", {})) if isinstance(analysis, dict) else {}
-    requested_target_pages = int(analysis.get("requested_target_pages", 0) or 0) if isinstance(analysis, dict) else 0
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
+    depth_description = str(analysis.get("depth_description", "") or "").strip()
 
     def _budget_value(key: str, *, suffix: str = "") -> str:
         raw = 0
@@ -2679,8 +2740,7 @@ def _deep_research_analysis_markdown(
         "# Deep Research Analysis",
         "",
         f"- Tier: {analysis.get('tier', '?')}",
-        f"- Page target: {requested_target_pages or analysis.get('estimated_pages', '?')}",
-        f"- Estimated pages: {analysis.get('estimated_pages', '?')}",
+        f"- Research depth: {depth_label}",
         f"- Estimated sources: {analysis.get('estimated_sources', '?')}",
         f"- Estimated duration: {analysis.get('estimated_duration_minutes', '?')} minutes",
         f"- Citation style: {citation_style.upper()}",
@@ -2690,9 +2750,10 @@ def _deep_research_analysis_markdown(
         f"- Local file sources detected: {local_source_count}",
         f"- User-provided URLs: {provided_url_count}",
         f"- Date range: {analysis.get('date_range', 'all_time')}",
-        "",
-        "## Detected Subtopics",
     ]
+    if depth_description:
+        lines.append(f"- Scope profile: {depth_description}")
+    lines.extend(["", "## Detected Subtopics"])
     for idx, topic in enumerate(analysis.get("subtopics", []) if isinstance(analysis.get("subtopics", []), list) else [], start=1):
         lines.append(f"- {idx}. {topic}")
     if budget:
@@ -2730,7 +2791,8 @@ def _deep_research_analysis_summary_prompt(
     analysis_storage_path: str,
     version: int,
 ) -> str:
-    requested_target_pages = int(analysis.get("requested_target_pages", 0) or 0) if isinstance(analysis, dict) else 0
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
+    depth_description = str(analysis.get("depth_description", "") or "").strip()
     lines = [
         f"The deep research confirmation v{version} is ready for approval.",
         "Review this compact summary before the expensive research phases begin.",
@@ -2738,8 +2800,7 @@ def _deep_research_analysis_summary_prompt(
         "Summary",
         f"- Title: {title}",
         f"- Tier: {analysis.get('tier', '?')}",
-        f"- Page target: {requested_target_pages or analysis.get('estimated_pages', '?')}",
-        f"- Estimated pages: {analysis.get('estimated_pages', '?')}",
+        f"- Research depth: {depth_label}",
         f"- Estimated sources: {analysis.get('estimated_sources', '?')}",
         f"- Estimated duration: {analysis.get('estimated_duration_minutes', '?')} minutes",
         f"- Citation style: {citation_style.upper()}",
@@ -2749,6 +2810,8 @@ def _deep_research_analysis_summary_prompt(
         f"- Local file sources detected: {local_source_count}",
         f"- User-provided URLs: {provided_url_count}",
     ]
+    if depth_description:
+        lines.append(f"- Scope profile: {_compact_text(depth_description, width=140)}")
     subtopics = analysis.get("subtopics", []) if isinstance(analysis.get("subtopics", []), list) else []
     if subtopics:
         lines.extend(["", "Key focus areas"])
@@ -2782,6 +2845,7 @@ def _deep_research_subplan_summary_prompt(
     version: int,
 ) -> str:
     sections = outline.get("sections", []) if isinstance(outline, dict) else []
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
     lines = [
         f"The deep research section plan v{version} is ready for approval.",
         "Review this compact section outline before the long-running research and drafting phases begin.",
@@ -2789,9 +2853,8 @@ def _deep_research_subplan_summary_prompt(
         "Plan summary",
         f"- Title: {title}",
         f"- Tier: {analysis.get('tier', '?')}",
-        f"- Total pages: {target_pages}",
+        f"- Research depth: {depth_label}",
         f"- Sections: {len(sections)}",
-        f"- Approx pages per section: {section_pages}",
         f"- Web search: {'enabled' if web_search_enabled else 'disabled'}",
         f"- Output formats: {', '.join(fmt.upper() for fmt in formats)}",
     ]
@@ -2821,6 +2884,7 @@ def _deep_research_subplan_auto_approved_message(
     *,
     title: str,
     outline: dict,
+    analysis: dict,
     target_pages: int,
     section_pages: int,
     web_search_enabled: bool,
@@ -2829,14 +2893,14 @@ def _deep_research_subplan_auto_approved_message(
     version: int,
 ) -> str:
     sections = outline.get("sections", []) if isinstance(outline, dict) else []
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
     lines = [
         f"Deep research section plan v{version} auto-approved.",
         "",
         "Execution handoff",
         f"- Title: {title}",
-        f"- Target pages: {target_pages}",
+        f"- Research depth: {depth_label}",
         f"- Sections: {len(sections)}",
-        f"- Approx pages per section: {section_pages}",
         f"- Web search: {'enabled' if web_search_enabled else 'disabled'}",
         "- Next phase: evidence collection and report drafting",
     ]
@@ -2871,7 +2935,8 @@ def _build_deep_research_analysis_request(
     version: int,
 ) -> dict[str, Any]:
     budget = analysis.get("execution_budget", analysis.get("budget", {})) if isinstance(analysis, dict) else {}
-    requested_target_pages = int(analysis.get("requested_target_pages", 0) or 0) if isinstance(analysis, dict) else 0
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
+    depth_description = str(analysis.get("depth_description", "") or "").strip()
 
     def _budget_value(key: str, *, suffix: str = "") -> str:
         raw = 0
@@ -2883,8 +2948,7 @@ def _build_deep_research_analysis_request(
 
     overview_items = [
         f"Tier {int(analysis.get('tier', 0) or 0)} deep research run.",
-        f"Page target: {requested_target_pages or int(analysis.get('estimated_pages', 0) or 0)}.",
-        f"Estimated pages: {int(analysis.get('estimated_pages', 0) or 0)}.",
+        f"Research depth: {depth_label}.",
         f"Estimated sources: {int(analysis.get('estimated_sources', 0) or 0)}.",
         f"Estimated duration: {int(analysis.get('estimated_duration_minutes', 0) or 0)} minutes.",
         f"Citation style: {citation_style.upper()}.",
@@ -2895,6 +2959,8 @@ def _build_deep_research_analysis_request(
         f"User-provided URLs: {provided_url_count}.",
         f"Date range: {str(analysis.get('date_range', 'all_time') or 'all_time')}.",
     ]
+    if depth_description:
+        overview_items.insert(2, f"Scope profile: {depth_description}.")
     detected_subtopics = [str(topic).strip() for topic in (analysis.get("subtopics", []) or []) if str(topic).strip()]
     budget_items = [
         f"Max tokens: {_budget_value('max_tokens')}.",
@@ -2935,24 +3001,23 @@ def _build_deep_research_subplan_request(
     version: int,
 ) -> dict[str, Any]:
     sections = outline.get("sections", []) if isinstance(outline.get("sections"), list) else []
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
     section_titles = []
     for index, section in enumerate(sections, start=1):
         section_title = str((section or {}).get("title", f"Section {index}") or f"Section {index}").strip()
-        target = int((section or {}).get("target_pages", section_pages) or section_pages)
         questions = (section or {}).get("key_questions", []) if isinstance(section, dict) else []
         q_count = len(questions) if isinstance(questions, list) else 0
-        section_titles.append(f"{index}. {section_title} | target_pages={target} | questions={q_count or 'n/a'}")
+        section_titles.append(f"{index}. {section_title} | questions={q_count or 'n/a'}")
     execution_items = [
-        f"Deliver a {target_pages}-page deep research report through approved section-by-section research, drafting, and final merge.",
+        f"Execution scope: {depth_label}.",
         f"Section count: {len(sections)}.",
-        f"Default section size: {section_pages} pages.",
         f"Web search: {'enabled' if web_search_enabled else 'disabled'}.",
         f"Output formats: {', '.join(fmt.upper() for fmt in formats) or 'MD'}.",
         f"Research tier: {int(analysis.get('tier', 0) or 0)}.",
     ]
     return build_approval_request(
         scope="long_document_plan",
-        title=f"{title or 'Deep Research Report'} ({target_pages} pages)",
+        title=title or "Deep Research Report",
         summary="The deep research section plan is ready for approval.",
         sections=[
             {"title": "Section Outline", "items": section_titles},
@@ -4302,11 +4367,16 @@ def _build_compiled_markdown(
     deep_research_tier: int,
     image_entries: list[dict] | None = None,
 ) -> str:
+    def _section_anchor(item: dict) -> str:
+        index = int(item["index"])
+        fallback = f"section-{index}"
+        return f"section-{index}-{_slugify_heading(item['title'], fallback=fallback)}"
+
     toc_entries = [
         ("executive-summary", "Executive Summary"),
         ("methodology", "Methodology"),
         *[
-            (f"section-{item['index']}-{_slugify_heading(item['title'], fallback=f'section-{item['index']}')}", f"{item['index']}. {item['title']}")
+            (_section_anchor(item), f"{item['index']}. {item['title']}")
             for item in section_outputs
         ],
         ("bibliography", f"Bibliography ({citation_style.upper()})"),
@@ -4353,7 +4423,7 @@ def _build_compiled_markdown(
         ]
     )
     for item in section_outputs:
-        section_anchor = f"section-{item['index']}-{_slugify_heading(item['title'], fallback=f'section-{item['index']}')}"
+        section_anchor = _section_anchor(item)
         lines.append(_heading_with_anchor(2, f"{item['index']}. {item['title']}", section_anchor))
         lines.append("")
         lines.append(_strip_leading_section_heading(item["section_text"], section_title=item["title"], section_index=int(item["index"])))
@@ -4406,10 +4476,14 @@ def long_document_agent(state):
         state = bootstrap_file_memory(state)
 
     target_pages = _safe_int(state.get("long_document_pages") or state.get("report_target_pages"), 50, 5, 500)
+    research_depth_config = _research_depth_config(state.get("research_depth_mode"), target_pages)
+    research_depth_mode = str(research_depth_config["mode"])
+    research_depth_label = str(research_depth_config["label"])
     section_pages = _safe_int(state.get("long_document_section_pages"), 5, 2, 20)
     section_count_default = max(3, math.ceil(target_pages / max(1, section_pages)))
     section_count = _safe_int(state.get("long_document_sections"), section_count_default, 1, 40)
     title = _normalize_title(state.get("long_document_title", ""), "Deep Research Report")
+    state["research_depth_mode"] = research_depth_mode
 
     draft_selection = model_selection_for_agent("long_document_agent")
     selected_provider = str(state.get("provider") or draft_selection.get("provider") or "").strip().lower()
@@ -4486,7 +4560,7 @@ def long_document_agent(state):
     log_task_update(
         DEEP_RESEARCH_LABEL,
         (
-            f"Deep research pass #{call_number} started. target_pages={target_pages}, "
+            f"Deep research pass #{call_number} started. depth={research_depth_mode}, "
             f"sections={section_count}, section_pages~{section_pages}, model={research_model}, "
             f"formats={','.join(output_formats)}, citation_style={citation_style}"
         ),
@@ -4496,7 +4570,7 @@ def long_document_agent(state):
         state,
         title="Deep research run started",
         detail=(
-            f"Preparing a {target_pages}-page report across about {section_count} sections with "
+            f"Preparing a {research_depth_label} run across about {section_count} sections with "
             f"{citation_style.upper()} citations and {', '.join(output_formats)} exports."
         ),
         status="running",
@@ -4584,6 +4658,7 @@ def long_document_agent(state):
     analysis_signature = {
         "objective": objective,
         "target_pages": target_pages,
+        "depth_mode": research_depth_mode,
         "requested_sources": list(requested_sources),
         "date_range": date_range or "all_time",
         "max_sources": max_sources,
@@ -4594,6 +4669,7 @@ def long_document_agent(state):
         analysis = _research_depth_analysis(
             objective,
             target_pages=target_pages,
+            depth_mode=research_depth_mode,
             requested_sources=requested_sources,
             date_range=date_range,
             max_sources=max_sources,
@@ -4655,7 +4731,8 @@ def long_document_agent(state):
             "kind": "analysis",
             "title": title,
             "tier": analysis.get("tier", 0),
-            "estimated_pages": analysis.get("estimated_pages", target_pages),
+            "depth_mode": analysis.get("depth_mode", research_depth_mode),
+            "depth_label": analysis.get("depth_label", research_depth_label),
             "estimated_sources": analysis.get("estimated_sources", 0),
             "estimated_duration_minutes": analysis.get("estimated_duration_minutes", 0),
             "subtopics": analysis.get("subtopics", []),
@@ -4781,6 +4858,8 @@ def long_document_agent(state):
             "status": "approved" if auto_approve_subplan else "pending_approval",
             "title": title,
             "tier": analysis.get("tier", 0),
+            "depth_mode": analysis.get("depth_mode", research_depth_mode),
+            "depth_label": analysis.get("depth_label", research_depth_label),
             "subtopics": analysis.get("subtopics", []),
             "section_count": len(outline.get("sections", [])),
             "formats": output_formats,
@@ -4808,6 +4887,7 @@ def long_document_agent(state):
             state["draft_response"] = _deep_research_subplan_auto_approved_message(
                 title=title,
                 outline=outline,
+                analysis=analysis,
                 target_pages=target_pages,
                 section_pages=section_pages,
                 web_search_enabled=web_search_enabled,
@@ -5147,7 +5227,7 @@ def long_document_agent(state):
 
     research_log_lines = [
         f"Tier {analysis.get('tier', 0)} analysis confirmed.",
-        f"Target pages: {target_pages}",
+        f"Research depth: {analysis.get('depth_label', research_depth_label)}",
         f"Output formats: {', '.join(output_formats)}",
         f"Citation style: {citation_style.upper()}",
         f"Plagiarism check: {'enabled' if plagiarism_enabled else 'disabled'}",
@@ -6335,7 +6415,7 @@ Section continuity notes:
         f"Deep research pipeline completed.\n"
         f"- Title: {title}\n"
         f"- Tier: {analysis.get('tier', 0)}\n"
-        f"- Target pages: {target_pages}\n"
+        f"- Research depth: {analysis.get('depth_label', research_depth_label)}\n"
         f"- Sections produced: {len(section_outputs)}\n"
         f"- Words: {total_words}\n"
         f"- Sources: {total_sources}\n"
@@ -6415,6 +6495,8 @@ Section continuity notes:
         "kind": "result",
         "title": title,
         "tier": analysis.get("tier", 0),
+        "depth_mode": analysis.get("depth_mode", research_depth_mode),
+        "depth_label": analysis.get("depth_label", research_depth_label),
         "pages": target_pages,
         "words": total_words,
         "sources": total_sources,

@@ -9,6 +9,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from kendr.discovery import build_registry
 from kendr.runtime import AgentRuntime
+from kendr.workflow_execution_policies import WorkflowPolicyContext, _handle_local_drive_ingestion
 from tasks.a2a_protocol import append_task, make_task
 
 
@@ -380,6 +381,33 @@ class RuntimeRoutingTests(unittest.TestCase):
         trace_titles = [item.get("title", "") for item in state.get("execution_trace", []) if isinstance(item, dict)]
         self.assertIn("Research intent discovered", trace_titles)
         self.assertIn("Source strategy planned", trace_titles)
+
+    def test_deep_research_with_local_files_skips_generic_local_drive_ingestion_policy(self):
+        runtime = SimpleNamespace(
+            _is_long_document_request=lambda state: True,
+            _has_local_drive_request=lambda state: True,
+            _is_agent_available=lambda state, agent_name: agent_name == "local_drive_agent",
+        )
+        state = {
+            "workflow_type": "deep_research",
+            "deep_research_mode": True,
+            "long_document_mode": True,
+            "local_drive_paths": ["/tmp/bananaabout"],
+            "plan_steps": [],
+            "last_agent": "",
+            "local_drive_calls": 0,
+        }
+
+        handled = _handle_local_drive_ingestion(
+            runtime,
+            state,
+            WorkflowPolicyContext(
+                current_objective="Give me a research on banana and its effect on health",
+                in_task_phase=True,
+            ),
+        )
+
+        self.assertIsNone(handled)
 
     def test_project_audit_request_routes_to_master_coding_agent(self):
         with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
