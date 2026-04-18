@@ -312,18 +312,6 @@ def _sync_db_from_registry_json(db_path: str = DB_PATH) -> None:
 
 _DEFAULT_MCP_SERVERS: list[dict] = [
     {
-        "id": "browser-use-mcp",
-        "name": "browser-use",
-        "type": "stdio",
-        "connection": "python -m browser_use --mcp",
-        "description": (
-            "Built-in browser automation/search MCP. Uses your existing OPENAI_API_KEY or "
-            "ANTHROPIC_API_KEY. Good fallback when SerpAPI is off and for rendered website viewing."
-        ),
-        "auth_token": "",
-        "enabled": True,
-    },
-    {
         "id": "scpr-web-scraper",
         "name": "web-scraper (scpr)",
         "type": "stdio",

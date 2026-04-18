@@ -85,6 +85,31 @@ class Phase0CliSmokeTests(unittest.TestCase):
                 state["draft_response"] = str(state.get("research_result") or "").strip()
                 return state
 
+            def _fake_long_document_handler(state: dict) -> dict:
+                state["workflow_type"] = "deep_research"
+                state["deep_research_mode"] = True
+                state["long_document_mode"] = True
+                state["pending_user_input_kind"] = ""
+                state["approval_pending_scope"] = ""
+                state["deep_research_result_card"] = {
+                    "kind": "plan",
+                    "status": "approved",
+                    "title": "Deep Research Report",
+                }
+                state["long_document_outline_md_path"] = (
+                    "output/deep_research_runs/deep_research_run_1/deep_research_outline.md"
+                )
+                state["long_document_subplan_md_path"] = (
+                    "output/deep_research_runs/deep_research_run_1/deep_research_subplan.md"
+                )
+                state["draft_response"] = (
+                    "Auto-approved section plan; continuing to evidence collection.\n\n"
+                    "Saved artifacts\n"
+                    "- Outline: output/deep_research_runs/deep_research_run_1/deep_research_outline.md\n"
+                    "- Step-by-step plan: output/deep_research_runs/deep_research_run_1/deep_research_subplan.md"
+                )
+                return state
+
             def _fake_urlopen(request, timeout=0):  # noqa: ARG001
                 body = request.data.decode("utf-8") if getattr(request, "data", None) else "{}"
                 payload = json.loads(body)
@@ -94,6 +119,7 @@ class Phase0CliSmokeTests(unittest.TestCase):
                 from kendr.runtime import AgentRuntime
 
                 overrides = {key: value for key, value in payload.items() if key not in {"text", "new_session"}}
+                overrides["_phase0_handoff_only"] = True
                 with ExitStack() as stack:
                     stack.enter_context(patch("builtins.print"))
                     stack.enter_context(patch("kendr.discovery._register_skill_agents"))
@@ -135,6 +161,7 @@ class Phase0CliSmokeTests(unittest.TestCase):
 
                     runtime = AgentRuntime(build_registry())
                     runtime.registry.agents["worker_agent"].handler = _fake_worker_handler
+                    runtime.registry.agents["long_document_agent"].handler = _fake_long_document_handler
 
                     stack.enter_context(patch.object(runtime, "_sync_orchestration_plan_record", side_effect=lambda state, final_status="": state))
                     stack.enter_context(patch.object(runtime, "_record_orchestration_event"))
@@ -157,7 +184,10 @@ class Phase0CliSmokeTests(unittest.TestCase):
                 patch("kendr.cli._gateway_ready", return_value=True),
                 patch("kendr.cli._configured_working_dir", return_value=str(working_dir)),
                 patch("kendr.cli._resolve_working_dir", return_value=str(working_dir)),
-                patch("kendr.cli._workflow_setup_snapshot", return_value={"available_agents": ["deep_research_agent", "worker_agent"], "agents": {}}),
+                patch(
+                    "kendr.cli._workflow_setup_snapshot",
+                    return_value={"available_agents": ["deep_research_agent", "long_document_agent", "worker_agent"], "agents": {}},
+                ),
                 patch("kendr.cli._http_json_get", return_value=[]),
                 patch("kendr.cli._load_cli_session", return_value={}),
                 patch("kendr.cli._save_cli_session"),
@@ -188,14 +218,11 @@ class Phase0CliSmokeTests(unittest.TestCase):
         self.assertEqual(ingest_payload["research_kb_top_k"], 5)
         self.assertTrue(ingest_payload["auto_approve"])
         self.assertTrue(ingest_payload["auto_approve_plan"])
-        self.assertIn("deep_research_agent", agent_names)
-        self.assertTrue({"worker_agent", "long_document_agent"} & set(agent_names))
+        self.assertIn("long_document_agent", agent_names)
         self.assertIn(payload["last_agent"], {"worker_agent", "long_document_agent"})
-        self.assertIn("Deep Research Brief", payload["research_result"])
-        self.assertIn("Coverage:", payload["research_result"])
-        self.assertIn("Sources:", payload["research_result"])
-        self.assertIn("Knowledge base: finance-kb (2 hits)", payload["research_result"])
-        self.assertIn("file:///tmp/report.md", payload["research_result"])
+        self.assertEqual(payload["workflow_type"], "deep_research")
+        self.assertTrue(payload["deep_research_mode"])
+        self.assertTrue(payload["long_document_mode"])
         self.assertEqual(payload["approval_pending_scope"], "")
         self.assertEqual(payload["pending_user_input_kind"], "")
         self.assertIn("auto-approved", payload["final_output"].lower())
@@ -203,6 +230,7 @@ class Phase0CliSmokeTests(unittest.TestCase):
         self.assertIn("saved artifacts", payload["final_output"].lower())
         self.assertIn("deep_research_outline.md", payload["final_output"])
         self.assertIn("deep_research_subplan.md", payload["final_output"])
+        self.assertEqual(payload["deep_research_result_card"]["kind"], "plan")
         self.assertEqual(payload["deep_research_result_card"]["status"], "approved")
         self.assertIn("deep_research_outline.md", payload["long_document_outline_md_path"])
         self.assertIn("deep_research_subplan.md", payload["long_document_subplan_md_path"])

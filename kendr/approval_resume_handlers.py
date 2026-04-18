@@ -175,7 +175,7 @@ def _recover_blueprint_into_deep_research(
     initial_state["final_output"] = ""
     initial_state["deep_research_confirmed"] = True
     initial_state["deep_research_mode"] = True
-    initial_state["long_document_mode"] = False
+    initial_state["long_document_mode"] = True
     initial_state["long_document_job_started"] = False
     initial_state["workflow_type"] = "deep_research"
     if previous_objective and feedback:
@@ -276,7 +276,7 @@ def _handle_deep_research_confirmation(
         _clear_pending_user_input(initial_state)
         initial_state["deep_research_confirmed"] = True
         initial_state["deep_research_mode"] = True
-        initial_state["long_document_mode"] = False
+        initial_state["long_document_mode"] = True
         initial_state["long_document_job_started"] = False
         initial_state["workflow_type"] = "deep_research"
         return True

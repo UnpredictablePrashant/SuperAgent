@@ -345,6 +345,66 @@ class RuntimeOrchestrationPersistenceTests(unittest.TestCase):
         self.assertEqual(stalled["next_agent"], "__finish__")
         self.assertIn("stalled", stalled["final_output"].lower())
 
+    def test_run_query_writes_final_output_to_the_run_output_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_output_dir = os.path.join(tmpdir, "run-output")
+            stray_output_dir = os.path.join(tmpdir, "stray-output")
+            os.makedirs(run_output_dir, exist_ok=True)
+            os.makedirs(stray_output_dir, exist_ok=True)
+
+            registry = Registry()
+            registry.register_agent(
+                AgentDefinition(
+                    name="worker_agent",
+                    handler=lambda state: state,
+                    description="Minimal worker.",
+                )
+            )
+            runtime = AgentRuntime(registry)
+
+            class _FakeApp:
+                def invoke(self, initial_state: dict) -> dict:
+                    from tasks.utils import set_active_output_dir
+
+                    set_active_output_dir(stray_output_dir, append=False)
+                    result = dict(initial_state)
+                    result["final_output"] = "Persisted final output."
+                    return result
+
+            with (
+                patch("kendr.runtime.initialize_db"),
+                patch("kendr.runtime.insert_run"),
+                patch("kendr.runtime.update_run"),
+                patch("kendr.runtime.get_channel_session", return_value=None),
+                patch("kendr.runtime.write_text_file") as mock_write_text_file,
+                patch("kendr.runtime.update_planning_file"),
+                patch("kendr.runtime.close_session_memory"),
+                patch("kendr.runtime.append_privileged_audit_event"),
+                patch("kendr.runtime.append_daily_memory_note"),
+                patch("kendr.runtime.append_long_term_memory"),
+                patch("kendr.runtime.record_work_note"),
+                patch.object(runtime, "build_workflow", return_value=_FakeApp()),
+                patch.object(runtime, "save_graph"),
+                patch.object(runtime, "_record_orchestration_event"),
+                patch.object(runtime, "_sync_orchestration_plan_record", side_effect=lambda state, final_status="": state),
+                patch.object(runtime, "_write_session_record"),
+                patch.object(runtime, "_refresh_mcp_agents"),
+                patch.object(runtime, "_refresh_skill_agents"),
+            ):
+                runtime.run_query(
+                    "Summarize the findings.",
+                    state_overrides={
+                        "working_directory": tmpdir,
+                        "run_output_dir": run_output_dir,
+                        "available_agents": ["worker_agent"],
+                    },
+                )
+
+            mock_write_text_file.assert_called_once_with(
+                os.path.join(run_output_dir, "final_output.txt"),
+                "Persisted final output.",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

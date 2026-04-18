@@ -1215,6 +1215,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             "research_citation_style",
             "research_enable_plagiarism_check",
             "research_web_search_enabled",
+            "research_search_backend",
             "research_date_range",
             "research_max_sources",
             "research_checkpoint_enabled",

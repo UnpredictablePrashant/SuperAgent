@@ -34,6 +34,14 @@ Known blockers from the latest wider non-socket regression run:
 
 Those failures make the first release priority unambiguous: **fix the launch path first**.
 
+Update on **April 18, 2026**:
+
+- dedicated wider non-socket release gate completed clean via `python scripts/release_gate_non_socket.py`
+- `566` tests passed
+- `0` failed
+- `1` skipped
+- no deferred wider non-socket failures remain for `v0.2.0`
+
 ## Release Cadence
 
 Use a one-week release train after the first launch.
@@ -101,45 +109,48 @@ What this release is not:
 
 #### A. Launch blockers
 
-- [ ] Fix the `kendr run --auto-approve` deep-research CLI regression.
-- [ ] Restore the long-document approval payload contract so the expected overview fields appear again.
-- [ ] Fix or safely bypass SQLite bootstrap fragility on launch-critical paths.
-- [ ] Re-run the current wider non-socket suite until the known `4` failures are cleared or explicitly triaged and deferred.
+- [x] Fix the `kendr run --auto-approve` deep-research CLI regression.
+- [x] Restore the long-document approval payload contract so the expected overview fields appear again.
+- [x] Fix or safely bypass SQLite bootstrap fragility on launch-critical paths.
+- [x] Re-run the current wider non-socket suite until the known `4` failures are cleared or explicitly triaged and deferred.
 
 #### B. Golden path hardening
 
-- [ ] Lock one golden demo path: query -> deep research brief -> long report handoff -> exported artifact.
-- [ ] Ensure the final brief always shows `Objective`, `Coverage`, `Findings`, `Recommended Next Steps`, and `Sources`.
-- [ ] Ensure the final report/export preserves the research brief card and source sections.
-- [ ] Ensure the KB-grounded path and the web-backed path both produce citations and source summaries.
+- [x] Lock one golden demo path: query -> deep research brief -> long report handoff -> exported artifact.
+  See [Launch Demo Prompts](launch_demo_prompts.md) for the blessed `competitive-intelligence-diligence` path.
+- [x] Ensure the final brief always shows `Objective`, `Coverage`, `Findings`, `Recommended Next Steps`, and `Sources`.
+- [x] Ensure the final report/export preserves the research brief card and source sections.
+- [x] Ensure the KB-grounded path and the web-backed path both produce citations and source summaries.
 
 #### C. Output polish
 
-- [ ] Make source summaries more explicit for `web`, `KB`, and `provided URL` evidence.
-- [ ] Make the auto-approved long-document handoff read like a clean execution update, not an internal state dump.
-- [ ] Normalize artifact path rendering in final outputs so demo users can see what was produced.
-- [ ] Make launch-facing wording consistent across deep research, superRAG, and report export surfaces.
+- [x] Make source summaries more explicit for `web`, `KB`, and `provided URL` evidence.
+- [x] Make the auto-approved long-document handoff read like a clean execution update, not an internal state dump.
+- [x] Normalize artifact path rendering in final outputs so demo users can see what was produced.
+- [x] Make launch-facing wording consistent across deep research, superRAG, and report export surfaces.
 
 #### D. Demo readiness
 
-- [ ] Prepare `2-3` fixed demo prompts that are known to exercise the strongest path.
+- [x] Prepare `2-3` fixed demo prompts that are known to exercise the strongest path.
+  See [Launch Demo Prompts](launch_demo_prompts.md) for the blessed launch-week prompt set.
 - [ ] Verify one short demo and one deep demo on a clean environment.
 - [ ] Prepare launch screenshots or terminal captures using the final output shape.
-- [ ] Freeze launch messaging around the research product story only.
+- [x] Freeze launch messaging around the research product story only.
+  The blessed prompt set intentionally excludes assistant-platform and agentic-work demos for `v0.2.0`.
 
 #### E. Test gate
 
 - [ ] Run the launch-critical suite and keep it green.
-- [ ] Run the wider non-socket suite and document any remaining deferred failures.
+- [x] Run the wider non-socket suite and document any remaining deferred failures.
 - [ ] Manually validate the golden path twice consecutively.
 - [ ] Do not add non-launch features after the final green run.
 
 ### Codex Work Packets
 
-- [ ] Packet 1: Fix the CLI deep-research regression and add a focused regression test if needed.
-- [ ] Packet 2: Repair long-document planning payload drift and align tests.
-- [ ] Packet 3: Make runtime bootstrap more resilient around SQLite/WAL initialization.
-- [ ] Packet 4: Polish final research/report output wording and artifact references.
+- [x] Packet 1: Fix the CLI deep-research regression and add a focused regression test if needed.
+- [x] Packet 2: Repair long-document planning payload drift and align tests.
+- [x] Packet 3: Make runtime bootstrap more resilient around SQLite/WAL initialization.
+- [x] Packet 4: Polish final research/report output wording and artifact references.
 - [ ] Packet 5: Re-run regression, record final launch test results, and prepare release notes.
 
 ### Exit Criteria

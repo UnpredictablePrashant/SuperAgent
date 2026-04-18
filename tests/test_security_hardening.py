@@ -325,7 +325,7 @@ class ExtensionHostIsolationTests(unittest.TestCase):
         self.assertEqual(result["output"]["query"], "cats")
         payload = host.call_args.args[1]
         self.assertEqual(host.call_args.args[0], "web-search")
-        self.assertEqual(payload["permissions"]["network"]["domains"], ["api.duckduckgo.com"])
+        self.assertEqual(payload["permissions"]["network"]["domains"], ["duckduckgo.com"])
 
     def test_desktop_automation_core_skill_runs_in_sandbox_preview_without_approval(self):
         with patch("kendr.skill_manager.get_user_skill", return_value=None):
@@ -459,7 +459,7 @@ class ExtensionHostIsolationTests(unittest.TestCase):
         web_search = next(item for item in marketplace["catalog"] if item["id"] == "web-search")
         self.assertEqual(web_search["skill_id"], "installed-web-search")
         self.assertTrue(web_search["permission_manifest"]["network"]["allow"])
-        self.assertEqual(web_search["permission_manifest"]["network"]["domains"], ["api.duckduckgo.com"])
+        self.assertEqual(web_search["permission_manifest"]["network"]["domains"], ["duckduckgo.com"])
 
     def test_core_catalog_skill_can_be_explicitly_disabled(self):
         disabled_row = {

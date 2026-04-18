@@ -6,23 +6,25 @@ from typing import Any
 
 from openai import OpenAI
 
+from kendr.llm_router import PROVIDER_OPENAI, supports_native_web_search
 from kendr.rag_manager import build_research_grounding
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.coding_tasks import _extract_output_text
-from tasks.research_infra import fetch_url_content, llm_text, parse_documents
+from tasks.research_infra import duckduckgo_html_search, fetch_url_content, fetch_urls_content, llm_text, parse_documents
 from tasks.research_output import render_phase0_report, split_sources_section
-from tasks.utils import OUTPUT_DIR, log_task_update, write_text_file
+from tasks.utils import OUTPUT_DIR, log_task_update, model_selection_for_agent, runtime_model_override, write_text_file
 
 
 DEFAULT_DEEP_RESEARCH_MODEL = os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research")
 
 AGENT_METADATA = {
     "deep_research_agent": {
-        "description": "Runs OpenAI Deep Research for web-grounded, source-aware, in-depth research tasks.",
+        "description": "Legacy deep research shim that redirects public deep-research workflows to long_document_agent.",
         "skills": ["deep", "research", "web", "citations", "analysis"],
         "input_keys": [
             "research_query",
             "research_model",
+            "research_provider",
             "research_instructions",
             "research_max_tool_calls",
             "research_max_output_tokens",
@@ -38,6 +40,7 @@ AGENT_METADATA = {
             "research_status",
             "research_response_id",
             "research_raw",
+            "research_provider",
             "research_kb_used",
             "research_kb_name",
             "research_kb_hit_count",
@@ -46,16 +49,30 @@ AGENT_METADATA = {
             "research_source_summary",
             "deep_research_result_card",
         ],
-        "requirements": ["openai"],
+        "requirements": [],
+        "discoverable": False,
         "display_name": "Deep Research Agent",
         "category": "research",
         "intent_patterns": [
             "research this topic", "do deep research", "investigate in depth",
             "find citations", "source-backed analysis", "web research with sources",
         ],
-        "active_when": ["env:OPENAI_API_KEY"],
-        "config_hint": "Add your OpenAI API key in Setup → Providers.",
+        "active_when": [],
+        "config_hint": "Choose any configured model in Studio. OpenAI is only required when the selected model uses native web search.",
     }
+}
+
+_RESEARCH_PROVIDER_NAMES = {
+    "openai",
+    "anthropic",
+    "google",
+    "xai",
+    "ollama",
+    "openrouter",
+    "custom",
+    "minimax",
+    "qwen",
+    "glm",
 }
 
 
@@ -87,9 +104,141 @@ def _normalize_url_list(raw_value: Any) -> list[str]:
     return urls
 
 
+def _resolve_research_backend(state: dict, *, web_search_enabled: bool) -> dict[str, Any]:
+    selection = model_selection_for_agent("deep_research_agent")
+    provider = str(selection.get("provider") or PROVIDER_OPENAI).strip().lower() or PROVIDER_OPENAI
+    model = str(selection.get("model") or DEFAULT_DEEP_RESEARCH_MODEL).strip() or DEFAULT_DEEP_RESEARCH_MODEL
+    source = str(selection.get("source") or "").strip() or "agent_selection"
+
+    explicit_provider = str(state.get("research_provider") or "").strip().lower()
+    if explicit_provider:
+        provider = explicit_provider
+        source = "state.research_provider"
+
+    raw_research_model = str(state.get("research_model") or "").strip()
+    if raw_research_model:
+        lowered = raw_research_model.lower()
+        if lowered in _RESEARCH_PROVIDER_NAMES and not explicit_provider:
+            log_task_update(
+                "Deep Research",
+                (
+                    f"state.research_model='{raw_research_model}' looks like a provider token, not a model id. "
+                    "Ignoring it and using the UI-selected model instead."
+                ),
+            )
+        else:
+            model = raw_research_model
+            source = "state.research_model"
+
+    native_web_search_enabled = bool(web_search_enabled and supports_native_web_search(model, provider))
+    return {
+        "provider": provider,
+        "model": model,
+        "source": source,
+        "native_web_search_enabled": native_web_search_enabled,
+    }
+
+
+def _collect_generic_web_evidence(
+    query: str,
+    *,
+    provided_urls: list[str],
+    max_results: int = 6,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    search_results: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    try:
+        search_payload = duckduckgo_html_search(query, num=max_results)
+        raw_results = search_payload.get("results", []) if isinstance(search_payload, dict) else []
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url", "")).strip()
+            if not url:
+                continue
+            search_results.append(
+                {
+                    "title": str(item.get("title", "")).strip() or url,
+                    "url": url,
+                    "snippet": str(item.get("snippet", "")).strip(),
+                    "source": str(item.get("source", "")).strip(),
+                    "date": str(item.get("date", "")).strip(),
+                }
+            )
+    except Exception as exc:
+        warnings.append(f"DuckDuckGo search failed: {exc}")
+
+    ordered_urls: list[str] = []
+    seen_urls: set[str] = set()
+    for url in [*provided_urls, *[item.get("url", "") for item in search_results]]:
+        normalized = str(url or "").strip()
+        if not normalized or normalized in seen_urls:
+            continue
+        seen_urls.add(normalized)
+        ordered_urls.append(normalized)
+
+    fetched_pages = fetch_urls_content(
+        ordered_urls,
+        timeout=20,
+        max_workers=min(4, len(ordered_urls) or 1),
+    ) if ordered_urls else []
+    return search_results[:max_results], fetched_pages, warnings
+
+
+def _generic_web_evidence_context(
+    *,
+    search_results: list[dict[str, Any]],
+    fetched_pages: list[dict[str, Any]],
+) -> tuple[str, list[str]]:
+    search_lookup = {
+        str(item.get("url", "")).strip(): item
+        for item in search_results
+        if isinstance(item, dict) and str(item.get("url", "")).strip()
+    }
+
+    source_summary: list[str] = []
+    seen_summary: set[str] = set()
+    for item in search_results[:8]:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url", "")).strip()
+        title = str(item.get("title", "")).strip() or url
+        if not url:
+            continue
+        line = f"- Web source: {title} ({url})"
+        if line not in seen_summary:
+            seen_summary.add(line)
+            source_summary.append(line)
+
+    blocks: list[str] = []
+    for index, page in enumerate(fetched_pages[:8], start=1):
+        url = str(page.get("url", "")).strip()
+        lookup = search_lookup.get(url, {})
+        title = str(lookup.get("title") or page.get("title") or url or f"web-source-{index}").strip()
+        snippet = str(lookup.get("snippet", "")).strip()
+        page_error = str(page.get("error", "")).strip()
+        page_text = str(page.get("text", "")).strip()[:2500]
+        lines = [
+            f"[Web Source {index}] {title}",
+            f"URL: {url or 'n/a'}",
+        ]
+        if snippet:
+            lines.append(f"Search snippet: {snippet}")
+        if page_error and not page_text:
+            lines.append(f"Fetch note: {page_error}")
+        elif page_text:
+            lines.append(page_text)
+        else:
+            lines.append("No readable text extracted.")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks).strip(), source_summary
+
+
 def _research_source_summary_lines(
     state: dict,
     *,
+    web_search_enabled: bool,
+    model: str,
     local_meta: dict,
     kb_grounding: dict[str, Any],
 ) -> list[str]:
@@ -112,6 +261,11 @@ def _research_source_summary_lines(
             ).strip()
             if source_id:
                 lines.append(f"- KB source: {source_id}")
+
+    if web_search_enabled:
+        lines.append(f"- Web evidence: live web research enabled via {str(model or 'configured model').strip()}")
+    else:
+        lines.append("- Web evidence: disabled for this run")
 
     local_file_count = int((local_meta or {}).get("local_file_count", 0) or 0)
     if local_file_count > 0:
@@ -274,20 +428,62 @@ Produce a concise source memo with:
     return llm_text(prompt).strip(), meta
 
 
+def _should_delegate_public_deep_research(state: dict[str, Any]) -> bool:
+    workflow_type = str(state.get("workflow_type", "") or "").strip().lower()
+    return bool(
+        workflow_type in {"deep_research", "long_document"}
+        or bool(state.get("deep_research_mode", False))
+        or bool(state.get("long_document_mode", False))
+        or bool(state.get("local_drive_force_long_document", False))
+    )
+
+
+def _retarget_active_deep_research_task(state: dict[str, Any], target_agent: str) -> None:
+    active_task = state.get("active_task")
+    if isinstance(active_task, dict) and str(active_task.get("recipient", "")).strip() == "deep_research_agent":
+        active_task["recipient"] = target_agent
+        state["active_task"] = active_task
+        task_id = str(active_task.get("task_id", "") or "").strip()
+    else:
+        task_id = ""
+    a2a = state.get("a2a", {})
+    tasks = a2a.get("tasks", []) if isinstance(a2a, dict) else []
+    if not isinstance(tasks, list):
+        return
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if task_id and str(task.get("task_id", "")).strip() != task_id:
+            continue
+        if str(task.get("recipient", "")).strip() == "deep_research_agent" and str(task.get("status", "pending")).strip() == "pending":
+            task["recipient"] = target_agent
+            break
+
+
 def deep_research_agent(state):
     active_task, task_content, _ = begin_agent_session(state, "deep_research_agent")
     state["deep_research_calls"] = state.get("deep_research_calls", 0) + 1
     call_number = state["deep_research_calls"]
-
+	
     query = state.get("research_query") or task_content or state.get("current_objective") or state.get("user_query", "").strip()
     if not query:
         raise ValueError("deep_research_agent requires 'research_query' or 'user_query' in state.")
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is required for deep_research_agent.")
+    if _should_delegate_public_deep_research(state):
+        from tasks.long_document_tasks import long_document_agent
 
-    model = state.get("research_model", DEFAULT_DEEP_RESEARCH_MODEL)
+        _retarget_active_deep_research_task(state, "long_document_agent")
+        state["workflow_type"] = "deep_research"
+        state["deep_research_mode"] = True
+        state["long_document_mode"] = True
+        log_task_update(
+            "Deep Research",
+            "Delegating legacy deep_research_agent execution to long_document_agent for the full research pipeline.",
+            query,
+        )
+        return long_document_agent(state)
+	
+    max_web_results = max(1, int(state.get("research_max_web_results", 6) or 6))
     max_tool_calls = int(state.get("research_max_tool_calls", 8))
     max_output_tokens = state.get("research_max_output_tokens")
     instructions = state.get(
@@ -301,6 +497,11 @@ def deep_research_agent(state):
     kb_enabled = bool(state.get("research_kb_enabled", False))
     kb_ref = str(state.get("research_kb_id", "") or "").strip()
     kb_top_k = max(1, int(state.get("research_kb_top_k", 8) or 8))
+    backend = _resolve_research_backend(state, web_search_enabled=web_search_enabled)
+    provider = str(backend.get("provider") or PROVIDER_OPENAI).strip().lower() or PROVIDER_OPENAI
+    model = str(backend.get("model") or DEFAULT_DEEP_RESEARCH_MODEL).strip() or DEFAULT_DEEP_RESEARCH_MODEL
+    native_web_search_enabled = bool(backend.get("native_web_search_enabled", False))
+    search_backend = "native_model" if native_web_search_enabled else "kendr_search" if web_search_enabled else "local_only"
 
     local_context, local_meta = _build_local_source_context(state, query, include_urls=True)
     has_non_kb_evidence = bool(
@@ -356,7 +557,13 @@ def deep_research_agent(state):
         for part in (kb_grounding.get("prompt_context", ""), local_context)
         if str(part).strip()
     ).strip()
-    source_summary = _research_source_summary_lines(state, local_meta=local_meta, kb_grounding=kb_grounding)
+    source_summary = _research_source_summary_lines(
+        state,
+        web_search_enabled=web_search_enabled,
+        model=str(model),
+        local_meta=local_meta,
+        kb_grounding=kb_grounding,
+    )
     coverage_summary = _research_coverage_lines(
         web_search_enabled=web_search_enabled,
         model=str(model),
@@ -429,6 +636,7 @@ Write a source-aware research memo that:
         state["research_status"] = "completed"
         state["research_result"] = output_text
         state["research_model"] = "local-only-synthesis"
+        state["research_provider"] = provider
         state["research_raw"] = payload
         state["research_kb_used"] = bool(payload.get("research_kb_used"))
         state["research_kb_name"] = str((kb_grounding or {}).get("kb_name", "") or "")
@@ -438,6 +646,7 @@ Write a source-aware research memo that:
         state["research_source_summary"] = payload["source_summary"]
         state["deep_research_result_card"] = {
             **result_card,
+            "search_backend": search_backend,
             "source_summary": list(payload["source_summary"]),
         }
         state["draft_response"] = output_text
@@ -460,78 +669,169 @@ Write a source-aware research memo that:
         )
         return state
 
-    client = OpenAI(api_key=api_key)
-
     log_task_update(
         "Deep Research",
-        f"Research pass #{call_number} started with model '{model}'.",
+        (
+            f"Research pass #{call_number} started with provider '{provider or 'default'}', "
+            f"model '{model}', backend '{search_backend}'."
+        ),
         query,
     )
 
-    create_kwargs = {
-        "model": model,
-        "input": query,
-        "instructions": instructions,
-        "background": background,
-        "max_tool_calls": max_tool_calls,
-        "reasoning": {"summary": "auto"},
-        "tools": [{"type": "web_search_preview"}],
-    }
-    if max_output_tokens is not None:
-        create_kwargs["max_output_tokens"] = int(max_output_tokens)
+    if native_web_search_enabled:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required when the selected Deep Research model uses native web search.")
 
-    response = client.responses.create(**create_kwargs)
-    response_id = response.id
-    status = getattr(response, "status", "unknown")
+        client = OpenAI(api_key=api_key)
+        create_kwargs = {
+            "model": model,
+            "input": query,
+            "instructions": instructions,
+            "background": background,
+            "max_tool_calls": max_tool_calls,
+            "reasoning": {"summary": "auto"},
+            "tools": [{"type": "web_search_preview"}],
+        }
+        if max_output_tokens is not None:
+            create_kwargs["max_output_tokens"] = int(max_output_tokens)
 
-    log_task_update(
-        "Deep Research",
-        f"Research job created with response id '{response_id}' and initial status '{status}'.",
-    )
+        response = client.responses.create(**create_kwargs)
+        response_id = response.id
+        status = getattr(response, "status", "unknown")
 
-    elapsed_seconds = 0
-    while background and status not in {"completed", "failed", "cancelled", "incomplete"}:
-        if elapsed_seconds >= max_wait_seconds:
-            raise TimeoutError(
-                f"Deep research job '{response_id}' did not finish within {max_wait_seconds} seconds."
+        log_task_update(
+            "Deep Research",
+            f"Research job created with response id '{response_id}' and initial status '{status}'.",
+        )
+
+        elapsed_seconds = 0
+        while background and status not in {"completed", "failed", "cancelled", "incomplete"}:
+            if elapsed_seconds >= max_wait_seconds:
+                raise TimeoutError(
+                    f"Deep research job '{response_id}' did not finish within {max_wait_seconds} seconds."
+                )
+
+            time.sleep(poll_interval_seconds)
+            elapsed_seconds += poll_interval_seconds
+            response = client.responses.retrieve(response_id)
+            new_status = getattr(response, "status", "unknown")
+
+            if new_status != status:
+                status = new_status
+                log_task_update(
+                    "Deep Research",
+                    f"Research job '{response_id}' status changed to '{status}' after {elapsed_seconds} seconds.",
+                )
+            else:
+                log_task_update(
+                    "Deep Research",
+                    f"Research job '{response_id}' still '{status}' after {elapsed_seconds} seconds.",
+                )
+
+        payload = _serialize_response(response)
+        payload["mode"] = "native_web_search"
+        payload["search_backend"] = search_backend
+        payload["research_provider"] = provider
+        payload["research_kb"] = kb_grounding
+        payload["research_kb_used"] = bool(kb_grounding.get("prompt_context"))
+        payload["research_kb_warning"] = kb_warning
+        raw_output_text = getattr(response, "output_text", None) or _extract_output_text(payload)
+        findings_text, cited_sources = split_sources_section(raw_output_text)
+        payload["source_summary"] = [*source_summary, *cited_sources]
+        payload["coverage_summary"] = coverage_summary
+        payload["recommended_next_steps"] = recommended_next_steps
+        payload["raw_output_text"] = raw_output_text
+        output_text = render_phase0_report(
+            title="Deep Research Brief",
+            objective=query,
+            findings=findings_text or raw_output_text,
+            coverage_lines=coverage_summary,
+            next_steps=recommended_next_steps,
+            sources_lines=payload["source_summary"],
+        )
+        payload["output_text"] = output_text
+    else:
+        log_task_update(
+            "Deep Research",
+            (
+                f"{provider or 'selected'} / {model} does not expose native web search here. "
+                "Using Kendr web search fallback for source gathering."
+            ),
+        )
+        provided_urls = _normalize_url_list(state.get("deep_research_source_urls", []))[:10]
+        search_results, fetched_pages, search_warnings = _collect_generic_web_evidence(
+            query,
+            provided_urls=provided_urls,
+            max_results=max_web_results,
+        )
+        web_context, fallback_source_lines = _generic_web_evidence_context(
+            search_results=search_results,
+            fetched_pages=fetched_pages,
+        )
+        if not web_context and not combined_source_context:
+            warning_text = " ".join(search_warnings).strip()
+            raise ValueError(
+                "Deep research could not collect any evidence with the configured web-search fallback."
+                + (f" {warning_text}" if warning_text else "")
             )
 
-        time.sleep(poll_interval_seconds)
-        elapsed_seconds += poll_interval_seconds
-        response = client.responses.retrieve(response_id)
-        new_status = getattr(response, "status", "unknown")
+        fallback_prompt = f"""
+You are conducting a deep research pass using Kendr's web-search fallback because the selected model/provider does not expose native web search.
 
-        if new_status != status:
-            status = new_status
-            log_task_update(
-                "Deep Research",
-                f"Research job '{response_id}' status changed to '{status}' after {elapsed_seconds} seconds.",
-            )
-        else:
-            log_task_update(
-                "Deep Research",
-                f"Research job '{response_id}' still '{status}' after {elapsed_seconds} seconds.",
-            )
+Research query:
+{query}
 
-    payload = _serialize_response(response)
-    payload["research_kb"] = kb_grounding
-    payload["research_kb_used"] = bool(kb_grounding.get("prompt_context"))
-    payload["research_kb_warning"] = kb_warning
-    raw_output_text = getattr(response, "output_text", None) or _extract_output_text(payload)
-    findings_text, cited_sources = split_sources_section(raw_output_text)
-    payload["source_summary"] = [*source_summary, *cited_sources]
-    payload["coverage_summary"] = coverage_summary
-    payload["recommended_next_steps"] = recommended_next_steps
-    payload["raw_output_text"] = raw_output_text
-    output_text = render_phase0_report(
-        title="Deep Research Brief",
-        objective=query,
-        findings=findings_text or raw_output_text,
-        coverage_lines=coverage_summary,
-        next_steps=recommended_next_steps,
-        sources_lines=payload["source_summary"],
-    )
-    payload["output_text"] = output_text
+Research instructions:
+{instructions}
+
+Collected web evidence:
+{web_context or "No web pages were successfully fetched. Use only the supplied local or knowledge-base context."}
+
+Supplemental local or knowledge-base context:
+{combined_source_context or "None"}
+
+Write a source-aware research memo that:
+- uses only the evidence supplied above
+- attributes important claims to the available URLs or supplied context
+- calls out uncertainty and evidence gaps clearly
+- ends with a concise Sources section listing the URLs you relied on
+- ends with concise recommended next steps
+""".strip()
+        with runtime_model_override(provider, model):
+            raw_output_text = llm_text(fallback_prompt).strip()
+        findings_text, cited_sources = split_sources_section(raw_output_text)
+        payload = {
+            "mode": "web_fallback",
+            "search_backend": search_backend,
+            "query": query,
+            "research_provider": provider,
+            "research_model": model,
+            "search_results": search_results,
+            "fetched_pages": fetched_pages,
+            "search_warnings": search_warnings,
+            "local_context": combined_source_context,
+            "local_source_count": local_meta.get("local_file_count", 0),
+            "provided_url_count": local_meta.get("provided_url_count", 0),
+            "research_kb": kb_grounding,
+            "research_kb_used": bool(kb_grounding.get("prompt_context")),
+            "research_kb_warning": kb_warning,
+            "source_summary": [*source_summary, *fallback_source_lines, *search_warnings, *cited_sources],
+            "coverage_summary": coverage_summary,
+            "recommended_next_steps": recommended_next_steps,
+            "raw_output_text": raw_output_text,
+        }
+        output_text = render_phase0_report(
+            title="Deep Research Brief",
+            objective=query,
+            findings=findings_text or raw_output_text,
+            coverage_lines=coverage_summary,
+            next_steps=recommended_next_steps,
+            sources_lines=payload["source_summary"],
+        )
+        payload["output_text"] = output_text
+        response_id = f"kendr_search_{call_number}"
+        status = "completed"
 
     raw_filename = f"deep_research_raw_{call_number}.json"
     output_filename = f"deep_research_output_{call_number}.txt"
@@ -540,9 +840,10 @@ Write a source-aware research memo that:
     write_text_file(output_filename, output_text)
 
     state["research_response_id"] = response_id
-    state["research_status"] = getattr(response, "status", status)
+    state["research_status"] = getattr(response, "status", status) if native_web_search_enabled else status
     state["research_result"] = output_text
     state["research_model"] = model
+    state["research_provider"] = provider
     state["research_raw"] = payload
     state["research_kb_used"] = bool(payload.get("research_kb_used"))
     state["research_kb_name"] = str((kb_grounding or {}).get("kb_name", "") or "")
@@ -552,6 +853,7 @@ Write a source-aware research memo that:
     state["research_source_summary"] = payload["source_summary"]
     state["deep_research_result_card"] = {
         **result_card,
+        "search_backend": search_backend,
         "source_summary": list(payload["source_summary"]),
     }
     state["draft_response"] = output_text
@@ -561,6 +863,7 @@ Write a source-aware research memo that:
         (
             f"Deep research finished with status '{state['research_status']}'. "
             f"Saved artifacts to {OUTPUT_DIR}/{output_filename}. "
+            f"Search backend: {search_backend}. "
             f"KB hits: {int((kb_grounding or {}).get('hit_count', 0) or 0)}."
         ),
         output_text,

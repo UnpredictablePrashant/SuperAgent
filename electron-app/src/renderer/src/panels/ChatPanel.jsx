@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo, useReducer } 
 import { useApp } from '../contexts/AppContext'
 import GitDiffPreview from '../components/GitDiffPreview'
 import { basename, resolveAgentCapability, resolveContextWindow, resolveSelectedModel } from '../lib/modelSelection'
+import { normalizeWorkflowCombo, normalizeWorkflowStageOptions, resolveWorkflowRecommendation } from '../lib/workflowRecommendations'
 import { buildActivityEntry, isPlanApprovalScope, isSkillApproval, shouldMirrorActivityMessage, summarizeRunArtifacts } from '../lib/runPresentation'
 
 // ─── Chat history persistence ────────────────────────────────────────────────
@@ -181,10 +182,18 @@ function deepResearchModelDisabledReason(option, webSearchEnabled) {
 function scoreDeepResearchOption(option, { webSearchEnabled = true, preferredValue = '' } = {}) {
   if (!option) return Number.NEGATIVE_INFINITY
   let score = 0
+  const capabilities = option.capabilities && typeof option.capabilities === 'object'
+    ? option.capabilities
+    : {}
+  const contextWindow = Number(option.contextWindow || 0)
   if (option.value === preferredValue) score += 1000
   if (!webSearchEnabled && option.isLocal) score += 240
-  if (webSearchEnabled && option.provider === 'openai') score += 240
-  if (webSearchEnabled && hasNativeWebSearchCapability(option.provider, option.model, option.capabilities)) score += 120
+  if (webSearchEnabled && hasNativeWebSearchCapability(option.provider, option.model, capabilities)) score += 220
+  else if (webSearchEnabled && capabilities.tool_calling) score += 90
+  if (capabilities.reasoning) score += 140
+  if (capabilities.structured_output) score += 80
+  if (capabilities.tool_calling) score += 70
+  if (!option.isLocal) score += 20
   const name = String(option.model || '').trim().toLowerCase()
   if (name.includes('gpt-5')) score += 160
   else if (name.includes('o3')) score += 145
@@ -194,7 +203,11 @@ function scoreDeepResearchOption(option, { webSearchEnabled = true, preferredVal
   else if (name.includes('gemini')) score += 100
   else if (name.includes('grok')) score += 95
   else if (name.includes('llama') || name.includes('qwen') || name.includes('mistral')) score += 80
-  score += Math.min(Number(option.contextWindow || 0), 2_000_000) / 20_000
+  if (contextWindow >= 200_000) score += 55
+  else if (contextWindow >= 128_000) score += 35
+  else if (contextWindow >= 64_000) score += 15
+  else if (contextWindow > 0 && contextWindow < 32_000) score -= 180
+  score += Math.min(contextWindow, 2_000_000) / 24_000
   return score
 }
 
@@ -242,6 +255,89 @@ function resolveDeepResearchModelSelection({ requestedValue = '', inheritedValue
     effectiveOption,
     effectiveSource,
   }
+}
+
+const DEFAULT_SEARCH_PROVIDER_OPTIONS = [
+  {
+    id: 'auto',
+    label: 'Auto',
+    enabled: true,
+    authenticated: false,
+    rate_limited: false,
+    note: 'Prefer the strongest configured backend, then fall back automatically.',
+    warning: '',
+  },
+  {
+    id: 'duckduckgo',
+    label: 'DuckDuckGo (DDGS)',
+    enabled: false,
+    authenticated: false,
+    rate_limited: true,
+    note: 'No API key required.',
+    warning: 'Unauthenticated DDGS search can hit rate limits on heavier runs.',
+  },
+  {
+    id: 'serpapi',
+    label: 'SerpAPI',
+    enabled: false,
+    authenticated: true,
+    rate_limited: false,
+    note: 'Requires SERP_API_KEY.',
+    warning: '',
+  },
+  {
+    id: 'browser_use_mcp',
+    label: 'Browser-Use MCP',
+    enabled: false,
+    authenticated: false,
+    rate_limited: false,
+    note: 'Requires a running browser-use MCP server.',
+    warning: '',
+  },
+  {
+    id: 'playwright_browser',
+    label: 'Playwright Browser',
+    enabled: false,
+    authenticated: false,
+    rate_limited: false,
+    note: 'Requires Playwright plus an installed browser runtime.',
+    warning: '',
+  },
+]
+
+function buildDeepResearchSearchProviders(modelInventory) {
+  const rows = Array.isArray(modelInventory?.search_providers) && modelInventory.search_providers.length
+    ? modelInventory.search_providers
+    : DEFAULT_SEARCH_PROVIDER_OPTIONS
+  const seen = new Set()
+  const options = []
+  for (const row of rows) {
+    const id = String(row?.id || '').trim().toLowerCase()
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    options.push({
+      id,
+      label: String(row?.label || id).trim() || id,
+      enabled: row?.enabled !== false || id === 'auto',
+      authenticated: !!row?.authenticated,
+      rateLimited: !!row?.rate_limited,
+      note: String(row?.note || row?.description || '').trim(),
+      warning: String(row?.warning || '').trim(),
+    })
+  }
+  if (!seen.has('auto')) options.unshift({ ...DEFAULT_SEARCH_PROVIDER_OPTIONS[0] })
+  return options
+}
+
+function resolveDeepResearchSearchProviderSelection(searchProviders, requestedId = '') {
+  const options = Array.isArray(searchProviders) ? searchProviders : DEFAULT_SEARCH_PROVIDER_OPTIONS
+  const normalized = String(requestedId || 'auto').trim().toLowerCase() || 'auto'
+  const optionById = new Map(options.map((option) => [option.id, option]))
+  const requested = optionById.get(normalized) || optionById.get('auto') || options[0] || null
+  const effective = requested && requested.enabled
+    ? requested
+    : (options.find((option) => option.id === 'auto') || options.find((option) => option.enabled) || requested)
+  return { options, requested, effective }
 }
 
 // ─── Chat-local state ────────────────────────────────────────────────────────
@@ -337,7 +433,7 @@ function chatReducer(s, a) {
             if (Number.isFinite(leftMs) !== Number.isFinite(rightMs)) return Number.isFinite(leftMs) ? -1 : 1
             return String(left?.ts || left?.timestamp || '').localeCompare(String(right?.ts || right?.timestamp || ''))
           })
-          .slice(-40)
+          .slice(-1000)
         return { ...m, logs: next }
       })
       return { ...s, messages: msgs }
@@ -412,6 +508,7 @@ function buildPayload(text, chatId, runId, projectRoot, mode, dr, attachments = 
     research_citation_style:         dr.citationStyle,
     research_enable_plagiarism_check: dr.plagiarismCheck,
     research_web_search_enabled:     dr.webSearchEnabled,
+    research_search_backend:         dr.searchBackend || 'auto',
     research_date_range:             dr.dateRange,
     research_sources:                allSources,
     research_max_sources:            dr.maxSources || 0,
@@ -420,6 +517,26 @@ function buildPayload(text, chatId, runId, projectRoot, mode, dr, attachments = 
     research_kb_id:                  dr.kbEnabled ? (dr.kbId || '') : '',
     research_kb_top_k:               dr.kbTopK || 8,
     deep_research_source_urls:       webLinks,
+  }
+  if (dr.multiModelEnabled) {
+    payload.multi_model_enabled = true
+    payload.multi_model_strategy = dr.multiModelStrategy === 'cheapest' ? 'cheapest' : 'best'
+    const stageOverrides = Object.fromEntries(
+      Object.entries((dr.multiModelStageOverrides && typeof dr.multiModelStageOverrides === 'object') ? dr.multiModelStageOverrides : {})
+        .map(([stageName, value]) => {
+          const resolved = resolveSelectedModel(value)
+          if (!resolved.provider || !resolved.model) return null
+          return [
+            String(stageName || '').trim(),
+            {
+              provider: resolved.provider,
+              model: resolved.model,
+            },
+          ]
+        })
+        .filter(Boolean),
+    )
+    if (Object.keys(stageOverrides).length) payload.multi_model_stage_overrides = stageOverrides
   }
   if (mergedLocalPaths.length) {
     payload.local_drive_paths              = mergedLocalPaths
@@ -925,8 +1042,109 @@ function runSnapshotErrorText(snapshot, runId, fallbackStatus = '') {
 
 function runSnapshotArtifacts(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
-  const result = data.result && typeof data.result === 'object' ? data.result : {}
-  return result.artifact_files || data.artifact_files || []
+  const result = runSnapshotResult(data)
+  const artifacts = []
+  const seen = new Set()
+
+  const appendArtifact = (artifact) => {
+    const normalized = normalizeArtifactItem(artifact)
+    if (!normalized) return
+    const key = [
+      String(normalized.name || '').trim(),
+      String(normalized.path || '').trim(),
+      String(normalized.downloadUrl || '').trim(),
+      String(normalized.viewUrl || '').trim(),
+    ].join('::')
+    if (seen.has(key)) return
+    seen.add(key)
+    artifacts.push(normalized)
+  }
+
+  const appendArtifactList = (items) => {
+    if (!Array.isArray(items)) return
+    for (const item of items) appendArtifact(item)
+  }
+
+  const appendCardArtifacts = (card) => {
+    const safeCard = card && typeof card === 'object' ? card : {}
+    appendArtifactList(safeCard.created_artifacts)
+    appendArtifactList(safeCard.downloadable_reports)
+  }
+
+  appendArtifactList(result.artifact_files)
+  appendArtifactList(data.artifact_files)
+  appendCardArtifacts(result.deep_research_result_card)
+  appendCardArtifacts(data.deep_research_result_card)
+
+  const appendManifestArtifacts = (manifest) => {
+    if (!manifest || typeof manifest !== 'object') return
+    appendArtifactList(manifest.created_artifacts)
+  }
+
+  appendManifestArtifacts(result.deep_research_artifacts_manifest)
+  appendManifestArtifacts(data.deep_research_artifacts_manifest)
+
+  const appendExportHints = (items) => {
+    if (!Array.isArray(items)) return
+    for (const item of items) {
+      const safe = item && typeof item === 'object' ? item : {}
+      const ext = String(safe.ext || '').trim().toLowerCase()
+      const name = String(safe.name || safe.label || (ext ? `report.${ext}` : '')).trim()
+      if (!name) continue
+      appendArtifact({
+        name,
+        label: String(safe.label || name).trim(),
+        ext,
+        kind: 'report',
+        download_url: safe.download_url || safe.downloadUrl || '',
+        view_url: safe.view_url || safe.viewUrl || '',
+      })
+    }
+  }
+
+  appendExportHints(result.long_document_exports)
+  appendExportHints(data.long_document_exports)
+
+  for (const key of [
+    'long_document_compiled_path',
+    'long_document_compiled_html_path',
+    'long_document_compiled_pdf_path',
+    'long_document_compiled_docx_path',
+  ]) {
+    const candidate = String(result[key] || data[key] || '').trim()
+    if (!candidate) continue
+    appendArtifact({
+      name: basename(candidate),
+      path: candidate,
+      kind: 'report',
+    })
+  }
+
+  return artifacts
+}
+
+const REPORT_ARTIFACT_NAMES = new Set([
+  'report.md',
+  'report.html',
+  'report.pdf',
+  'report.docx',
+  'deep_research_report.md',
+  'deep_research_report.html',
+  'deep_research_report.pdf',
+  'deep_research_report.docx',
+])
+
+function hasReportArtifacts(items) {
+  if (!Array.isArray(items) || !items.length) return false
+  return items.some((item) => {
+    const safe = item && typeof item === 'object' ? item : {}
+    const name = String(safe.name || safe.label || safe.path || '').trim().toLowerCase()
+    if (!name) return false
+    const base = basename(name).toLowerCase()
+    if (REPORT_ARTIFACT_NAMES.has(base)) return true
+    const ext = String(safe.ext || '').trim().toLowerCase()
+    return !!ext && ['md', 'html', 'pdf', 'docx'].includes(ext) && (base.startsWith('report.') || base.startsWith('deep_research_report.'))
+  })
 }
 
 function runSnapshotChecklist(snapshot) {
@@ -1295,6 +1513,7 @@ const DR_DEFAULTS = {
   depthMode: 'standard',
   pages: 25,
   researchModel: '',
+  searchBackend: 'auto',
   citationStyle: 'apa',
   dateRange: 'all_time',
   maxSources: 0,
@@ -1308,6 +1527,9 @@ const DR_DEFAULTS = {
   kbEnabled: false,
   kbId: '',
   kbTopK: 8,
+  multiModelEnabled: false,
+  multiModelStrategy: 'best',
+  multiModelStageOverrides: {},
   collapsed: false,
 }
 
@@ -1384,6 +1606,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
   const esRef = useRef(null)
   const resumeAttemptedRunRef = useRef('')
   const staleRunRecoveryRef = useRef('')
+  const artifactRecoveryRef = useRef(new Set())
   const mirroredActivityIdsRef = useRef([])
   const apiBase = appState.backendUrl || 'http://127.0.0.1:2151'
   const updateDr = (patch) => setDr(s => ({ ...s, ...patch }))
@@ -1397,7 +1620,18 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     modelInventory,
     webSearchEnabled: !!dr.webSearchEnabled,
   }), [dr.researchModel, dr.webSearchEnabled, appState.selectedModel, modelInventory])
+  const deepResearchSearchProviderState = useMemo(() => resolveDeepResearchSearchProviderSelection(
+    buildDeepResearchSearchProviders(modelInventory),
+    dr.searchBackend,
+  ), [dr.searchBackend, modelInventory])
   const effectiveDeepResearchModel = deepResearchModelState.effectiveOption
+  const recommendedDeepResearchModel = deepResearchModelState.recommendedOption
+  const effectiveDeepResearchSearchProvider = deepResearchSearchProviderState.effective
+  useEffect(() => {
+    const effectiveId = effectiveDeepResearchSearchProvider?.id || 'auto'
+    const requestedId = dr.searchBackend || 'auto'
+    if (requestedId !== effectiveId) updateDr({ searchBackend: effectiveId })
+  }, [dr.searchBackend, effectiveDeepResearchSearchProvider?.id])
   const composerModelRaw = chat.mode === 'research'
     ? (effectiveDeepResearchModel?.value || appState.selectedModel || '')
     : (appState.selectedModel || '')
@@ -1467,6 +1701,23 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     if (dr.kbId) return indexedResearchKbs.find(kb => kb.id === dr.kbId) || null
     return activeResearchKb
   }, [dr.kbEnabled, dr.kbId, indexedResearchKbs, activeResearchKb])
+  const deepResearchWorkflowRecommendation = useMemo(() => {
+    return resolveWorkflowRecommendation(modelInventory, 'deep_research_report')
+  }, [modelInventory])
+  const deepResearchWorkflowStageOptions = useMemo(() => (
+    normalizeWorkflowStageOptions(deepResearchWorkflowRecommendation?.stage_options)
+  ), [deepResearchWorkflowRecommendation])
+  const activeDeepResearchWorkflowCombo = useMemo(() => {
+    if (!dr.multiModelEnabled || !deepResearchWorkflowRecommendation) return null
+    const rawCombo = dr.multiModelStrategy === 'cheapest'
+      ? deepResearchWorkflowRecommendation.cheapest
+      : deepResearchWorkflowRecommendation.best
+    return normalizeWorkflowCombo(rawCombo)
+  }, [dr.multiModelEnabled, dr.multiModelStrategy, deepResearchWorkflowRecommendation])
+  const recommendedDeepResearchEvidenceStage = useMemo(() => {
+    if (!activeDeepResearchWorkflowCombo) return null
+    return activeDeepResearchWorkflowCombo.stages.find((stage) => stage?.stage === 'evidence') || null
+  }, [activeDeepResearchWorkflowCombo])
 
   useEffect(() => {
     if (!dr.researchModel) return
@@ -1570,6 +1821,60 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     if (!chat.awaitingContext || displayableAwaitingContext) return
     dispatch({ type: 'CLEAR_AWAITING' })
   }, [chat.awaitingContext, displayableAwaitingContext])
+
+  useEffect(() => {
+    const candidates = (chat.messages || []).filter((msg) => (
+      msg?.role === 'assistant'
+      && String(msg?.runId || '').trim()
+      && !isPendingRunStatus(msg?.status)
+      && (!Array.isArray(msg?.artifacts) || !hasReportArtifacts(msg.artifacts))
+    ))
+    if (!candidates.length) return
+
+    let cancelled = false
+    ;(async () => {
+      for (const msg of candidates.slice(-8)) {
+        const runId = String(msg.runId || '').trim()
+        if (!runId || artifactRecoveryRef.current.has(runId)) continue
+        try {
+          let recoveredArtifacts = []
+          let runSnapshot = {}
+
+          const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}`)
+          runSnapshot = await resp.json().catch(() => ({}))
+          if (cancelled) return
+          if (resp.ok) recoveredArtifacts = runSnapshotArtifacts(runSnapshot)
+
+          if (!recoveredArtifacts.length) {
+            const artifactResp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}/artifacts`)
+            const artifactData = await artifactResp.json().catch(() => ({}))
+            if (cancelled) return
+            if (artifactResp.ok && Array.isArray(artifactData?.files)) {
+              recoveredArtifacts = artifactData.files
+            }
+          }
+
+          if (!recoveredArtifacts.length) continue
+          if (Array.isArray(msg?.artifacts) && msg.artifacts.length) {
+            recoveredArtifacts = [...msg.artifacts, ...recoveredArtifacts]
+          }
+          artifactRecoveryRef.current.add(runId)
+          dispatch({
+            type: 'UPD_MSG',
+            id: msg.id,
+            patch: {
+              ...runSnapshotMessageMeta(runSnapshot),
+              artifacts: recoveredArtifacts,
+            },
+          })
+        } catch (_) {
+          continue
+        }
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [chat.messages, apiBase])
 
   useEffect(() => {
     const staleAwaiting = (chat.messages || []).filter((msg) => (
@@ -2974,12 +3279,18 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
             inheritedReason={deepResearchModelState.inheritedReason}
             effectiveModel={deepResearchModelState.effectiveOption}
             effectiveModelSource={deepResearchModelState.effectiveSource}
+            recommendedDeepResearchModel={recommendedDeepResearchModel}
+            recommendedDeepResearchEvidenceStage={recommendedDeepResearchEvidenceStage}
+            searchProviderState={deepResearchSearchProviderState}
+            effectiveSearchProvider={effectiveDeepResearchSearchProvider}
             indexedKbs={indexedResearchKbs}
             activeKb={activeResearchKb}
             selectedKb={selectedResearchKb}
             projectRoot={appState.projectRoot}
             apiBase={apiBase}
             refreshKbs={loadResearchKbs}
+            activeDeepResearchWorkflowCombo={activeDeepResearchWorkflowCombo}
+            workflowStageOptions={deepResearchWorkflowStageOptions}
           />
         )}
       </div>
@@ -3244,16 +3555,53 @@ function DeepResearchPanel({
   inheritedReason = '',
   effectiveModel = null,
   effectiveModelSource = 'none',
+  recommendedDeepResearchModel = null,
+  recommendedDeepResearchEvidenceStage = null,
+  searchProviderState = { options: [] },
+  effectiveSearchProvider = null,
   indexedKbs = [],
   activeKb = null,
   selectedKb = null,
   projectRoot = '',
   apiBase = '',
   refreshKbs = null,
+  activeDeepResearchWorkflowCombo = null,
+  workflowStageOptions = [],
 }) {
   const api = window.kendrAPI
   const [kbSetupState, setKbSetupState] = useState({ status: 'idle', message: '' })
   const depthPreset = resolveDeepResearchDepthPreset(dr.depthMode, dr.pages)
+  const recommendedStageSelections = useMemo(() => {
+    const next = {}
+    const stages = Array.isArray(activeDeepResearchWorkflowCombo?.stages) ? activeDeepResearchWorkflowCombo.stages : []
+    for (const stage of stages) {
+      const stageName = String(stage?.stage || '').trim()
+      const provider = String(stage?.provider || '').trim()
+      const model = String(stage?.model || '').trim()
+      if (stageName && provider && model) next[stageName] = `${provider}/${model}`
+    }
+    return next
+  }, [activeDeepResearchWorkflowCombo])
+  const actionableWorkflowStageOptions = useMemo(() => (
+    (Array.isArray(workflowStageOptions) ? workflowStageOptions : [])
+      .filter((stageOption) => ['router', 'merge', 'verify'].includes(String(stageOption?.stage || '').trim()))
+  ), [workflowStageOptions])
+  const stageOverrideSelections = (dr.multiModelStageOverrides && typeof dr.multiModelStageOverrides === 'object')
+    ? dr.multiModelStageOverrides
+    : {}
+
+  const updateStageOverride = (stageName, value) => {
+    const normalizedStage = String(stageName || '').trim()
+    if (!normalizedStage) return
+    const normalizedValue = String(value || '').trim()
+    const recommendedValue = String(recommendedStageSelections[normalizedStage] || '').trim()
+    const nextOverrides = { ...stageOverrideSelections }
+    if (!normalizedValue || normalizedValue === recommendedValue) delete nextOverrides[normalizedStage]
+    else nextOverrides[normalizedStage] = normalizedValue
+    updateDr({ multiModelStageOverrides: nextOverrides })
+  }
+
+  const clearStageOverrides = () => updateDr({ multiModelStageOverrides: {} })
 
   const toggleFormat = (fmt) => {
     const cur = dr.outputFormats
@@ -3412,6 +3760,14 @@ function DeepResearchPanel({
           <div className="dr-summary">
             <span className="dr-sum-pill">{depthPreset.summary}</span>
             {effectiveModel?.model && <span className="dr-sum-pill">{effectiveModel.model}</span>}
+            {dr.webSearchEnabled && effectiveSearchProvider?.label && (
+              <span className="dr-sum-pill">{effectiveSearchProvider.label}</span>
+            )}
+            {dr.multiModelEnabled && (
+              <span className="dr-sum-pill">
+                {dr.multiModelStrategy === 'cheapest' ? 'Cheapest combo' : 'Best combo'}
+              </span>
+            )}
             <span className="dr-sum-pill">{dr.citationStyle.toUpperCase()}</span>
             <span className="dr-sum-pill">{dr.outputFormats.join('·')}</span>
             {dr.webSearchEnabled && effectiveModel?.model && (
@@ -3476,6 +3832,13 @@ function DeepResearchPanel({
                     ? `Active for Deep Research: ${effectiveModel.shortLabel}${effectiveModelSource === 'recommended' ? ' (recommended)' : effectiveModelSource === 'header' ? ' (from header model)' : ''}.`
                     : 'No compatible Deep Research model is available with the current settings.'}
                 </div>
+                {recommendedDeepResearchModel && (
+                  <div className="dr-note">
+                    {effectiveModel && recommendedDeepResearchModel.value === effectiveModel.value
+                      ? `Best-fit suggestion: ${recommendedDeepResearchModel.shortLabel}.`
+                      : `Best-fit suggestion: ${recommendedDeepResearchModel.shortLabel}${effectiveModel ? `, while this run is currently using ${effectiveModel.shortLabel}.` : '.'}`}
+                  </div>
+                )}
                 {dr.webSearchEnabled ? (
                   <div className="dr-note">
                     {effectiveModel && hasNativeWebSearchCapability(effectiveModel.provider, effectiveModel.model, effectiveModel.capabilities)
@@ -3485,8 +3848,18 @@ function DeepResearchPanel({
                 ) : (
                   <div className="dr-note">Local-only runs can use local models or any configured provider with enough context.</div>
                 )}
+                {dr.multiModelEnabled && recommendedDeepResearchEvidenceStage?.provider && recommendedDeepResearchEvidenceStage?.model && (
+                  <div className="dr-note">
+                    Multi-model evidence-stage suggestion: {providerDisplayLabel(recommendedDeepResearchEvidenceStage.provider)} · {recommendedDeepResearchEvidenceStage.model}.
+                  </div>
+                )}
                 {!dr.researchModel && inheritedReason && effectiveModel && (
                   <div className="dr-note">The current chat-header model is incompatible here, so this run will fall back to {effectiveModel.shortLabel}.</div>
+                )}
+                {dr.multiModelEnabled && (
+                  <div className="dr-note">
+                    The selected Deep Research model remains the base fallback. Route, evidence, draft, merge, and verification stages can be overridden by the multi-model workflow plan for this task.
+                  </div>
                 )}
               </div>
               <div className="dr-field">
@@ -3511,6 +3884,31 @@ function DeepResearchPanel({
                 <label className="dr-label">Max Sources</label>
                 <input className="dr-input-sm" type="number" min={0} step={10} value={dr.maxSources}
                   onChange={e => updateDr({ maxSources: +e.target.value })} placeholder="0 = auto" />
+              </div>
+              <div className="dr-field">
+                <label className="dr-label">Search Backend</label>
+                <select
+                  className="dr-select"
+                  value={effectiveSearchProvider?.id || 'auto'}
+                  onChange={e => updateDr({ searchBackend: e.target.value })}
+                  disabled={!dr.webSearchEnabled}
+                >
+                  {searchProviderState.options.map((option) => (
+                    <option key={option.id} value={option.id} disabled={!option.enabled}>
+                      {option.enabled ? option.label : `${option.label} — not configured`}
+                    </option>
+                  ))}
+                </select>
+                <div className="dr-note">
+                  {!dr.webSearchEnabled
+                    ? 'Search backend selection is disabled while web search is off.'
+                    : (effectiveSearchProvider?.note || 'Choose which backend Kendr should prefer while gathering external sources.')}
+                </div>
+                {dr.webSearchEnabled && effectiveSearchProvider?.warning && (
+                  <div className="dr-note" style={{ color: 'var(--warn)' }}>
+                    {effectiveSearchProvider.warning}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -3556,6 +3954,104 @@ function DeepResearchPanel({
                     Checkpointing
                   </label>
                 </div>
+              </div>
+              <div className="dr-field">
+                <label className="dr-label">Model Allocation</label>
+                <div className="dr-checks">
+                  <label className="dr-check">
+                    <input
+                      type="checkbox"
+                      checked={!!dr.multiModelEnabled}
+                      onChange={e => updateDr({ multiModelEnabled: e.target.checked })}
+                    />
+                    Use multi-model workflow
+                  </label>
+                </div>
+                {dr.multiModelEnabled ? (
+                  <>
+                    <select
+                      className="dr-select"
+                      value={dr.multiModelStrategy || 'best'}
+                      onChange={e => updateDr({ multiModelStrategy: e.target.value === 'cheapest' ? 'cheapest' : 'best' })}
+                      style={{ marginTop: 8 }}
+                    >
+                      <option value="best">Best combination</option>
+                      <option value="cheapest">Cheapest combination</option>
+                    </select>
+                    <div className="dr-note">
+                      Deep Research can split route, evidence, draft, merge, and verification across different models when the current task enables it.
+                    </div>
+                    <div className="dr-note">
+                      {activeDeepResearchWorkflowCombo?.available
+                        ? `${dr.multiModelStrategy === 'cheapest' ? 'Cheapest' : 'Best'} combo: ${activeDeepResearchWorkflowCombo.summary || 'Stage recommendations are available.'}`
+                        : 'No compatible multi-model Deep Research combination is currently available from the connected providers.'}
+                    </div>
+                    {activeDeepResearchWorkflowCombo?.available && (
+                      <div className="dr-note">
+                        Estimated cost band: {String(activeDeepResearchWorkflowCombo.estimated_cost_band || 'unknown')}.
+                      </div>
+                    )}
+                    {activeDeepResearchWorkflowCombo?.available && actionableWorkflowStageOptions.length > 0 && (
+                      <>
+                        <div className="dr-note" style={{ marginTop: 8 }}>
+                          The recommendation preset seeds the stage picks below. Change a stage only when you want to pin a different model for that part of the workflow.
+                        </div>
+                        {actionableWorkflowStageOptions.map((stageOption) => {
+                          const stageName = String(stageOption.stage || '').trim()
+                          const selectedValue = String(stageOverrideSelections[stageName] || '').trim()
+                          const recommendedValue = String(recommendedStageSelections[stageName] || '').trim()
+                          const recommendedCandidate = (Array.isArray(stageOption.candidates) ? stageOption.candidates : [])
+                            .find((candidate) => String(candidate?.value || '').trim() === recommendedValue) || null
+                          const manualCandidate = (Array.isArray(stageOption.candidates) ? stageOption.candidates : [])
+                            .find((candidate) => String(candidate?.value || '').trim() === selectedValue) || null
+                          return (
+                            <div key={stageName} style={{ marginTop: 10 }}>
+                              <label className="dr-label">{stageOption.label} Model</label>
+                              <select
+                                className="dr-select"
+                                value={selectedValue}
+                                onChange={e => updateStageOverride(stageName, e.target.value)}
+                              >
+                                <option value="">
+                                  {recommendedCandidate
+                                    ? `Use ${dr.multiModelStrategy === 'cheapest' ? 'cheapest' : 'best'} recommendation · ${recommendedCandidate.labelFull || recommendedCandidate.value}`
+                                    : 'Use the recommendation preset'}
+                                </option>
+                                {(Array.isArray(stageOption.candidates) ? stageOption.candidates : []).map((candidate) => (
+                                  <option key={candidate.value} value={candidate.value}>
+                                    {candidate.labelFull || candidate.value}
+                                  </option>
+                                ))}
+                              </select>
+                              <div className="dr-note">
+                                {manualCandidate
+                                  ? `Pinned manually: ${manualCandidate.labelFull || manualCandidate.value}. ${manualCandidate.reason || ''}`.trim()
+                                  : recommendedCandidate
+                                    ? `Recommended: ${recommendedCandidate.labelFull || recommendedCandidate.value}. ${recommendedCandidate.reason || ''}`.trim()
+                                    : 'No compatible model candidates are available for this stage.'}
+                              </div>
+                            </div>
+                          )
+                        })}
+                        {Object.keys(stageOverrideSelections).length > 0 && (
+                          <button
+                            type="button"
+                            className="dr-action-btn"
+                            style={{ marginTop: 10 }}
+                            onClick={clearStageOverrides}
+                          >
+                            Reset Stage Overrides
+                          </button>
+                        )}
+                        <div className="dr-note" style={{ marginTop: 8 }}>
+                          The Deep Research model above controls evidence collection. Section drafting currently follows the merge-stage model during long-document execution.
+                        </div>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <div className="dr-note">Single-model mode keeps the whole task on the selected Deep Research model.</div>
+                )}
               </div>
             </div>
 
@@ -3974,7 +4470,7 @@ function ExecutionLogPanel({ logs, expanded, onToggle }) {
             <div className="kc-log-empty">Waiting for execution log output...</div>
           ) : (
             <div className="kc-log-lines">
-              {items.slice(-18).map((item) => (
+              {items.slice(-120).map((item) => (
                 <div key={item.id} className="kc-log-line">
                   {item.clock && <span className="kc-log-clock">{item.clock}</span>}
                   <span className="kc-log-text">{item.text}</span>

@@ -71,6 +71,15 @@ class SetupRegistryTests(unittest.TestCase):
         snapshot = build_setup_snapshot(registry.agent_cards())
         self.assertTrue(any("local_drive_agent" in warning for warning in snapshot.get("contract_warnings", [])))
 
+    def test_long_document_agent_is_available_without_unknown_requirement_warning(self):
+        registry = build_registry()
+        snapshot = build_setup_snapshot(registry.agent_cards())
+
+        self.assertTrue(snapshot["agents"]["long_document_agent"]["available"])
+        self.assertFalse(any("long_document_agent" in warning for warning in snapshot.get("contract_warnings", [])))
+        self.assertNotIn("deep_research_agent", snapshot["agents"])
+        self.assertNotIn("deep_research_agent", snapshot["available_agents"])
+
     def test_superrag_agent_uses_local_vector_store_when_qdrant_is_unconfigured(self):
         registry = build_registry()
         with patch.dict("tasks.setup_registry.os.environ", {"OPENAI_API_KEY": "test-openai-key", "QDRANT_URL": ""}, clear=False):

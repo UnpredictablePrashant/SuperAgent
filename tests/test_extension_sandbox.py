@@ -29,7 +29,7 @@ class ExtensionSandboxTests(unittest.TestCase):
             with patch("kendr.extension_sandbox.shutil.which", return_value=""):
                 launch = prepare_extension_host_launch(
                     mode="web-search",
-                    payload={"permissions": {"network": {"allow": True, "domains": ["api.duckduckgo.com"]}}},
+                    payload={"permissions": {"network": {"allow": True, "domains": ["duckduckgo.com"]}}},
                     base_command=["python3", "-m", "kendr.extension_host", "web-search"],
                     base_env={"PATH": "/usr/bin"},
                     launch_root=tmp,

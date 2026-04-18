@@ -330,10 +330,18 @@ def _build_deep_research_resume_plan(runtime: Any, state: dict[str, Any]) -> Wor
         reason=reason,
         intent="long-document-resume",
         content=objective,
-        state_updates={"long_document_mode": True},
+        state_updates={
+            "current_objective": objective,
+            "deep_research_mode": True,
+            "long_document_mode": True,
+            "long_document_collect_sources_first": True,
+        },
         state_mutations={
+            "workflow_type": "deep_research",
+            "deep_research_mode": True,
             "long_document_mode": True,
             "long_document_job_started": True,
+            "long_document_collect_sources_first": True,
         },
     )
 
@@ -351,11 +359,11 @@ def _match_document_generation(runtime: Any, state: dict[str, Any]) -> bool:
 
 def _build_document_generation_plan(runtime: Any, state: dict[str, Any]) -> WorkflowDispatchPlan:
     objective = _current_objective(state)
-    workflow_type = state.get("workflow_type") or "long_document"
+    workflow_type = state.get("workflow_type") or "deep_research"
     reason = (
         "The request asks for a researched document/report to be produced as a file. "
-        "Routing directly to long_document_agent which will research, write, and export "
-        "the document as Markdown, PDF, and DOCX."
+        "Routing directly to long_document_agent as the canonical deep research pipeline "
+        "so it can research, write, and export the document as Markdown, PDF, and DOCX."
     )
     return WorkflowDispatchPlan(
         workflow_id="document_generation",
@@ -364,11 +372,13 @@ def _build_document_generation_plan(runtime: Any, state: dict[str, Any]) -> Work
         intent="long-document-dispatch",
         content=objective,
         state_updates={
+            "deep_research_mode": True,
             "long_document_mode": True,
             "long_document_collect_sources_first": True,
             "current_objective": objective,
         },
         state_mutations={
+            "deep_research_mode": True,
             "long_document_mode": True,
             "workflow_type": workflow_type,
             "long_document_job_started": True,
@@ -480,25 +490,44 @@ def _build_superrag_plan(runtime: Any, state: dict[str, Any]) -> WorkflowDispatc
 def _match_deep_research(runtime: Any, state: dict[str, Any]) -> bool:
     return bool(
         not state.get("plan_steps")
-        and state.get("last_agent") != "deep_research_agent"
-        and runtime._is_agent_available(state, "deep_research_agent")
-        and not runtime._is_long_document_request(state)
+        and state.get("last_agent") != "long_document_agent"
+        and runtime._is_agent_available(state, "long_document_agent")
         and runtime._is_deep_research_request(state)
     )
 
 
 def _build_deep_research_plan(runtime: Any, state: dict[str, Any]) -> WorkflowDispatchPlan:
     objective = _current_objective(state)
-    reason = "The request is a deep research task. Route to deep_research_agent for deep research execution."
+    reason = (
+        "The request is a deep research task. Route to long_document_agent as the canonical "
+        "deep research workflow owner for staged evidence collection, planning, drafting, and export."
+    )
+    updates = {
+        "current_objective": objective,
+        "research_query": objective,
+        "deep_research_mode": True,
+        "long_document_mode": True,
+        "long_document_collect_sources_first": True,
+    }
     return WorkflowDispatchPlan(
         workflow_id="deep_research",
-        agent_name="deep_research_agent",
+        agent_name="long_document_agent",
         reason=reason,
         intent="deep-research-dispatch",
         content=objective,
-        state_updates={"research_query": objective},
-        state_mutations={"workflow_type": state.get("workflow_type") or "deep_research"},
-        decision_note=f"next_agent=deep_research_agent\nreason={reason}\nstate_updates={{'research_query': '{objective}'}}",
+        state_updates=updates,
+        state_mutations={
+            "workflow_type": state.get("workflow_type") or "deep_research",
+            "deep_research_mode": True,
+            "long_document_mode": True,
+            "long_document_job_started": True,
+            "long_document_collect_sources_first": True,
+        },
+        decision_note=(
+            "next_agent=long_document_agent\n"
+            f"reason={reason}\n"
+            f"state_updates={updates}"
+        ),
     )
 
 
@@ -513,14 +542,17 @@ def _match_long_document(runtime: Any, state: dict[str, Any]) -> bool:
 
 def _build_long_document_plan(runtime: Any, state: dict[str, Any]) -> WorkflowDispatchPlan:
     objective = _current_objective(state)
+    deep_research_mode = bool(runtime._is_deep_research_request(state))
     reason = (
-        "The request is a deep research report objective. "
+        "The request is a long-form researched document objective. "
         "Route to long_document_agent for staged section research and final merge."
     )
-    workflow_type = state.get("workflow_type") or ("deep_research" if runtime._is_deep_research_request(state) else "long_document")
+    workflow_type = state.get("workflow_type") or ("deep_research" if deep_research_mode else "long_document")
     updates = {
         "current_objective": objective,
+        "deep_research_mode": deep_research_mode,
         "long_document_mode": True,
+        "long_document_collect_sources_first": True,
     }
     return WorkflowDispatchPlan(
         workflow_id="long_document",
@@ -529,7 +561,13 @@ def _build_long_document_plan(runtime: Any, state: dict[str, Any]) -> WorkflowDi
         intent="long-document-dispatch",
         content=objective,
         state_updates=updates,
-        state_mutations={"workflow_type": workflow_type},
+        state_mutations={
+            "workflow_type": workflow_type,
+            "deep_research_mode": deep_research_mode,
+            "long_document_mode": True,
+            "long_document_job_started": True,
+            "long_document_collect_sources_first": True,
+        },
         decision_note=(
             "next_agent=long_document_agent\n"
             f"reason={reason}\n"
@@ -553,6 +591,11 @@ def _match_drive_informed_long_document(runtime: Any, state: dict[str, Any]) -> 
 
 def _build_drive_informed_long_document_plan(runtime: Any, state: dict[str, Any]) -> WorkflowDispatchPlan:
     objective = _current_objective(state)
+    deep_research_mode = bool(
+        str(state.get("workflow_type", "") or "").strip().lower() == "deep_research"
+        or state.get("deep_research_mode", False)
+        or runtime._is_deep_research_request(state)
+    )
     drive_summary = str(state.get("local_drive_summary") or state.get("document_summary") or "").strip()
     long_doc_objective = objective
     if drive_summary:
@@ -562,7 +605,9 @@ def _build_drive_informed_long_document_plan(runtime: Any, state: dict[str, Any]
         )
     updates: dict[str, Any] = {
         "current_objective": long_doc_objective,
+        "deep_research_mode": deep_research_mode,
         "long_document_mode": True,
+        "long_document_collect_sources_first": True,
     }
     if int(state.get("long_document_pages", 0) or 0) <= 0:
         updates["long_document_pages"] = 50
@@ -578,8 +623,11 @@ def _build_drive_informed_long_document_plan(runtime: Any, state: dict[str, Any]
         content=long_doc_objective,
         state_updates=updates,
         state_mutations={
+            "workflow_type": "deep_research" if deep_research_mode else str(state.get("workflow_type") or "long_document"),
+            "deep_research_mode": deep_research_mode,
             "long_document_mode": True,
             "long_document_job_started": True,
+            "long_document_collect_sources_first": True,
         },
         decision_note=(
             "next_agent=long_document_agent\n"
@@ -629,7 +677,6 @@ def _research_body(state: dict[str, Any]) -> str:
         str(state.get("research_pipeline_report") or "").strip()
         or str(state.get("research_pipeline_synthesis") or "").strip()
         or str(state.get("research_result") or "").strip()
-        or str(state.get("draft_response") or "").strip()
     )
 
 
@@ -638,6 +685,7 @@ def _match_research_synthesis(runtime: Any, state: dict[str, Any]) -> bool:
         not state.get("plan_steps")
         and not state.get("research_synthesis_done")
         and state.get("last_agent") in {"research_pipeline_agent", "deep_research_agent"}
+        and str(state.get("last_agent_status", "")).strip().lower() in {"success", "completed"}
         and runtime._is_agent_available(state, "worker_agent")
         and _research_body(state)
     )

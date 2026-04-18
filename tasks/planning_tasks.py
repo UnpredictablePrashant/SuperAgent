@@ -36,6 +36,28 @@ _SECURITY_PLAN_AGENT_PREFERENCE = [
     "security_report_agent",
     "security_scanner_agent",
 ]
+_PLACEHOLDER_PLAN_AGENTS = {
+    "agent_name",
+    "agent_name_from_available_list",
+    "available_agent",
+    "your_agent_name",
+    "selected_agent",
+}
+_PLACEHOLDER_PLAN_TASKS = {
+    "perform specified actions",
+    "perform specified actions.",
+    "complete the assigned task",
+    "complete the assigned task.",
+    "execute the task",
+    "execute the task.",
+}
+_PLACEHOLDER_PLAN_SUCCESS = {
+    "confirm completion",
+    "confirm completion.",
+    "task completed",
+    "task completed.",
+    "done",
+}
 
 
 def _planner_db_path(state: dict[str, Any]) -> str:
@@ -62,30 +84,119 @@ def _plan_contains_disallowed_deep_research_agent(plan_data: dict[str, Any]) -> 
     return False
 
 
-def _sanitize_deep_research_plan(plan_data: dict[str, Any], objective: str) -> dict[str, Any]:
-    if not _plan_contains_disallowed_deep_research_agent(plan_data):
-        return plan_data
+def _pick_deep_research_fallback_plan(state: dict[str, Any], objective: str, *, summary: str) -> dict[str, Any]:
+    available = {
+        str(item).strip()
+        for item in state.get("available_agents", [])
+        if str(item).strip()
+    }
+
+    def _allowed(agent_name: str) -> bool:
+        return not available or agent_name in available
+
+    if _allowed("long_document_agent"):
+        safe_plan = {
+            "needs_clarification": False,
+            "clarification_questions": [],
+            "summary": summary,
+            "steps": [
+                {
+                    "id": "step-1",
+                    "title": "Produce research report",
+                    "agent": "long_document_agent",
+                    "task": objective,
+                    "depends_on": [],
+                    "parallel_group": "",
+                    "success_criteria": "Research report artifacts are generated.",
+                    "status": "pending",
+                }
+            ],
+        }
+        return normalize_plan_data(safe_plan, objective)
+
+    if _allowed("deep_research_agent"):
+        safe_plan = {
+            "needs_clarification": False,
+            "clarification_questions": [],
+            "summary": summary,
+            "steps": [
+                {
+                    "id": "step-1",
+                    "title": "Collect research brief",
+                    "agent": "deep_research_agent",
+                    "task": objective,
+                    "depends_on": [],
+                    "parallel_group": "",
+                    "success_criteria": "Source-backed research brief exists.",
+                    "status": "pending",
+                }
+            ],
+        }
+        return normalize_plan_data(safe_plan, objective)
+
+    if _allowed("research_pipeline_agent") and _allowed("worker_agent"):
+        safe_plan = {
+            "needs_clarification": False,
+            "clarification_questions": [],
+            "summary": summary,
+            "steps": [
+                {
+                    "id": "step-1",
+                    "title": "Collect sources",
+                    "agent": "research_pipeline_agent",
+                    "task": objective,
+                    "depends_on": [],
+                    "parallel_group": "",
+                    "success_criteria": "Research findings are collected.",
+                    "status": "pending",
+                },
+                {
+                    "id": "step-2",
+                    "title": "Write final report",
+                    "agent": "worker_agent",
+                    "task": "Write the final report from the collected research findings.",
+                    "depends_on": ["step-1"],
+                    "parallel_group": "",
+                    "success_criteria": "Final report draft exists.",
+                    "status": "pending",
+                },
+            ],
+        }
+        return normalize_plan_data(safe_plan, objective)
+
+    fallback_agent = "worker_agent" if _allowed("worker_agent") else next(iter(available), "worker_agent")
     safe_plan = {
         "needs_clarification": False,
         "clarification_questions": [],
-        "summary": (
-            "Deep research mode is restricted to evidence collection, analysis, and document generation. "
-            "Project build steps were removed and replaced with a document-only research step."
-        ),
+        "summary": summary,
         "steps": [
             {
                 "id": "step-1",
-                "title": "Produce research report",
-                "agent": "long_document_agent",
+                "title": "Primary execution",
+                "agent": fallback_agent,
                 "task": objective,
                 "depends_on": [],
                 "parallel_group": "",
-                "success_criteria": "A research report is generated and exported as document artifacts.",
+                "success_criteria": "A complete draft addresses the objective.",
                 "status": "pending",
             }
         ],
     }
     return normalize_plan_data(safe_plan, objective)
+
+
+def _sanitize_deep_research_plan(plan_data: dict[str, Any], objective: str, *, available_agents: list[str] | None = None) -> dict[str, Any]:
+    if not _plan_contains_disallowed_deep_research_agent(plan_data):
+        return plan_data
+    safe_state = {"available_agents": list(available_agents or [])}
+    return _pick_deep_research_fallback_plan(
+        safe_state,
+        objective,
+        summary=(
+            "Deep research mode is restricted to evidence collection, analysis, and document generation. "
+            "Project build steps were removed and replaced with a document-only research step."
+        ),
+    )
 
 
 def _persist_plan_snapshot(
@@ -217,17 +328,6 @@ def _is_security_planning_request(state: dict[str, Any], objective: str) -> bool
     return is_security_assessment_query(objective)
 
 
-def _plan_payload_usable(raw_plan: Any) -> tuple[bool, str]:
-    if not isinstance(raw_plan, dict):
-        return False, "Planner returned a non-object response."
-    raw_steps = raw_plan.get("steps")
-    if not isinstance(raw_steps, list) or not raw_steps:
-        return False, "Planner response did not include a non-empty `steps` list."
-    if not any(isinstance(item, dict) for item in raw_steps):
-        return False, "Planner response `steps` list did not contain any valid step objects."
-    return True, ""
-
-
 def _security_plan_agent_suggestions(state: dict[str, Any]) -> list[str]:
     available = set(state.get("available_agents", []) or [])
     picks = [name for name in _SECURITY_PLAN_AGENT_PREFERENCE if name in available]
@@ -252,6 +352,112 @@ def _dedupe_str_list(values: list[str]) -> list[str]:
         seen.add(item)
         ordered.append(item)
     return ordered
+
+
+def _normalized_plan_phrase(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _iter_leaf_plan_steps(raw_steps: list[Any]) -> list[dict[str, Any]]:
+    leaf_steps: list[dict[str, Any]] = []
+
+    def _visit(step: Any) -> None:
+        if not isinstance(step, dict):
+            return
+        substeps = step.get("substeps", [])
+        child_steps = [item for item in substeps if isinstance(item, dict)] if isinstance(substeps, list) else []
+        if child_steps:
+            for child in child_steps:
+                _visit(child)
+            return
+        leaf_steps.append(step)
+
+    for item in raw_steps:
+        _visit(item)
+    return leaf_steps
+
+
+def _validate_plan_leaf_step(step: dict[str, Any], available_agents: set[str]) -> tuple[bool, str]:
+    agent = str(step.get("agent") or "").strip()
+    if not agent:
+        return False, "Planner step is missing an agent."
+    normalized_agent = agent.lower()
+    if normalized_agent in NON_EXECUTABLE_PLAN_AGENTS:
+        return False, f"Planner step uses non-executable agent '{agent}'."
+    if normalized_agent in _PLACEHOLDER_PLAN_AGENTS or normalized_agent.startswith("agent_name"):
+        return False, f"Planner step uses placeholder agent '{agent}'."
+    if available_agents and agent not in available_agents:
+        return False, f"Planner step uses unavailable agent '{agent}'."
+
+    task = str(step.get("task") or "").strip()
+    if not task:
+        return False, f"Planner step for agent '{agent}' is missing task content."
+    if _normalized_plan_phrase(task) in _PLACEHOLDER_PLAN_TASKS:
+        return False, f"Planner step for agent '{agent}' uses placeholder task text."
+
+    success_criteria = str(step.get("success_criteria") or "").strip()
+    if success_criteria and _normalized_plan_phrase(success_criteria) in _PLACEHOLDER_PLAN_SUCCESS:
+        return False, f"Planner step for agent '{agent}' uses placeholder success criteria."
+
+    return True, ""
+
+
+def _plan_payload_usable(raw_plan: Any, *, available_agents: list[str] | None = None) -> tuple[bool, str]:
+    if not isinstance(raw_plan, dict):
+        return False, "Planner returned a non-object response."
+    raw_steps = raw_plan.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        return False, "Planner response did not include a non-empty `steps` list."
+    leaf_steps = _iter_leaf_plan_steps(raw_steps)
+    if not leaf_steps:
+        return False, "Planner response did not contain any executable step objects."
+    available = {
+        str(item).strip()
+        for item in list(available_agents or [])
+        if str(item).strip()
+    }
+    for step in leaf_steps:
+        valid, reason = _validate_plan_leaf_step(step, available)
+        if not valid:
+            return False, reason
+    return True, ""
+
+
+def _user_facing_plan_repair_reason(reason: str) -> str:
+    lowered = str(reason or "").strip().lower()
+    if "placeholder agent" in lowered:
+        return "Planner returned placeholder step metadata."
+    if "placeholder task text" in lowered:
+        return "Planner returned placeholder task text."
+    if "placeholder success criteria" in lowered:
+        return "Planner returned placeholder completion criteria."
+    if "unavailable agent" in lowered:
+        return "Planner referenced an unavailable agent."
+    if "non-empty `steps` list" in lowered:
+        return "Planner omitted executable steps."
+    if "non-object response" in lowered:
+        return "Planner returned malformed JSON."
+    return str(reason or "Planner output was unusable.").strip()
+
+
+def _fallback_plan_data(state: dict[str, Any], objective: str, *, reason: str) -> dict[str, Any]:
+    normalized_reason = _user_facing_plan_repair_reason(reason)
+    if _is_deep_research_planning_mode(state):
+        return _pick_deep_research_fallback_plan(
+            state,
+            objective,
+            summary=(
+                "Planner output was unusable and was replaced with a safe research-only execution plan. "
+                f"Reason: {normalized_reason}"
+            ),
+        )
+
+    plan_data = normalize_plan_data({}, objective)
+    plan_data["summary"] = (
+        "Planner output was unusable and was replaced with a safe fallback execution plan. "
+        f"Reason: {normalized_reason}"
+    ).strip()
+    return plan_data
 
 
 def _normalize_step(item: dict[str, Any], objective: str, index: int, parent_id: str = "") -> dict[str, Any]:
@@ -674,7 +880,10 @@ Return ONLY valid JSON in this exact schema (no extra fields, no markdown, no ex
         parsed_plan = {}
 
     security_planning_requested = _is_security_planning_request(state, user_query)
-    plan_usable, unusable_reason = _plan_payload_usable(parsed_plan)
+    plan_usable, unusable_reason = _plan_payload_usable(
+        parsed_plan,
+        available_agents=list(state.get("available_agents", []) or []),
+    )
     if security_planning_requested and (bool(parse_error) or not plan_usable):
         suggested_agents = _security_plan_agent_suggestions(state)
         suggested_text = ", ".join(suggested_agents)
@@ -693,9 +902,21 @@ Return ONLY valid JSON in this exact schema (no extra fields, no markdown, no ex
             "model_assignments": [],
         }
     else:
-        plan_data = normalize_plan_data(parsed_plan, user_query)
+        if parse_error or not plan_usable:
+            repair_reason = parse_error or unusable_reason or "Planner response was not usable."
+            plan_data = _fallback_plan_data(state, user_query, reason=repair_reason)
+            log_task_update(
+                "Planner",
+                f"Planner output was unusable and was replaced with a safe fallback plan. Reason: {repair_reason}",
+            )
+        else:
+            plan_data = normalize_plan_data(parsed_plan, user_query)
         if _is_deep_research_planning_mode(state):
-            sanitized_plan = _sanitize_deep_research_plan(plan_data, user_query)
+            sanitized_plan = _sanitize_deep_research_plan(
+                plan_data,
+                user_query,
+                available_agents=list(state.get("available_agents", []) or []),
+            )
             if sanitized_plan is not plan_data:
                 plan_data = sanitized_plan
                 log_task_update(

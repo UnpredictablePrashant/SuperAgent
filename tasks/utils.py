@@ -2,6 +2,7 @@ import os
 import logging
 import sys
 import tempfile
+import threading
 import time as _time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -20,6 +21,8 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 RUN_OUTPUT_ROOT = os.path.join(OUTPUT_DIR, "runs")
 os.makedirs(RUN_OUTPUT_ROOT, exist_ok=True)
 ACTIVE_OUTPUT_DIR = OUTPUT_DIR
+_ACTIVE_OUTPUT_DIR: ContextVar[str] = ContextVar("active_output_dir", default=OUTPUT_DIR)
+_THREAD_OUTPUT_STATE = threading.local()
 
 _ACTIVE_AGENT_NAME: ContextVar[str] = ContextVar("active_agent_name", default="")
 _ACTIVE_PROVIDER_OVERRIDE: ContextVar[str] = ContextVar("active_provider_override", default="")
@@ -111,9 +114,14 @@ def _fallback_openai_client(model: str) -> object:
 
 
 def _client_for_model(model: str, role: str = "general") -> object:
-    from kendr.llm_router import build_llm, get_active_provider
+    from kendr.llm_router import ALL_PROVIDERS, build_llm, get_active_provider, infer_model_family
 
-    provider = (_ACTIVE_PROVIDER_OVERRIDE.get("") or get_active_provider()).strip().lower()
+    explicit_provider = _ACTIVE_PROVIDER_OVERRIDE.get("").strip().lower()
+    provider = (explicit_provider or get_active_provider()).strip().lower()
+    if model and not explicit_provider:
+        inferred_provider = infer_model_family(model, provider)
+        if inferred_provider in ALL_PROVIDERS:
+            provider = inferred_provider
     cache_key = f"{provider}:{role}:{model}"
     client = _LLM_CLIENTS.get(cache_key)
     if client is None:
@@ -232,24 +240,104 @@ logger = logging.getLogger("multi_agent_workflow")
 logger.setLevel(logging.INFO)
 logger.handlers.clear()
 
-file_handler = logging.FileHandler(
-    os.path.join(ACTIVE_OUTPUT_DIR, "execution.log"),
-    mode="w",
-    encoding="utf-8",
-    errors="replace",
-)
+
+class _PerRunExecutionLogHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.terminator = "\n"
+        self._streams: dict[str, object] = {}
+        self._lock = threading.RLock()
+
+    def reset_path(self, output_dir: str) -> None:
+        log_path = os.path.join(str(output_dir or OUTPUT_DIR), "execution.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with self._lock:
+            stream = self._streams.pop(log_path, None)
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            with open(log_path, "w", encoding="utf-8", errors="replace"):
+                pass
+
+    def _stream_for_path(self, log_path: str):
+        with self._lock:
+            stream = self._streams.get(log_path)
+            if stream is None or getattr(stream, "closed", False):
+                stream = open(log_path, "a", encoding="utf-8", errors="replace")
+                self._streams[log_path] = stream
+            return stream
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            output_dir = get_output_dir()
+            os.makedirs(output_dir, exist_ok=True)
+            log_path = os.path.join(output_dir, "execution.log")
+            message = self.format(record)
+            stream = self._stream_for_path(log_path)
+            with self._lock:
+                stream.write(message + self.terminator)
+                stream.flush()
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        with self._lock:
+            for stream in self._streams.values():
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            self._streams.clear()
+        super().close()
+
+
+def _console_logging_suppressed() -> bool:
+    raw = str(os.getenv("KENDR_SUPPRESS_CONSOLE_LOGS", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+class _ConsoleSuppressionFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: ARG002
+        return not _console_logging_suppressed()
+
+file_handler = _PerRunExecutionLogHandler()
 file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+file_handler.reset_path(ACTIVE_OUTPUT_DIR)
 
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(logging.Formatter("%(message)s"))
+console_handler.addFilter(_ConsoleSuppressionFilter())
 
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 logger.propagate = False
 
 
+def console_logging_suppressed() -> bool:
+    return _console_logging_suppressed()
+
+
+@contextmanager
+def suppress_console_logging(enabled: bool = True):
+    previous = os.getenv("KENDR_SUPPRESS_CONSOLE_LOGS")
+    if enabled:
+        os.environ["KENDR_SUPPRESS_CONSOLE_LOGS"] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("KENDR_SUPPRESS_CONSOLE_LOGS", None)
+        else:
+            os.environ["KENDR_SUPPRESS_CONSOLE_LOGS"] = previous
+
+
 def get_output_dir() -> str:
-    return ACTIVE_OUTPUT_DIR
+    thread_value = str(getattr(_THREAD_OUTPUT_STATE, "value", "") or "").strip()
+    if thread_value:
+        return thread_value
+    return str(_ACTIVE_OUTPUT_DIR.get(ACTIVE_OUTPUT_DIR) or ACTIVE_OUTPUT_DIR)
 
 
 def normalize_llm_text(value) -> str:
@@ -287,26 +375,18 @@ def resolve_output_path(filename: str | os.PathLike[str]) -> str:
 
 
 def set_active_output_dir(path: str, *, append: bool = False) -> str:
-    global ACTIVE_OUTPUT_DIR, file_handler
+    global ACTIVE_OUTPUT_DIR
 
-    ACTIVE_OUTPUT_DIR = path
-    os.makedirs(ACTIVE_OUTPUT_DIR, exist_ok=True)
-
-    try:
-        logger.removeHandler(file_handler)
-        file_handler.close()
-    except Exception:
-        pass
-
-    file_handler = logging.FileHandler(
-        os.path.join(ACTIVE_OUTPUT_DIR, "execution.log"),
-        mode="a" if append else "w",
-        encoding="utf-8",
-        errors="replace",
-    )
-    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-    logger.addHandler(file_handler)
-    return ACTIVE_OUTPUT_DIR
+    resolved_path = str(path or OUTPUT_DIR)
+    ACTIVE_OUTPUT_DIR = resolved_path
+    os.makedirs(resolved_path, exist_ok=True)
+    _ACTIVE_OUTPUT_DIR.set(resolved_path)
+    _THREAD_OUTPUT_STATE.value = resolved_path
+    if not append:
+        file_handler.reset_path(resolved_path)
+    else:
+        Path(os.path.join(resolved_path, "execution.log")).touch()
+    return resolved_path
 
 
 def create_run_output_dir(run_id: str, base_dir: str | None = None) -> str:

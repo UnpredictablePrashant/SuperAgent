@@ -54,6 +54,8 @@ This is the main public docs landing page. If you are new to the project, start 
   Release-facing change history.
 - [RELEASING.md](../RELEASING.md)
   Public release checklist and note-prep flow.
+- [Launch Demo Prompts](launch_demo_prompts.md)
+  Blessed `v0.2.0` demo prompts and validation commands for release-week runs.
 - [SECURITY.md](../SECURITY.md)
   Security reporting guidance and links.
 

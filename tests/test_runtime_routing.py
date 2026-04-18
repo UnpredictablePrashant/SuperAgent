@@ -106,6 +106,105 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(state["available_agents"], ["worker_agent"])
         self.assertEqual([card["agent_name"] for card in state["available_agent_cards"]], ["worker_agent"])
 
+    def test_apply_runtime_setup_limits_capabilities_for_deep_research(self):
+        from kendr.connector_registry import ConnectorSpec
+
+        registry = build_registry()
+        snapshot = {
+            "available_agents": [
+                "long_document_agent",
+                "master_coding_agent",
+                "os_agent",
+                "skill_web_search_agent",
+                "mcp_browser_extract_agent",
+            ],
+            "disabled_agents": {
+                "document_formatter_agent": {"available": False, "missing_services": ["python-docx"]},
+                "master_coding_agent": {"available": False, "missing_services": ["openai_or_codex_cli"]},
+            },
+            "setup_actions": [{"service": "python-docx", "action": "manual"}],
+            "summary_text": "full capability inventory",
+        }
+        specs = [
+            ConnectorSpec(
+                agent_name="long_document_agent",
+                connector_type="task_agent",
+                display_name="Long Document",
+                description="Deep research pipeline.",
+                icon="R",
+                status="ready",
+                category="Research",
+                state_input_key="research_request",
+                input_schema={},
+            ),
+            ConnectorSpec(
+                agent_name="master_coding_agent",
+                connector_type="task_agent",
+                display_name="Master Coding",
+                description="Coding workflow.",
+                icon="C",
+                status="ready",
+                category="Development",
+                state_input_key="coding_request",
+                input_schema={},
+            ),
+            ConnectorSpec(
+                agent_name="skill_web_search_agent",
+                connector_type="skill",
+                display_name="Web Search",
+                description="Search the web.",
+                icon="W",
+                status="ready",
+                category="Research",
+                state_input_key="skill_input_web_search",
+                input_schema={},
+            ),
+            ConnectorSpec(
+                agent_name="mcp_browser_extract_agent",
+                connector_type="mcp_tool",
+                display_name="Browser Extract",
+                description="Scrape websites.",
+                icon="M",
+                status="ready",
+                category="MCP Tool",
+                state_input_key="mcp_browser_extract_input",
+                input_schema={},
+            ),
+        ]
+
+        def _prompt_block(spec_rows, **_kwargs):
+            return "|".join(spec.agent_name for spec in spec_rows)
+
+        with (
+            patch("kendr.runtime.build_setup_snapshot", return_value=snapshot),
+            patch("kendr.connector_registry.build_connector_catalog", return_value=specs),
+            patch("kendr.connector_registry.connector_catalog_prompt_block", side_effect=_prompt_block),
+            patch("kendr.mcp_manager.list_servers_safe", return_value=[{"name": "browser", "enabled": True, "tools": [{"name": "extract"}]}]),
+        ):
+            runtime = AgentRuntime(registry)
+            with patch.object(runtime.agent_routing, "user_skills_prompt_block", side_effect=["all skills", "research skills"]) as mock_skills:
+                state = runtime.apply_runtime_setup({
+                    "workflow_type": "deep_research",
+                    "deep_research_mode": True,
+                })
+
+        self.assertEqual(
+            state["available_agents"],
+            ["long_document_agent", "os_agent", "skill_web_search_agent"],
+        )
+        self.assertEqual(
+            [item["agent_name"] for item in state["connector_catalog"]],
+            ["long_document_agent", "skill_web_search_agent"],
+        )
+        self.assertEqual(state["connector_catalog_prompt"], "long_document_agent|skill_web_search_agent")
+        self.assertEqual(state["skills_context"], "research skills")
+        self.assertEqual(state["mcp_servers_context"], "")
+        self.assertIn("Deep research capability profile active", state["setup_summary"])
+        self.assertEqual(
+            mock_skills.call_args_list[-1].kwargs["allowed_slugs"],
+            {"web-search", "pdf-reader", "file-reader", "file-finder", "doc-summarizer", "spreadsheet-basic"},
+        )
+
     def test_execution_mode_controls_planner_policy(self):
         with (
             patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
@@ -382,6 +481,50 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertIn("Research intent discovered", trace_titles)
         self.assertIn("Source strategy planned", trace_titles)
 
+    def test_execute_agent_redirects_legacy_deep_research_dispatch_to_long_document_agent(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+            patch("kendr.runtime.append_daily_memory_note"),
+            patch("kendr.runtime.append_session_event"),
+            patch("kendr.runtime.record_work_note"),
+            patch("kendr.runtime.log_task_update"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            self.assertNotIn("deep_research_agent", runtime.registry.agents)
+            state = runtime.build_initial_state("Do deep research on banana health effects.")
+            state["workflow_type"] = "deep_research"
+            state["deep_research_mode"] = True
+            state["long_document_mode"] = True
+            state = append_task(
+                state,
+                make_task(
+                    sender="orchestrator_agent",
+                    recipient="deep_research_agent",
+                    intent="legacy-deep-research",
+                    content="Do deep research on banana health effects.",
+                ),
+            )
+            task = state["a2a"]["tasks"][-1]
+            state["active_task"] = task
+
+            original_handler = runtime.registry.agents["long_document_agent"].handler
+            runtime.registry.agents["long_document_agent"].handler = lambda current_state: {
+                **current_state,
+                "draft_response": "redirected report",
+            }
+            try:
+                result = runtime._execute_agent(state, "deep_research_agent")
+            finally:
+                runtime.registry.agents["long_document_agent"].handler = original_handler
+
+        self.assertEqual(result["last_agent"], "long_document_agent")
+        self.assertEqual(result["active_task"]["recipient"], "long_document_agent")
+        self.assertEqual(result["a2a"]["tasks"][-1]["recipient"], "long_document_agent")
+
     def test_deep_research_with_local_files_skips_generic_local_drive_ingestion_policy(self):
         runtime = SimpleNamespace(
             _is_long_document_request=lambda state: True,
@@ -630,6 +773,7 @@ class RuntimeRoutingTests(unittest.TestCase):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Tell me about the current state of sodium-ion batteries.")
             state["last_agent"] = "research_pipeline_agent"
+            state["last_agent_status"] = "success"
             state["research_pipeline_report"] = "Source A says X. Source B says Y."
 
             with patch("kendr.runtime.llm.invoke") as mock_invoke:
@@ -693,6 +837,28 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(routed_state["next_agent"], "__finish__")
         self.assertEqual(routed_state["final_output"], "Research completed.")
         self.assertFalse(mock_invoke.called)
+
+    def test_reviewer_approval_blocks_finalization_when_failure_checkpoint_exists(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Do deep research on battery recycling market trends.")
+            state["last_agent"] = "reviewer_agent"
+            state["review_pending"] = False
+            state["review_decision"] = "approve"
+            state["draft_response"] = "Research completed."
+            state["plan_ready"] = True
+            state["plan_approval_status"] = "approved"
+            state["plan_steps"] = []
+            state["failure_checkpoint"] = {
+                "agent": "deep_research_agent",
+                "error": "model_not_found",
+            }
+
+            routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "__finish__")
+        self.assertIn("Unresolved failure checkpoint", routed_state["final_output"])
+        self.assertIn("deep_research_agent", routed_state["final_output"])
 
     def test_planned_step_dispatch_includes_step_context_for_review(self):
         with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
@@ -1579,7 +1745,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertTrue(state["deep_research_confirmed"])
         self.assertTrue(state["deep_research_mode"])
         self.assertEqual(state["workflow_type"], "deep_research")
-        self.assertFalse(state["long_document_mode"])
+        self.assertTrue(state["long_document_mode"])
         self.assertFalse(state["long_document_job_started"])
         self.assertEqual(state["pending_user_input_kind"], "")
         self.assertEqual(state["approval_pending_scope"], "")
@@ -1662,7 +1828,14 @@ class RuntimeRoutingTests(unittest.TestCase):
             }
             state = runtime.build_initial_state("resume the failed run", channel_session={"state": prior_state})
 
-        self.assertEqual(state["plan_steps"], prior_state["last_plan_steps"])
+        self.assertEqual(len(state["plan_steps"]), 1)
+        restored_step = state["plan_steps"][0]
+        self.assertEqual(restored_step["id"], prior_state["last_plan_steps"][0]["id"])
+        self.assertEqual(restored_step["agent"], prior_state["last_plan_steps"][0]["agent"])
+        self.assertEqual(restored_step["task"], prior_state["last_plan_steps"][0]["task"])
+        self.assertEqual(restored_step["status"], "ready")
+        self.assertEqual(restored_step["side_effect_level"], "read_only")
+        self.assertEqual(restored_step["conflict_keys"], ["agent:worker_agent"])
         self.assertTrue(state["plan_ready"])
         self.assertTrue(state["resume_requested"])
         self.assertTrue(state["resume_ready"])
@@ -1848,6 +2021,117 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertIn("worker_agent", available)
         self.assertNotIn("planner_agent", available)
         self.assertNotIn("reviewer_agent", available)
+
+    def test_router_stage_toon_compacts_large_context_with_budget_gate(self):
+        with patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Prepare a comprehensive research report.")
+            state["workflow_type"] = "deep_research"
+            state["deep_research_mode"] = True
+            state["selected_intent"] = {
+                "intent_id": "intent-1",
+                "intent_type": "deep_research",
+                "label": "Deep research workflow",
+                "execution_mode": "plan",
+                "requires_planner": True,
+                "risk_level": "medium",
+                "reasons": ["deep research workflow detected"],
+            }
+            state["selected_intent_type"] = "deep_research"
+            state["plan"] = "Collect evidence, draft sections, verify claims, and merge exports. " * 120
+            state["plan_steps"] = [
+                {"id": "step-1", "agent": "deep_research_agent", "title": "Collect evidence", "status": "running"},
+                {"id": "step-2", "agent": "long_document_agent", "title": "Merge report", "status": "pending"},
+                {"id": "step-3", "agent": "reviewer_agent", "title": "Verify report", "status": "pending"},
+            ]
+            state["plan_step_index"] = 0
+            state["review_corrected_values"] = {"citation_style": "apa", "max_sources": 12}
+            state["session_history_summary"] = "Prior research summary. " * 600
+            state["session_history"] = [
+                {"role": "user", "content": "Please prepare the report." * 40},
+                {"role": "assistant", "content": "I am gathering the relevant evidence." * 40},
+            ]
+            state["file_memory_context"] = "Memory context. " * 2000
+            state["setup_summary"] = "Configured providers and tools. " * 400
+            state["setup_actions"] = [
+                {"service": "openai", "action": "set_api_key", "description": "Add the API key."},
+                {"service": "search", "action": "enable", "description": "Enable search."},
+            ]
+            state["disabled_agents"] = {
+                "github_agent": {"missing_services": ["github_app"]},
+                "slack_agent": {"reason": "not configured"},
+            }
+            state["_policy_blocked_agents"] = ["github_agent"]
+            state["router_token_budget"] = 1800
+            state["a2a"]["messages"] = [
+                {
+                    "sender": "planner_agent",
+                    "recipient": "deep_research_agent",
+                    "role": "task",
+                    "content": "Collect evidence for the report." * 40,
+                }
+            ]
+
+            toon = runtime._build_router_stage_toon(state, current_objective=state["current_objective"])
+
+        self.assertEqual(toon["stage"], "route")
+        self.assertEqual(toon["selected_intent"]["intent_type"], "deep_research")
+        self.assertTrue(toon["budget_gate"]["compacted"])
+        self.assertTrue(toon["budget_gate"]["dropped_sections"])
+        self.assertLessEqual(toon["budget_gate"]["estimated_tokens"], toon["budget_gate"]["token_budget"])
+        self.assertLessEqual(len(toon["candidate_agents"]), 8)
+        self.assertIn("deep_research_agent", [item["name"] for item in toon["candidate_agents"]])
+
+    def test_orchestrator_prompt_uses_router_stage_toon_instead_of_legacy_state_dump(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Help me decide the next best agent for this task.")
+            state["planner_policy_mode"] = "never"
+            state["reviewer_policy_mode"] = "never"
+            state["plan_steps"] = []
+            state["plan_ready"] = False
+            state["review_pending"] = False
+            state["file_memory_context"] = "Memory context. " * 1200
+            state["session_history_summary"] = "Prior chat summary. " * 400
+            state["setup_summary"] = "Configured providers and actions. " * 200
+            state["setup_actions"] = [{"service": "openai", "action": "set_api_key", "description": "Add the API key."}]
+            state["disabled_agents"] = {"github_agent": {"missing_services": ["github_app"]}}
+            state["a2a"]["messages"] = [
+                {
+                    "sender": "worker_agent",
+                    "recipient": "reviewer_agent",
+                    "role": "result",
+                    "content": "Produced an intermediate result." * 30,
+                }
+            ]
+
+            with (
+                patch.object(runtime, "_dispatch_workflow_execution_policies", return_value=None),
+                patch(
+                    "kendr.runtime.llm.invoke",
+                    return_value=SimpleNamespace(
+                        content='{"agent":"finish","reason":"done","state_updates":{},"final_response":"ok"}'
+                    ),
+                ) as mock_invoke,
+            ):
+                routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "__finish__")
+        self.assertTrue(mock_invoke.called)
+        prompt = mock_invoke.call_args.args[0]
+        self.assertIn("Router stage context (JSON):", prompt)
+        self.assertIn('"toon_version": 1', prompt)
+        self.assertNotIn("A2A agent cards:", prompt)
+        self.assertNotIn("Disabled or unavailable agents:", prompt)
+        self.assertNotIn("Available setup actions:", prompt)
+        self.assertNotIn("Recent user/assistant chat history:", prompt)
+        self.assertLess(len(prompt), 16000)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,14 @@ Minimum release bar:
 - Docker Compose config validation passes
 - release docs links resolve
 
+For the wider non-socket release gate used by the current launch roadmap, run:
+
+```bash
+python scripts/release_gate_non_socket.py
+```
+
+That runner logs each discovered test, records per-test durations, and dumps timeout diagnostics for the currently-running test before exiting.
+
 ## 3. Review Public-Facing Docs
 
 Check these files for drift:

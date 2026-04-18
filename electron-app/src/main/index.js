@@ -54,6 +54,25 @@ const backend = new BackendManager(store)
 const updates = new UpdateManager(store, { getMainWindow: () => mainWindow })
 const ptyProcesses = new Map()
 let mainWindow = null
+let rendererRecoveryAttempts = 0
+let rendererRecoveryResetTimer = null
+
+function resetRendererRecoveryBudgetSoon() {
+  if (rendererRecoveryResetTimer) clearTimeout(rendererRecoveryResetTimer)
+  rendererRecoveryResetTimer = setTimeout(() => {
+    rendererRecoveryAttempts = 0
+    rendererRecoveryResetTimer = null
+  }, 30000)
+}
+
+function reloadMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (process.env.ELECTRON_RENDERER_URL) {
+    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+  } else {
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+}
 
 function createWindow() {
   const bounds = store.get('windowBounds')
@@ -90,6 +109,16 @@ function createWindow() {
       try { proc.kill() } catch (_) {}
     }
     ptyProcesses.clear()
+  })
+
+  mainWindow.webContents.on('render-process-gone', (_, details) => {
+    console.error('[renderer] process gone', details)
+    if (rendererRecoveryAttempts >= 2) return
+    rendererRecoveryAttempts += 1
+    resetRendererRecoveryBudgetSoon()
+    setTimeout(() => {
+      reloadMainWindow()
+    }, 300)
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {

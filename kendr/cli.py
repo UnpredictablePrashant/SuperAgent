@@ -55,6 +55,7 @@ from tasks.setup_config_store import (
     set_component_enabled,
     setup_overview,
 )
+from tasks.utils import suppress_console_logging
 
 
 class _CliStyle:
@@ -1534,7 +1535,7 @@ def _validate_run_workflows(
         _require_agent_available_for_workflow(snapshot, "superrag_agent", "superRAG workflow")
 
     if _explicit_deep_research_request(args, query):
-        _require_agent_available_for_workflow(snapshot, "deep_research_agent", "Deep research workflow")
+        _require_agent_available_for_workflow(snapshot, "long_document_agent", "Deep research workflow")
 
     if _explicit_coding_request(args, query):
         available = set(snapshot.get("available_agents", []) or [])
@@ -4199,13 +4200,14 @@ def _cmd_generate(args: argparse.Namespace) -> int:
         except BaseException as exc:  # noqa: BLE001
             holder["error"] = exc
 
-    worker = threading.Thread(target=_submit, daemon=True)
-    worker.start()
+    with suppress_console_logging(bool(args.json) or bool(args.quiet)):
+        worker = threading.Thread(target=_submit, daemon=True)
+        worker.start()
 
-    while worker.is_alive():
-        worker.join(timeout=1.0)
-        last_progress = _poll_progress(client_run_id, last_progress)
-        _tail_run_logs(client_run_id)
+        while worker.is_alive():
+            worker.join(timeout=1.0)
+            last_progress = _poll_progress(client_run_id, last_progress)
+            _tail_run_logs(client_run_id)
 
     if holder["error"]:
         raise SystemExit(f"[generate] failed: {holder['error']}")
@@ -5044,22 +5046,23 @@ def _cmd_research(args: argparse.Namespace) -> int:
     style = _cli_style(None)
     last_progress = ""
 
-    worker = threading.Thread(target=_submit, daemon=True)
-    worker.start()
-    while worker.is_alive():
-        worker.join(timeout=1.0)
-        try:
-            sessions = _http_json_get(f"{gateway_base}/task-sessions", timeout_seconds=1.2)
-            if isinstance(sessions, list):
-                match = next((s for s in sessions if str(s.get("run_id", "")) == client_run_id), None)
-                if isinstance(match, dict):
-                    msg = _build_run_progress_message(match)
-                    if msg != last_progress:
-                        _emit_status(args, _colorize_run_progress_message(msg, style))
-                        last_progress = msg
-        except Exception:
-            pass
-        _tail_run_logs(client_run_id)
+    with suppress_console_logging(bool(args.json) or bool(args.quiet)):
+        worker = threading.Thread(target=_submit, daemon=True)
+        worker.start()
+        while worker.is_alive():
+            worker.join(timeout=1.0)
+            try:
+                sessions = _http_json_get(f"{gateway_base}/task-sessions", timeout_seconds=1.2)
+                if isinstance(sessions, list):
+                    match = next((s for s in sessions if str(s.get("run_id", "")) == client_run_id), None)
+                    if isinstance(match, dict):
+                        msg = _build_run_progress_message(match)
+                        if msg != last_progress:
+                            _emit_status(args, _colorize_run_progress_message(msg, style))
+                            last_progress = msg
+            except Exception:
+                pass
+            _tail_run_logs(client_run_id)
 
     if holder["error"]:
         raise SystemExit(f"[research] failed: {holder['error']}")
@@ -5821,26 +5824,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
             except BaseException as exc:  # noqa: BLE001
                 holder["error"] = exc
 
-        worker = threading.Thread(target=_submit_ingest, daemon=True)
-        worker.start()
+        with suppress_console_logging(bool(args.json) or bool(args.quiet)):
+            worker = threading.Thread(target=_submit_ingest, daemon=True)
+            worker.start()
 
-        _emit_status(
-            args,
-            f"[run] accepted request run_id={client_run_id} workflow_id={ingest_payload.get('workflow_id', client_run_id)} | working_directory={resolved_working_dir}",
-        )
-        started_wait = time.time()
-        last_progress = ""
-        last_wait_emit = 0.0
-        while worker.is_alive():
-            worker.join(timeout=1.0)
-            last_progress = _poll_task_session_progress(client_run_id, last_progress)
-            _tail_run_logs(client_run_id)
+            _emit_status(
+                args,
+                f"[run] accepted request run_id={client_run_id} workflow_id={ingest_payload.get('workflow_id', client_run_id)} | working_directory={resolved_working_dir}",
+            )
+            started_wait = time.time()
+            last_progress = ""
+            last_wait_emit = 0.0
+            while worker.is_alive():
+                worker.join(timeout=1.0)
+                last_progress = _poll_task_session_progress(client_run_id, last_progress)
+                _tail_run_logs(client_run_id)
 
-            now = time.time()
-            if now - last_wait_emit >= 8:
-                elapsed = int(now - started_wait)
-                _emit_status(args, f"[run] waiting for completion... {elapsed}s elapsed", transient=True)
-                last_wait_emit = now
+                now = time.time()
+                if now - last_wait_emit >= 8:
+                    elapsed = int(now - started_wait)
+                    _emit_status(args, f"[run] waiting for completion... {elapsed}s elapsed", transient=True)
+                    last_wait_emit = now
 
         if holder["error"] is not None:
             error = holder["error"]
@@ -5911,26 +5915,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
             except BaseException as exc:  # noqa: BLE001
                 holder["error"] = exc
 
-        worker = threading.Thread(target=_submit_resume_request, daemon=True)
-        worker.start()
+        with suppress_console_logging(bool(args.json) or bool(args.quiet)):
+            worker = threading.Thread(target=_submit_resume_request, daemon=True)
+            worker.start()
 
-        _emit_status(
-            args,
-            f"[run] accepted request run_id={monitored_run_id} workflow_id={resume_payload.get('workflow_id', monitored_run_id)} | working_directory={resolved_working_dir}",
-        )
-        started_wait = time.time()
-        last_progress = ""
-        last_wait_emit = 0.0
-        while worker.is_alive():
-            worker.join(timeout=1.0)
-            last_progress = _poll_task_session_progress(monitored_run_id, last_progress)
-            _tail_run_logs(monitored_run_id)
+            _emit_status(
+                args,
+                f"[run] accepted request run_id={monitored_run_id} workflow_id={resume_payload.get('workflow_id', monitored_run_id)} | working_directory={resolved_working_dir}",
+            )
+            started_wait = time.time()
+            last_progress = ""
+            last_wait_emit = 0.0
+            while worker.is_alive():
+                worker.join(timeout=1.0)
+                last_progress = _poll_task_session_progress(monitored_run_id, last_progress)
+                _tail_run_logs(monitored_run_id)
 
-            now = time.time()
-            if now - last_wait_emit >= 8:
-                elapsed = int(now - started_wait)
-                _emit_status(args, f"[run] waiting for completion... {elapsed}s elapsed", transient=True)
-                last_wait_emit = now
+                now = time.time()
+                if now - last_wait_emit >= 8:
+                    elapsed = int(now - started_wait)
+                    _emit_status(args, f"[run] waiting for completion... {elapsed}s elapsed", transient=True)
+                    last_wait_emit = now
 
         if holder["error"] is not None:
             error = holder["error"]

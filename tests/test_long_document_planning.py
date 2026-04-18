@@ -15,12 +15,16 @@ from tasks.long_document_tasks import (
     _build_evidence_ledger,
     _build_compiled_markdown,
     _build_deep_research_analysis_request,
+    _collect_google_search_evidence,
+    _collect_user_url_evidence,
     _collect_section_research_package,
     _default_subtopics,
+    _ensure_local_source_manifest,
+    _log_web_review,
     _strip_leading_section_heading,
     long_document_agent,
 )
-from tasks.utils import set_active_output_dir
+from tasks.utils import set_active_output_dir, suppress_console_logging
 
 
 class LongDocumentPlanningTests(unittest.TestCase):
@@ -296,6 +300,50 @@ class LongDocumentPlanningTests(unittest.TestCase):
         self.assertNotIn("**Steps", result["draft_response"])
         self.assertIn("approval_request", result)
         self.assertEqual(result["approval_request"]["scope"], "long_document_plan")
+
+    def test_long_document_agent_honors_explicit_research_provider_for_native_search_mode(self):
+        fake_setup_snapshot = {
+            "available_agents": [str(card.get("agent_name", "")) for card in build_registry().agent_cards()],
+            "disabled_agents": {},
+            "setup_actions": [],
+            "summary_text": "",
+        }
+        with patch("kendr.runtime.build_setup_snapshot", return_value=fake_setup_snapshot):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Create a sourced market structure report.")
+            state["current_objective"] = "Create a sourced market structure report."
+            state["long_document_mode"] = True
+            state["long_document_pages"] = 25
+            state["provider"] = "anthropic"
+            state["model"] = "claude-sonnet-4-6"
+            state["research_provider"] = "openai"
+            state["research_model"] = "gpt-5.1"
+
+            fake_outline = {
+                "title": "Market Structure Report",
+                "sections": [
+                    {
+                        "id": 1,
+                        "title": "Industry Baseline",
+                        "objective": "Set the baseline facts and market structure.",
+                        "key_questions": ["What defines the market?"],
+                        "target_pages": 5,
+                    }
+                ],
+            }
+
+            with (
+                patch("tasks.long_document_tasks.llm_json", side_effect=lambda *_args, **_kwargs: {}),
+                patch("tasks.long_document_tasks._build_outline", return_value=fake_outline),
+                patch("tasks.long_document_tasks.write_text_file"),
+                patch("tasks.long_document_tasks.update_planning_file"),
+                patch("tasks.long_document_tasks.log_task_update"),
+            ):
+                result = long_document_agent(state)
+
+        self.assertEqual(result["research_provider"], "openai")
+        self.assertEqual(result["research_model"], "gpt-5.1")
+        self.assertEqual(result["research_web_search_mode"], "native_model")
 
     def test_default_subtopics_extracts_clean_numbered_research_questions(self):
         objective = (
@@ -591,6 +639,264 @@ class LongDocumentPlanningTests(unittest.TestCase):
         self.assertFalse(result["deep_research_result_card"]["web_search_enabled"])
         self.assertEqual(result["long_document_title"], "Deep Research Report")
 
+    def test_long_document_agent_builds_source_manifest_from_local_folder_inputs(self):
+        objective = "Draft a report from the attached nested local folder."
+        correlation = {
+            "briefing": "Correlation briefing",
+            "knowledge_graph": {"nodes": [], "edges": []},
+            "cross_cutting_themes": [],
+            "contradictions": [],
+            "section_order": ["Local Findings"],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_source, tempfile.TemporaryDirectory() as tmp_output:
+            nested_dir = Path(tmp_source) / "nested"
+            nested_dir.mkdir(parents=True, exist_ok=True)
+            first_path = nested_dir / "financials.txt"
+            second_path = Path(tmp_source) / "notes.md"
+            first_path.write_text("Revenue grew 22% and margins improved in 2025.", encoding="utf-8")
+            second_path.write_text("Decision: prioritize regional expansion and cost controls.", encoding="utf-8")
+
+            state = {
+                "current_objective": objective,
+                "user_query": objective,
+                "memory_soul_file": __file__,
+                "deep_research_mode": True,
+                "deep_research_confirmed": True,
+                "long_document_mode": True,
+                "long_document_pages": 15,
+                "long_document_plan_status": "approved",
+                "research_web_search_enabled": False,
+                "local_drive_paths": [tmp_source],
+                "local_drive_working_directory": tmp_source,
+                "deep_research_analysis": {
+                    "tier": 2,
+                    "requires_deep_research": True,
+                    "estimated_pages": 15,
+                    "estimated_sources": 4,
+                    "estimated_duration_minutes": 10,
+                    "subtopics": ["Local Findings"],
+                },
+                "long_document_outline": {
+                    "title": "Nested Folder Report",
+                    "sections": [
+                        {
+                            "id": 1,
+                            "title": "Local Findings",
+                            "objective": "Summarize the local evidence.",
+                            "key_questions": [],
+                            "target_pages": 2,
+                        }
+                    ],
+                },
+            }
+
+            def _fake_llm_text(prompt: str) -> str:
+                prompt = str(prompt)
+                if "document-reading sub-agent" in prompt:
+                    if "financials.txt" in prompt:
+                        return "Financials summary with revenue growth and margin improvement."
+                    if "notes.md" in prompt:
+                        return "Notes summary with decisions about expansion and cost controls."
+                    return "Generic local file summary."
+                if "knowledge-synthesis agent. Build one actionable summary" in prompt:
+                    return "- Key finding: local files show growth and operational priorities."
+                if "without open web search" in prompt:
+                    return "Local-only evidence memo anchored in the attached folder."
+                if "Create a concise executive summary" in prompt:
+                    return "Nested folder executive summary."
+                return "## Local Findings\n\nNested local folder findings. [S1]"
+
+            set_active_output_dir(tmp_output)
+            try:
+                with (
+                    patch("tasks.long_document_tasks.llm_text", side_effect=_fake_llm_text),
+                    patch("tasks.long_document_tasks._build_correlation_package", return_value=correlation),
+                    patch("tasks.long_document_tasks._build_plagiarism_report", return_value={"overall_score": 0.0, "ai_content_score": 0.0, "status": "PASS", "sections": []}),
+                    patch("tasks.long_document_tasks._generate_visual_assets", return_value={"tables": [], "flowcharts": [], "notes": ""}),
+                    patch("tasks.long_document_tasks._export_long_document_formats", return_value={}),
+                    patch("tasks.long_document_tasks.update_planning_file"),
+                    patch("tasks.long_document_tasks.log_task_update"),
+                    patch("tasks.long_document_tasks.publish_agent_output", side_effect=lambda current_state, *args, **kwargs: current_state),
+                ):
+                    result = long_document_agent(state)
+            finally:
+                set_active_output_dir("output")
+
+            artifact_dir = Path(tmp_output) / "deep_research_runs" / "deep_research_run_1"
+            source_manifest_path = artifact_dir / "source_manifest.md"
+            source_manifest_json_path = artifact_dir / "source_manifest.json"
+
+            self.assertTrue(source_manifest_path.exists())
+            self.assertTrue(source_manifest_json_path.exists())
+
+            source_manifest = json.loads(source_manifest_json_path.read_text(encoding="utf-8"))
+            source_manifest_md = source_manifest_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["deep_research_result_card"]["selected_local_files"], 2)
+        self.assertEqual(result["deep_research_result_card"]["discovered_files"], 2)
+        self.assertTrue(result["long_document_source_manifest_path"].endswith("source_manifest.md"))
+        self.assertTrue(result["long_document_source_manifest_json_path"].endswith("source_manifest.json"))
+        self.assertIn("Source manifest", result["draft_response"])
+        self.assertEqual(source_manifest["manifest"]["selected_file_count"], 2)
+        self.assertEqual(len(source_manifest["document_summaries"]), 2)
+        self.assertIn("nested/", source_manifest_md)
+        self.assertIn("financials.txt [selected]", source_manifest_md)
+        self.assertIn("notes.md [selected]", source_manifest_md)
+
+    def test_ensure_local_source_manifest_logs_each_reviewed_local_file(self):
+        objective = "Review the attached local files."
+
+        with tempfile.TemporaryDirectory() as tmp_source, tempfile.TemporaryDirectory() as tmp_output:
+            alpha_path = Path(tmp_source) / "alpha.txt"
+            beta_path = Path(tmp_source) / "nested" / "beta.md"
+            beta_path.parent.mkdir(parents=True, exist_ok=True)
+            alpha_path.write_text("Alpha evidence.", encoding="utf-8")
+            beta_path.write_text("Beta evidence.", encoding="utf-8")
+
+            state = {
+                "current_objective": objective,
+                "user_query": objective,
+                "local_drive_paths": [tmp_source],
+                "local_drive_working_directory": tmp_source,
+                "local_drive_recursive": True,
+            }
+
+            set_active_output_dir(tmp_output)
+            try:
+                with (
+                    suppress_console_logging(),
+                    patch("tasks.long_document_tasks.llm_text", return_value="Concise local summary."),
+                ):
+                    manifest = _ensure_local_source_manifest(
+                        state,
+                        objective=objective,
+                        artifact_dir="deep_research_runs/deep_research_run_1",
+                        source_strategy={},
+                    )
+                log_text = (Path(tmp_output) / "execution.log").read_text(encoding="utf-8")
+            finally:
+                set_active_output_dir("output")
+
+        self.assertTrue(manifest["manifest"]["selected_file_count"] >= 2)
+        self.assertIn("Reviewing local file [1/2]: alpha.txt", log_text)
+        self.assertIn("Reviewing local file [2/2]: nested/beta.md", log_text)
+        self.assertIn("Reviewed local file [1/2]: alpha.txt", log_text)
+        self.assertIn("Reviewed local file [2/2]: nested/beta.md", log_text)
+
+    def test_collect_user_url_evidence_logs_each_reviewed_website(self):
+        objective = "Review user-provided websites."
+        state = {
+            "deep_research_source_urls": [
+                "https://example.com/report",
+                "https://sample.org/brief",
+            ]
+        }
+
+        def _fake_fetch(url: str, timeout: int = 20) -> dict:
+            return {"url": url, "text": f"Evidence from {url}", "content_type": "text/html"}
+
+        with tempfile.TemporaryDirectory() as tmp_output:
+            set_active_output_dir(tmp_output)
+            try:
+                with (
+                    suppress_console_logging(),
+                    patch("tasks.long_document_tasks.fetch_url_content", side_effect=_fake_fetch),
+                    patch("tasks.long_document_tasks.llm_text", return_value="Website summary."),
+                ):
+                    entries = _collect_user_url_evidence(objective, state)
+                log_text = (Path(tmp_output) / "execution.log").read_text(encoding="utf-8")
+            finally:
+                set_active_output_dir("output")
+
+        self.assertEqual(len(entries), 2)
+        self.assertIn("Reviewing website [1/2]: example.com/report", log_text)
+        self.assertIn("Reviewing website [2/2]: sample.org/brief", log_text)
+        self.assertIn("Reviewed website [1/2]: example.com/report", log_text)
+        self.assertIn("Reviewed website [2/2]: sample.org/brief", log_text)
+
+    def test_collect_google_search_evidence_logs_each_reviewed_search_page(self):
+        def _fake_search(query: str, *, num: int = 10, fetch_pages: int = 3, progress_callback=None, **kwargs) -> dict:
+            viewed_pages = [
+                {"url": "https://who.int/nutrition", "text": "WHO evidence", "content_type": "text/html"},
+                {"url": "https://nih.gov/health", "text": "NIH evidence", "content_type": "text/html"},
+            ]
+            for idx, page in enumerate(viewed_pages, start=1):
+                if progress_callback:
+                    progress_callback(page["url"], "started", None, idx, len(viewed_pages))
+                    progress_callback(page["url"], "completed", page, idx, len(viewed_pages))
+            return {
+                "provider": "duckduckgo_html",
+                "providers_tried": ["duckduckgo_html"],
+                "query_plan": [
+                    {"query": "banana health effects", "scope": "web", "timelimit": ""},
+                    {"query": "banana health effects clinical evidence", "scope": "academic", "timelimit": "m"},
+                ],
+                "results": [
+                    {"title": "WHO page", "url": "https://who.int/nutrition", "snippet": ""},
+                    {"title": "NIH page", "url": "https://nih.gov/health", "snippet": ""},
+                ],
+                "viewed_pages": viewed_pages,
+                "error": "",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp_output:
+            set_active_output_dir(tmp_output)
+            try:
+                with (
+                    suppress_console_logging(),
+                    patch("tasks.long_document_tasks.fetch_search_results", side_effect=_fake_search),
+                ):
+                    payload = _collect_google_search_evidence(
+                        "banana health effects",
+                        progress_callback=lambda url, status, payload, position, total: _log_web_review(
+                            url,
+                            status=status,
+                            position=position,
+                            total=total,
+                            payload=payload,
+                            context="search result website",
+                        ),
+                    )
+                log_text = (Path(tmp_output) / "execution.log").read_text(encoding="utf-8")
+            finally:
+                set_active_output_dir("output")
+
+        self.assertEqual(len(payload["viewed_pages"]), 2)
+        self.assertIn("Search query [1/2] via duckduckgo_html: banana health effects", log_text)
+        self.assertIn(
+            "Search query [2/2] via duckduckgo_html: banana health effects clinical evidence (academic, timelimit=m)",
+            log_text,
+        )
+        self.assertIn("Collected search result [1/2] via duckduckgo_html: who.int/nutrition — WHO page", log_text)
+        self.assertIn("Collected search result [2/2] via duckduckgo_html: nih.gov/health — NIH page", log_text)
+        self.assertIn("Reviewing search result website [1/2]: who.int/nutrition", log_text)
+        self.assertIn("Reviewing search result website [2/2]: nih.gov/health", log_text)
+        self.assertIn("Reviewed search result website [1/2]: who.int/nutrition", log_text)
+        self.assertIn("Reviewed search result website [2/2]: nih.gov/health", log_text)
+
+    def test_collect_google_search_evidence_respects_selected_search_backend(self):
+        captured = {}
+
+        def _fake_search(query: str, *, num: int = 10, fetch_pages: int = 3, progress_callback=None, **kwargs) -> dict:
+            captured["provider_hint"] = kwargs.get("provider_hint")
+            return {
+                "provider": "serpapi",
+                "providers_tried": ["serpapi"],
+                "results": [{"title": "Example", "url": "https://example.com/report", "snippet": ""}],
+                "viewed_pages": [],
+                "error": "",
+            }
+
+        with patch("tasks.long_document_tasks.fetch_search_results", side_effect=_fake_search):
+            payload = _collect_google_search_evidence(
+                "banana health effects",
+                search_backend="serpapi",
+            )
+
+        self.assertEqual(captured.get("provider_hint"), "serpapi")
+        self.assertEqual(payload["provider"], "serpapi")
+
     def test_long_document_agent_uses_kendr_search_for_non_openai_web_research(self):
         state = {
             "current_objective": "Run a web-backed research report.",
@@ -676,6 +982,9 @@ class LongDocumentPlanningTests(unittest.TestCase):
         self.assertTrue(result["deep_research_result_card"]["web_search_enabled"])
         self.assertEqual(result["deep_research_result_card"]["web_search_mode"], "kendr_search")
         self.assertIn("Report downloads in chat", result["draft_response"])
+        self.assertIn("Artifact bundle: deep_research_runs/deep_research_run_1", result["draft_response"])
+        self.assertIn("Markdown report: deep_research_runs/deep_research_run_1/report.md", result["draft_response"])
+        self.assertIn("Research manifest: deep_research_runs/deep_research_run_1/deep_research_manifest.json", result["draft_response"])
         self.assertIn("Kendr search client", result["draft_response"])
         self.assertNotIn("output/", result["draft_response"])
 

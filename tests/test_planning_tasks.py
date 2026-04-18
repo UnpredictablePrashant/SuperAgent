@@ -262,6 +262,46 @@ class PlanningTaskTests(unittest.TestCase):
         self.assertEqual(result["plan_steps"][0]["agent"], "long_document_agent")
         self.assertNotIn("project_blueprint_agent", result["plan"])
 
+    def test_planner_agent_replaces_placeholder_plan_with_safe_research_fallback(self):
+        state = {
+            "user_query": "Do deep research on supply-chain resilience.",
+            "current_objective": "Do deep research on supply-chain resilience.",
+            "workflow_type": "deep_research",
+            "deep_research_mode": True,
+            "available_agents": ["deep_research_agent", "worker_agent"],
+        }
+        planner_payload = json.dumps(
+            {
+                "summary": "Placeholder plan.",
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "title": "Do work",
+                        "agent": "agent_name",
+                        "task": "Perform specified actions.",
+                        "success_criteria": "Confirm completion.",
+                    }
+                ],
+            }
+        )
+
+        with (
+            patch("tasks.planning_tasks.begin_agent_session", return_value=("", state["user_query"], "")),
+            patch("tasks.planning_tasks.log_task_update"),
+            patch("tasks.planning_tasks.write_text_file"),
+            patch("tasks.planning_tasks.update_planning_file"),
+            patch("tasks.planning_tasks.publish_agent_output", side_effect=lambda current_state, *_args, **_kwargs: current_state),
+            patch("tasks.planning_tasks.model_selection_for_agent", return_value={"provider": "ollama", "model": "lfm2.5-thinking:latest", "source": "runtime_override"}),
+            patch("tasks.planning_tasks.provider_status", return_value={"provider": "ollama", "ready": True, "note": "", "base_url": "", "model": "lfm2.5-thinking:latest"}),
+            patch("tasks.planning_tasks.llm.invoke", return_value=planner_payload),
+        ):
+            result = planner_agent(state)
+
+        self.assertEqual(len(result["plan_steps"]), 1)
+        self.assertEqual(result["plan_steps"][0]["agent"], "deep_research_agent")
+        self.assertNotIn("agent_name", result["plan"])
+        self.assertIn("safe research-only execution plan", result["plan_data"]["summary"].lower())
+
     def test_project_blueprint_agent_refuses_to_run_in_deep_research_workflow(self):
         state = {
             "workflow_type": "deep_research",

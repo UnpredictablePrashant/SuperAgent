@@ -586,6 +586,8 @@ def _normalise_project_chat_message(message: dict) -> dict | None:
     }
     if message.get("run_id"):
         item["run_id"] = str(message.get("run_id"))
+    if message.get("artifact_files") and isinstance(message["artifact_files"], list):
+        item["artifact_files"] = message["artifact_files"]
     if message.get("long_document_exports") and isinstance(message["long_document_exports"], list):
         item["long_document_exports"] = message["long_document_exports"]
     if message.get("deep_research_result_card") and isinstance(message["deep_research_result_card"], dict):
@@ -914,6 +916,9 @@ def _persist_project_chat_result(
         "run_id": run_id,
     }
     if result:
+        artifact_files = result.get("artifact_files")
+        if artifact_files and isinstance(artifact_files, list):
+            message["artifact_files"] = artifact_files
         doc_exports = result.get("long_document_exports")
         if doc_exports and isinstance(doc_exports, list):
             message["long_document_exports"] = doc_exports
@@ -931,8 +936,136 @@ def _persist_project_chat_result(
         _log.debug("Project chat result persistence failed for %s: %s", project_id, exc)
 
 
+def _normalize_run_relative_artifact_path(path_value: str) -> str:
+    value = str(path_value or "").strip().replace("\\", "/")
+    if value.startswith("output/"):
+        return value[len("output/"):]
+    return value
+
+
+def _resolve_run_artifact_candidate(output_dir: str, path_value: str) -> str:
+    candidate = str(path_value or "").strip()
+    if not candidate:
+        return ""
+    if os.path.isabs(candidate):
+        return candidate if os.path.isfile(candidate) else ""
+    base = str(output_dir or "").strip()
+    normalized = _normalize_run_relative_artifact_path(candidate)
+    if base:
+        direct = os.path.join(base, normalized)
+        if os.path.isfile(direct):
+            return direct
+        fallback = os.path.join(base, candidate)
+        if os.path.isfile(fallback):
+            return fallback
+    return candidate if os.path.isfile(candidate) else ""
+
+
+_REPORT_ARTIFACT_ALIASES: dict[str, tuple[str, ...]] = {
+    "report.md": ("report.md", "deep_research_report.md"),
+    "report.html": ("report.html", "deep_research_report.html"),
+    "report.pdf": ("report.pdf", "deep_research_report.pdf"),
+    "report.docx": ("report.docx", "deep_research_report.docx"),
+}
+
+
+def _report_artifact_candidate_names(name: str) -> tuple[str, ...]:
+    normalized = os.path.basename(str(name or "").strip()).lower()
+    if not normalized:
+        return ()
+    if normalized in _REPORT_ARTIFACT_ALIASES:
+        return _REPORT_ARTIFACT_ALIASES[normalized]
+    for aliases in _REPORT_ARTIFACT_ALIASES.values():
+        if normalized in aliases:
+            return aliases
+    return (normalized,)
+
+
+def _find_nested_run_artifact(output_dir: str, name: str) -> str:
+    base = str(output_dir or "").strip()
+    if not base or not os.path.isdir(base):
+        return ""
+    requested = os.path.basename(str(name or "").strip()).lower()
+    candidates = set(_report_artifact_candidate_names(requested))
+    if requested:
+        candidates.add(requested)
+    if not candidates:
+        return ""
+
+    matches: list[tuple[tuple[int, int, int, int], str]] = []
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [entry for entry in dirs if entry not in {".git", "__pycache__", "node_modules"}]
+        for fname in files:
+            lowered = str(fname or "").strip().lower()
+            if lowered not in candidates:
+                continue
+            full_path = os.path.join(root, fname)
+            rel_path = os.path.relpath(full_path, base).replace("\\", "/")
+            score = (
+                0 if lowered == requested else 1,
+                0 if "deep_research_runs/" in rel_path else 1,
+                rel_path.count("/"),
+                len(rel_path),
+            )
+            matches.append((score, full_path))
+    if not matches:
+        return ""
+    matches.sort(key=lambda item: item[0])
+    return matches[0][1]
+
+
+def _discover_run_report_artifacts(output_dir: str) -> list[dict]:
+    entries: list[dict] = []
+    for canonical_name in ("report.pdf", "report.docx", "report.html", "report.md"):
+        resolved_path = _find_nested_run_artifact(output_dir, canonical_name)
+        if not resolved_path:
+            continue
+        entries.append(
+            {
+                "name": canonical_name,
+                "path": resolved_path,
+                "size": os.path.getsize(resolved_path),
+                "label": canonical_name,
+                "ext": os.path.splitext(canonical_name)[1].lstrip(".").lower(),
+                "kind": "report",
+            }
+        )
+    return entries
+
+
+def _deep_research_created_artifacts(result_data: dict, output_dir: str) -> list[dict]:
+    candidates: list[dict] = []
+    card = result_data.get("deep_research_result_card")
+    if isinstance(card, dict) and isinstance(card.get("created_artifacts"), list):
+        candidates.extend(item for item in card.get("created_artifacts", []) if isinstance(item, dict))
+    manifest = result_data.get("deep_research_artifacts_manifest")
+    if isinstance(manifest, dict) and isinstance(manifest.get("created_artifacts"), list):
+        candidates.extend(item for item in manifest.get("created_artifacts", []) if isinstance(item, dict))
+
+    normalized: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in candidates:
+        artifact_name = str(item.get("name") or os.path.basename(str(item.get("path") or "").strip()) or "").strip()
+        artifact_path = _resolve_run_artifact_candidate(output_dir, str(item.get("path") or "").strip())
+        if not artifact_name or not artifact_path:
+            continue
+        key = (artifact_name, artifact_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "name": artifact_name,
+                "path": artifact_path,
+                "kind": str(item.get("kind") or "").strip(),
+            }
+        )
+    return normalized
+
+
 def _resolve_run_artifact_path(run_id: str, name: str) -> str:
     file_path = ""
+    output_dir = ""
     try:
         run_row = _db_get_run(run_id)
         output_dir = run_row.get("run_output_dir", "") if run_row else ""
@@ -942,6 +1075,9 @@ def _resolve_run_artifact_path(run_id: str, name: str) -> str:
             candidate = os.path.join(output_dir, name)
             if os.path.isfile(candidate):
                 return candidate
+            nested_candidate = _find_nested_run_artifact(output_dir, name)
+            if nested_candidate:
+                return nested_candidate
     except Exception:
         pass
 
@@ -953,6 +1089,10 @@ def _resolve_run_artifact_path(run_id: str, name: str) -> str:
             candidate = af.get("path", "")
             if candidate and os.path.isfile(candidate):
                 return candidate
+
+    for artifact in _deep_research_created_artifacts(result_data, output_dir):
+        if artifact.get("name") == name and os.path.isfile(str(artifact.get("path") or "")):
+            return str(artifact.get("path") or "")
 
     for key in (
         "long_document_compiled_path",
@@ -1563,11 +1703,36 @@ def _build_ollama_recommendations(pulled_models: list[dict]) -> list[dict]:
     return rows
 
 
+def _research_search_provider_statuses() -> list[dict[str, object]]:
+    try:
+        from tasks.research_infra import research_search_backend_statuses
+
+        rows = research_search_backend_statuses()
+        if isinstance(rows, list):
+            return rows
+    except Exception as exc:
+        _log.warning("Could not build deep research search provider inventory: %s", exc)
+    return [
+        {
+            "id": "auto",
+            "label": "Auto",
+            "enabled": True,
+            "authenticated": False,
+            "rate_limited": False,
+            "description": "Prefer the strongest configured backend, then fall back automatically.",
+            "note": "",
+            "warning": "",
+        }
+    ]
+
+
 def _build_model_guide_payload() -> dict[str, object]:
-    from kendr.llm_router import is_ollama_running, list_ollama_models
+    from kendr.llm_router import all_provider_statuses, is_ollama_running, list_ollama_models
+    from kendr.model_workflows import build_workflow_recommendations
 
     running = is_ollama_running()
     pulled_models = list_ollama_models() if running else []
+    statuses = all_provider_statuses()
     rankings, ranking_error = _fetch_openrouter_rankings()
     models, models_error = _fetch_openrouter_models()
     rankings_fresh = bool(rankings)
@@ -1583,6 +1748,7 @@ def _build_model_guide_payload() -> dict[str, object]:
         "openrouter_rankings": rankings,
         "rankings_source": "live" if rankings_fresh else "fallback",
         "openrouter_comparison": _build_openrouter_comparison(models),
+        "workflow_recommendations": build_workflow_recommendations(statuses),
         "cloud_usage": [
             {
                 "title": "Cloud models in Ollama",
@@ -2738,9 +2904,25 @@ def _collect_artifacts(run_id: str, output_dir: str) -> tuple[list[dict], list[d
         pass
     try:
         if output_dir and os.path.isdir(output_dir):
+            seen_names: set[str] = set()
+
+            for artifact in _discover_run_report_artifacts(output_dir):
+                safe_name = str(artifact.get("name") or "").strip()
+                safe_path = str(artifact.get("path") or "").strip()
+                if not safe_name or not safe_path or safe_name in seen_names:
+                    continue
+                file_list.append(
+                    {
+                        **artifact,
+                        "download_url": f"/api/artifacts/download?run_id={quote(run_id)}&name={quote(safe_name)}",
+                        "view_url": f"/api/artifacts/view?run_id={quote(run_id)}&name={quote(safe_name)}",
+                    }
+                )
+                seen_names.add(safe_name)
+
             for fname in sorted(os.listdir(output_dir))[:50]:
                 fp = os.path.join(output_dir, fname)
-                if os.path.isfile(fp):
+                if os.path.isfile(fp) and fname not in seen_names:
                     file_list.append({
                         "name": fname,
                         "path": fp,
@@ -2748,9 +2930,66 @@ def _collect_artifacts(run_id: str, output_dir: str) -> tuple[list[dict], list[d
                         "download_url": f"/api/artifacts/download?run_id={quote(run_id)}&name={quote(fname)}",
                         "view_url": f"/api/artifacts/view?run_id={quote(run_id)}&name={quote(fname)}",
                     })
+                    seen_names.add(fname)
     except Exception:
         pass
     return db_artifacts, file_list
+
+
+def _augment_result_artifact_files(run_id: str, result: dict, *, output_dir: str = "") -> tuple[list[dict], list[dict]]:
+    doc_files = list(result.get("artifact_files") or [])
+    existing_names = {str(item.get("name") or "").strip() for item in doc_files if isinstance(item, dict)}
+    long_doc_exports: list[dict] = []
+
+    def _append_file(name: str, path: str, *, label: str = "", ext: str = "", kind: str = "artifact") -> None:
+        safe_name = str(name or "").strip()
+        safe_path = str(path or "").strip()
+        if not safe_name or not safe_path or safe_name in existing_names or not os.path.isfile(safe_path):
+            return
+        doc_files.append(
+            {
+                "name": safe_name,
+                "path": safe_path,
+                "size": os.path.getsize(safe_path),
+                "label": label or safe_name,
+                "ext": ext or os.path.splitext(safe_name)[1].lstrip(".").lower(),
+                "kind": kind,
+                "download_url": f"/api/artifacts/download?run_id={quote(run_id)}&name={quote(safe_name)}",
+                "view_url": f"/api/artifacts/view?run_id={quote(run_id)}&name={quote(safe_name)}",
+            }
+        )
+        existing_names.add(safe_name)
+        if kind == "report":
+            long_doc_exports.append({"ext": ext or os.path.splitext(safe_name)[1].lstrip(".").lower(), "label": label or safe_name, "name": safe_name})
+
+    for artifact in _deep_research_created_artifacts(result, output_dir):
+        _append_file(
+            str(artifact.get("name") or os.path.basename(str(artifact.get("path") or "").strip()) or ""),
+            str(artifact.get("path") or "").strip(),
+            label=str(artifact.get("name") or "").strip() or os.path.basename(str(artifact.get("path") or "").strip()),
+            ext=os.path.splitext(str(artifact.get("name") or "").strip() or os.path.basename(str(artifact.get("path") or "").strip()))[1].lstrip(".").lower(),
+            kind=str(artifact.get("kind") or "artifact").strip() or "artifact",
+        )
+
+    for key, ext, label in (
+        ("long_document_compiled_path", "md", "Markdown"),
+        ("long_document_compiled_html_path", "html", "HTML"),
+        ("long_document_compiled_pdf_path", "pdf", "PDF"),
+        ("long_document_compiled_docx_path", "docx", "Word (DOCX)"),
+    ):
+        fpath = _resolve_run_artifact_candidate(output_dir, str(result.get(key) or "").strip())
+        if fpath:
+            _append_file(os.path.basename(fpath), fpath, label=label, ext=ext, kind="report")
+
+    deduped_exports: list[dict] = []
+    seen_export_names: set[str] = set()
+    for item in long_doc_exports:
+        export_name = str(item.get("name") or "").strip()
+        if not export_name or export_name in seen_export_names:
+            continue
+        seen_export_names.add(export_name)
+        deduped_exports.append(item)
+    return doc_files, deduped_exports
 
 
 def _start_run_background(run_id: str, payload: dict) -> None:
@@ -2761,7 +3000,8 @@ def _start_run_background(run_id: str, payload: dict) -> None:
         _launch_execution_log_poller(run_id)
         try:
             result = _gateway_ingest(payload)
-            db_artifacts, file_list = _collect_artifacts(run_id, result.get("output_dir", ""))
+            output_dir = str(result.get("run_output_dir") or result.get("output_dir") or result.get("resume_output_dir") or "").strip()
+            db_artifacts, file_list = _collect_artifacts(run_id, output_dir)
             result["artifacts"] = db_artifacts
             result["artifact_files"] = file_list
             test_report = None
@@ -2805,36 +3045,10 @@ def _start_run_background(run_id: str, payload: dict) -> None:
                     result["mcp_invocations"] = mcp_invocations
             except Exception:
                 pass
-            # Inject long_document exports into artifact_files for download
             try:
-                doc_files = result.get("artifact_files") or []
-                existing_names = {f.get("name") for f in doc_files}
-                doc_keys = [
-                    ("long_document_compiled_path", "md", "Markdown"),
-                    ("long_document_compiled_html_path", "html", "HTML"),
-                    ("long_document_compiled_pdf_path", "pdf", "PDF"),
-                    ("long_document_compiled_docx_path", "docx", "Word (DOCX)"),
-                ]
-                long_doc_exports = []
-                for key, ext, label in doc_keys:
-                    fpath = str(result.get(key) or "").strip()
-                    if fpath and os.path.isfile(fpath):
-                        fname = os.path.basename(fpath)
-                        if fname not in existing_names:
-                            doc_files.append({
-                                "name": fname,
-                                "path": fpath,
-                                "size": os.path.getsize(fpath),
-                                "label": label,
-                                "ext": ext,
-                                "kind": "report",
-                                "download_url": f"/api/artifacts/download?run_id={quote(run_id)}&name={quote(fname)}",
-                                "view_url": f"/api/artifacts/view?run_id={quote(run_id)}&name={quote(fname)}",
-                            })
-                            existing_names.add(fname)
-                            long_doc_exports.append({"ext": ext, "label": label, "name": fname})
+                doc_files, long_doc_exports = _augment_result_artifact_files(run_id, result, output_dir=output_dir)
+                result["artifact_files"] = doc_files
                 if long_doc_exports:
-                    result["artifact_files"] = doc_files
                     result["long_document_exports"] = long_doc_exports
             except Exception:
                 pass
@@ -3651,6 +3865,14 @@ a:hover { text-decoration: underline; }
           <label for="drMaxSources">Max Sources</label>
           <input id="drMaxSources" class="dr-input" type="number" min="0" step="10" value="0" placeholder="0 = tier default" oninput="updateDeepResearchPanelSummary()">
         </div>
+        <div class="dr-field">
+          <label for="drSearchBackend">Search Backend</label>
+          <select id="drSearchBackend" class="dr-select" onchange="updateDeepResearchPanelSummary()">
+            <option value="auto">Auto</option>
+          </select>
+          <div class="dr-note" id="drSearchBackendNote">Checking available search backends...</div>
+          <div class="dr-note" id="drSearchBackendWarning" style="color:var(--warn)"></div>
+        </div>
       </div>
       <div class="dr-grid" style="margin-top:10px">
         <div class="dr-field">
@@ -3806,6 +4028,9 @@ if (!['direct_tools', 'plan', 'adaptive'].includes(executionMode)) executionMode
 let deepResearchUploadedRoots = [];
 let deepResearchLocalPaths = [];
 let deepResearchPanelCollapsed = (localStorage.getItem('kendr_deep_research_collapsed') || '0') === '1';
+let deepResearchSearchProviders = [];
+let deepResearchSearchProvidersLoading = false;
+let deepResearchSearchProvidersLoaded = false;
 let _chatActivityFeed = [];
 let _chatPlanState = { total: 0, completed: 0, running: 0, failed: 0 };
 let _chatRunState = { runId: '', status: 'idle', title: '', task: '', startedAt: '', completedAt: '', lastCommand: '', lastCommandMeta: '' };
@@ -4306,6 +4531,7 @@ function setResearchMode(mode) {
     ? 'Describe the deep research task, scope, and output you want...'
     : 'Ask kendr anything — research, code, deploy, analyze...';
   if (researchMode === 'deep_research') {
+    refreshDeepResearchSearchProviders(false);
     toggleDeepResearchWebSearch();
     renderDeepResearchSourceSummary();
   }
@@ -4328,6 +4554,70 @@ function _deepResearchSummaryPill(label, value) {
   return '<span class="dr-summary-pill"><strong style="color:var(--text)">' + esc(label) + '</strong><span>' + esc(value) + '</span></span>';
 }
 
+function _deepResearchSearchProviderById(id) {
+  const normalized = String(id || 'auto').trim().toLowerCase() || 'auto';
+  const rows = Array.isArray(deepResearchSearchProviders) ? deepResearchSearchProviders : [];
+  return rows.find(item => String(item && item.id || '').trim().toLowerCase() === normalized) || null;
+}
+
+function _deepResearchSearchBackendLabel() {
+  const selected = ((document.getElementById('drSearchBackend') || {}).value || 'auto').trim().toLowerCase() || 'auto';
+  const match = _deepResearchSearchProviderById(selected);
+  return match && match.label ? String(match.label) : (selected === 'auto' ? 'Auto' : selected);
+}
+
+function _renderDeepResearchSearchProviderState() {
+  const selectEl = document.getElementById('drSearchBackend');
+  const noteEl = document.getElementById('drSearchBackendNote');
+  const warningEl = document.getElementById('drSearchBackendWarning');
+  const webEnabled = !!((document.getElementById('drWebSearch') || {}).checked);
+  if (!selectEl) return;
+  const currentValue = String(selectEl.value || 'auto').trim().toLowerCase() || 'auto';
+  const rows = Array.isArray(deepResearchSearchProviders) && deepResearchSearchProviders.length
+    ? deepResearchSearchProviders
+    : [{ id: 'auto', label: 'Auto', enabled: true, note: 'Prefer the strongest configured backend, then fall back automatically.', warning: '' }];
+  selectEl.innerHTML = rows.map(item => {
+    const id = String(item && item.id || '').trim() || 'auto';
+    const label = String(item && item.label || id).trim() || id;
+    const enabled = item && item.enabled !== false;
+    const suffix = enabled ? '' : ' (not configured)';
+    return '<option value="' + esc(id) + '"' + (enabled ? '' : ' disabled') + '>' + esc(label + suffix) + '</option>';
+  }).join('');
+  const currentOption = rows.find(item => String(item && item.id || '').trim().toLowerCase() === currentValue) || null;
+  const nextValue = currentOption && currentOption.enabled !== false ? currentValue : 'auto';
+  selectEl.value = rows.some(item => String(item && item.id || '').trim().toLowerCase() === nextValue) ? nextValue : 'auto';
+  selectEl.disabled = !webEnabled;
+  const selected = _deepResearchSearchProviderById(selectEl.value) || rows[0];
+  if (noteEl) {
+    noteEl.textContent = !webEnabled
+      ? 'Search backend selection is disabled while web search is off.'
+      : String((selected && (selected.note || selected.description)) || 'Prefer the strongest configured backend, then fall back automatically.');
+  }
+  if (warningEl) {
+    warningEl.textContent = webEnabled
+      ? String((selected && selected.warning) || '')
+      : '';
+    warningEl.style.display = warningEl.textContent ? '' : 'none';
+  }
+}
+
+async function refreshDeepResearchSearchProviders(force) {
+  if (deepResearchSearchProvidersLoading && !force) return;
+  deepResearchSearchProvidersLoading = true;
+  try {
+    const resp = await fetch('/api/models');
+    const data = await resp.json().catch(() => ({}));
+    deepResearchSearchProviders = Array.isArray(data.search_providers) ? data.search_providers : [];
+  } catch (_) {
+    deepResearchSearchProviders = [];
+  } finally {
+    deepResearchSearchProvidersLoading = false;
+    deepResearchSearchProvidersLoaded = true;
+    _renderDeepResearchSearchProviderState();
+    updateDeepResearchPanelSummary();
+  }
+}
+
 function updateDeepResearchPanelSummary() {
   const panel = document.getElementById('deepResearchPanel');
   const body = document.getElementById('deepResearchPanelBody');
@@ -4348,11 +4638,16 @@ function updateDeepResearchPanelSummary() {
   const webEnabled = !!((document.getElementById('drWebSearch') || {}).checked);
   const localCount = _allDeepResearchLocalPaths().length;
   const linkCount = _deepResearchLinks().length;
+  if (researchMode === 'deep_research' && !deepResearchSearchProvidersLoaded && !deepResearchSearchProvidersLoading) {
+    refreshDeepResearchSearchProviders(false);
+  }
+  _renderDeepResearchSearchProviderState();
   const sourceSummary = (webEnabled ? 'Web on' : 'Local only') + ' · ' + (localCount + linkCount) + ' attached';
   const maxSummary = maxSources > 0 ? String(maxSources) : 'tier default';
   summary.innerHTML = [
     _deepResearchSummaryPill('Depth', depth),
     _deepResearchSummaryPill('Citation', citation),
+    _deepResearchSummaryPill('Search', _deepResearchSearchBackendLabel()),
     _deepResearchSummaryPill('Sources', sourceSummary),
     _deepResearchSummaryPill('Formats', formatCount + ' selected'),
     _deepResearchSummaryPill('Cap', maxSummary),
@@ -4399,6 +4694,7 @@ function toggleDeepResearchWebSearch() {
       ? 'Web search and explicit links are enabled. Disable this to restrict the report to local files/folders only.'
       : 'Web search is disabled. This report will use only attached local files/folders and added local paths.';
   }
+  _renderDeepResearchSearchProviderState();
   renderDeepResearchSourceSummary();
   updateDeepResearchPanelSummary();
 }
@@ -7000,6 +7296,7 @@ async function sendMessage() {
       payload.research_citation_style = ((document.getElementById('drCitation') || {}).value || 'apa');
       payload.research_enable_plagiarism_check = !!((document.getElementById('drPlagiarism') || {}).checked);
       payload.research_web_search_enabled = webSearchEnabled;
+      payload.research_search_backend = ((document.getElementById('drSearchBackend') || {}).value || 'auto');
       payload.research_date_range = ((document.getElementById('drDateRange') || {}).value || 'all_time');
       payload.research_sources = _selectedDeepResearchSources();
       payload.research_max_sources = parseInt((document.getElementById('drMaxSources') || {}).value || '0', 10) || 0;
@@ -13556,6 +13853,7 @@ strong { color: var(--text); }
                     is_ollama_running,
                     list_ollama_models,
                 )
+                from kendr.model_workflows import build_workflow_recommendations
                 configured_provider = get_active_provider()
                 configured_model = get_model_for_provider(configured_provider)
                 statuses = all_provider_statuses()
@@ -13602,6 +13900,8 @@ strong { color: var(--text); }
                     "configured_provider_note": str(configured_status.get("note") or "").strip(),
                     "providers": statuses,
                     "comparison_rows": comparison_rows,
+                    "workflow_recommendations": build_workflow_recommendations(statuses),
+                    "search_providers": _research_search_provider_statuses(),
                     "ollama_running": ollama_running,
                     "ollama_models": [m.get("name", "") for m in ollama_models],
                 })
@@ -14252,7 +14552,16 @@ strong { color: var(--text); }
             rest = path[len("/api/marketplace/skills/"):]
             action = rest.rsplit("/", 1)[-1] if "/" in rest else ""
             if action in {"install", "uninstall", "test", "approve", "revoke-approval", "edit", "delete"}:
-                status, data = _gateway_forward_json("POST", f"/api/marketplace/skills/{rest}", payload=body, timeout=10.0)
+                payload = body
+                if (
+                    action == "approve"
+                    and rest == "skill-approval/approve"
+                    and isinstance(body, dict)
+                    and not str(body.get("name", "") or "").strip()
+                ):
+                    payload = dict(body)
+                    payload["name"] = "readonly-policy"
+                status, data = _gateway_forward_json("POST", f"/api/marketplace/skills/{rest}", payload=payload, timeout=10.0)
                 self._json(status, data)
                 return
         # ── RAG routes ──────────────────────────────────────────────────────
@@ -14337,12 +14646,13 @@ strong { color: var(--text); }
                     "privileged_allow_root", "privileged_allow_destructive",
                     "privileged_enable_backup", "privileged_allowed_paths", "privileged_allowed_domains",
                     "workflow_type", "deep_research_mode",
+                    "multi_model_enabled", "multi_model_strategy", "multi_model_stage_overrides",
                     "execution_mode", "planner_mode",
                     "long_document_mode", "long_document_pages", "long_document_title",
                     "research_depth_mode",
                     "research_model",
                     "research_output_formats", "research_citation_style",
-                    "research_enable_plagiarism_check", "research_web_search_enabled", "research_date_range",
+                    "research_enable_plagiarism_check", "research_web_search_enabled", "research_search_backend", "research_date_range",
                     "research_sources", "research_max_sources", "research_checkpoint_enabled",
                     "research_kb_enabled", "research_kb_id", "research_kb_top_k",
                     "deep_research_source_urls", "local_drive_paths", "local_drive_recursive",

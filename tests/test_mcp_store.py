@@ -56,9 +56,10 @@ class MCPStoreTests(unittest.TestCase):
         )
         self.assertEqual(payload["mcpServers"]["aws-knowledge-mcp-server"]["disabled"], False)
 
-    def test_default_servers_include_browser_use(self):
+    def test_default_servers_do_not_include_browser_use(self):
         ids = {item["id"] for item in _DEFAULT_MCP_SERVERS}
-        self.assertIn("browser-use-mcp", ids)
+        self.assertNotIn("browser-use-mcp", ids)
+        self.assertIn("scpr-web-scraper", ids)
 
 
 if __name__ == "__main__":

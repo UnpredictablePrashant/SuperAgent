@@ -28,6 +28,40 @@ class LlmRouterTests(unittest.TestCase):
 
         self.assertEqual(model, "claude-sonnet-4-6")
 
+    def test_active_provider_prefers_explicit_model_selection_over_openai_key_only(self):
+        from kendr.llm_router import get_active_provider
+
+        with patch.dict(os.environ, {
+            "OPENAI_API_KEY": "test-openai-key",
+            "OLLAMA_MODEL": "lfm2.5-thinking:latest",
+        }, clear=True):
+            provider = get_active_provider()
+
+        self.assertEqual(provider, "ollama")
+
+    def test_active_provider_infers_provider_from_global_model_family(self):
+        from kendr.llm_router import get_active_provider
+
+        with patch.dict(os.environ, {
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "KENDR_MODEL": "claude-sonnet-4-6",
+        }, clear=True):
+            provider = get_active_provider()
+
+        self.assertEqual(provider, "anthropic")
+
+    def test_active_provider_prefers_ready_provider_over_unready_explicit_model_hint(self):
+        from kendr.llm_router import get_active_provider
+
+        with patch.dict(os.environ, {
+            "OPENAI_MODEL_GENERAL": "gpt-5.1",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "ANTHROPIC_MODEL": "claude-sonnet-4-6",
+        }, clear=True):
+            provider = get_active_provider()
+
+        self.assertEqual(provider, "anthropic")
+
     def test_provider_status_keeps_current_model_in_selectable_choices(self):
         from kendr.llm_router import provider_status
 

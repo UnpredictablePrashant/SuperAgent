@@ -75,11 +75,11 @@ class Phase0RuntimeSmokeTests(unittest.TestCase):
             mock_orchestrator_llm = stack.enter_context(patch("kendr.runtime.llm.invoke"))
             routed_state = runtime.orchestrator_agent(state)
 
-        self.assertEqual(routed_state["next_agent"], "deep_research_agent")
+        self.assertEqual(routed_state["next_agent"], "long_document_agent")
         self.assertEqual(routed_state["workflow_type"], "deep_research")
         self.assertFalse(mock_orchestrator_llm.called, "Explicit deep-research routing should not call orchestrator LLM.")
         self.assertTrue(routed_state.get("a2a", {}).get("tasks"))
-        self.assertEqual(routed_state["a2a"]["tasks"][-1]["recipient"], "deep_research_agent")
+        self.assertEqual(routed_state["a2a"]["tasks"][-1]["recipient"], "long_document_agent")
 
         with TemporaryDirectory() as tmp:
             captured_report_prompt: dict[str, str] = {}
@@ -129,7 +129,19 @@ class Phase0RuntimeSmokeTests(unittest.TestCase):
                 stack.enter_context(patch("tasks.report_tasks.resolve_output_path", side_effect=_resolve_tmp_path))
                 stack.enter_context(patch("tasks.report_tasks.llm.invoke", side_effect=_report_llm))
                 stack.enter_context(patch("tasks.report_tasks.log_task_update"))
-                research_state = runtime._execute_agent(routed_state, "deep_research_agent")
+                helper_state = append_task(
+                    routed_state,
+                    make_task(
+                        sender="test_harness",
+                        recipient="deep_research_agent",
+                        intent="deep-research-dispatch",
+                        content="Do deep research on telecom privacy policy trends with citations.",
+                        state_updates={
+                            "research_query": "Do deep research on telecom privacy policy trends with citations.",
+                        },
+                    ),
+                )
+                research_state = runtime._execute_agent(helper_state, "deep_research_agent")
                 report_state = append_task(
                     research_state,
                     make_task(
@@ -153,7 +165,9 @@ class Phase0RuntimeSmokeTests(unittest.TestCase):
 
             self.assertIn("deep_research_result_card", captured_report_prompt.get("text", ""))
             self.assertIn("research_source_summary", captured_report_prompt.get("text", ""))
+            self.assertIn("Report export complete.", report_state["draft_response"])
             self.assertIn("Generated report 'Phase 0 Runtime Launch Report'", report_state["draft_response"])
+            self.assertIn("HTML report: phase0_runtime_launch_1.html", report_state["draft_response"])
             self.assertIn("html", report_state["report_files"])
 
             html_path = Path(report_state["report_files"]["html"])

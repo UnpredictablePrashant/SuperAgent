@@ -142,7 +142,10 @@ def build_intent_candidates(
             risk_level="medium",
             reasons=["project build request detected"],
         )
-    if flags.get("long_document"):
+    # Deep research is the canonical user-facing workflow for long-form researched
+    # reports. When both signals are present, suppress the separate long-document
+    # candidate so the router surfaces a single coherent workflow choice.
+    if flags.get("long_document") and not flags.get("deep_research"):
         add_candidate(
             "long_document",
             "Long document workflow",

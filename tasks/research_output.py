@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 
 def _clean_line(value) -> str:
     text = " ".join(str(value or "").strip().split())
@@ -100,3 +102,39 @@ def render_phase0_report(
         lines.append("")
 
     return "\n".join(lines).strip()
+
+
+def display_artifact_path(path_value: str, *, output_root: str = "output") -> str:
+    raw = str(path_value or "").strip()
+    if not raw:
+        return ""
+
+    normalized = raw.replace("\\", "/").lstrip("./")
+    root = str(output_root or "output").strip().replace("\\", "/").strip("/")
+    if root:
+        prefix = f"{root}/"
+        if normalized.startswith(prefix):
+            return normalized[len(prefix) :]
+        token = f"/{prefix}"
+        if token in normalized:
+            return normalized.split(token, 1)[1]
+
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate.name or normalized
+    return normalized
+
+
+def render_artifact_lines(artifacts: list[tuple[str, str]], *, output_root: str = "output") -> list[str]:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for label, path_value in artifacts:
+        display_value = display_artifact_path(path_value, output_root=output_root)
+        if not label or not display_value:
+            continue
+        line = f"- {label}: {display_value}"
+        if line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+    return lines

@@ -8,7 +8,8 @@ from pathlib import Path
 import zipfile
 from unittest.mock import patch, MagicMock
 
-from tasks.research_infra import fetch_search_results, llm_text, parse_document, parse_documents
+from tasks import research_infra
+from tasks.research_infra import fetch_search_results, llm_text, openai_ocr_image, parse_document, parse_documents
 
 
 class ResearchInfraTests(unittest.TestCase):
@@ -24,10 +25,11 @@ class ResearchInfraTests(unittest.TestCase):
         self.assertNotIn("\ud83c", called_prompt)
         self.assertIn("\uFFFD", called_prompt)
 
-    def test_fetch_search_results_falls_back_to_duckduckgo_and_fetches_evidence(self):
+    def test_fetch_search_results_falls_back_to_duckduckgo_html_and_fetches_evidence(self):
         with (
             patch.dict(os.environ, {"SERP_API_KEY": "", "KENDR_BROWSER_USE_SEARCH_ENABLED": "0"}, clear=False),
             patch("tasks.research_infra._browser_use_server_enabled", return_value=False),
+            patch("tasks.research_infra.duckduckgo_ddgs_search", side_effect=RuntimeError("ddgs unavailable")),
             patch(
                 "tasks.research_infra.duckduckgo_html_search",
                 return_value={
@@ -50,10 +52,47 @@ class ResearchInfraTests(unittest.TestCase):
             result = fetch_search_results("fallback query", num=3, fetch_pages=1)
 
         self.assertEqual(result["provider"], "duckduckgo_html")
-        self.assertEqual(result["providers_tried"], ["duckduckgo_html"])
+        self.assertEqual(result["providers_tried"], ["ddgs", "duckduckgo_html"])
         self.assertEqual(result["results"][0]["url"], "https://example.com/a")
         self.assertEqual(result["viewed_pages"][0]["url"], "https://example.com/a")
         self.assertIn("evidence body", result["viewed_pages"][0]["excerpt"])
+
+    def test_fetch_search_results_prefers_ddgs_when_duckduckgo_hint_is_requested(self):
+        with (
+            patch.dict(os.environ, {"SERP_API_KEY": "", "KENDR_BROWSER_USE_SEARCH_ENABLED": "1"}, clear=False),
+            patch("tasks.research_infra._browser_use_server_enabled", return_value=True),
+            patch(
+                "tasks.research_infra.duckduckgo_ddgs_search",
+                return_value={
+                    "results": [
+                        {
+                            "title": "DDGS result",
+                            "url": "https://example.com/ddgs",
+                            "snippet": "snippet",
+                            "source": "DuckDuckGo DDGS",
+                            "date": "",
+                        }
+                    ],
+                    "query_plan": [{"query": "banana health"}],
+                    "instant_answer": {"heading": "Banana"},
+                },
+            ),
+            patch("tasks.research_infra.browser_use_search") as mock_browser_use,
+        ):
+            result = fetch_search_results(
+                "banana health",
+                num=5,
+                fetch_pages=0,
+                provider_hint="duckduckgo",
+                focused_brief="peer reviewed outcomes",
+            )
+
+        self.assertEqual(result["provider"], "ddgs")
+        self.assertEqual(result["providers_tried"], ["ddgs"])
+        self.assertEqual(result["results"][0]["url"], "https://example.com/ddgs")
+        self.assertEqual(result["instant_answer"]["heading"], "Banana")
+        self.assertEqual(result["query_plan"][0]["query"], "banana health")
+        self.assertFalse(mock_browser_use.called)
 
     def test_fetch_search_results_uses_browser_use_before_free_search_when_serpapi_missing(self):
         with (
@@ -136,6 +175,132 @@ class ResearchInfraTests(unittest.TestCase):
             [item["url"] for item in result["viewed_pages"]],
             ["https://example.com/a", "https://example.com/b"],
         )
+
+    def test_ddgs_with_retry_retries_ratelimit_errors(self):
+        attempts = {"count": 0}
+
+        def _flaky_call():
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise research_infra._DDGS_RATELIMIT_EXCEPTION("rate limited")
+            return "ok"
+
+        with patch("tasks.research_infra.time.sleep") as mock_sleep:
+            result = research_infra._ddgs_with_retry(_flaky_call, retries=3, backoff=2.0)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(attempts["count"], 3)
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    def test_duckduckgo_ddgs_search_caps_calls_and_specializes_academic_queries(self):
+        executed_queries: list[tuple[str, int, str | None]] = []
+
+        def _fake_ddgs_text_search(query: str, *, max_results: int = 10, region: str = "us-en", timelimit: str | None = None):
+            executed_queries.append((query, max_results, timelimit))
+            position = len(executed_queries)
+            return [
+                {
+                    "title": f"Academic result {position}",
+                    "href": f"https://example.com/paper-{position}",
+                    "body": "paper snippet",
+                    "source": "DuckDuckGo DDGS",
+                    "date": "",
+                }
+            ]
+
+        with (
+            patch("tasks.research_infra._ddgs_available", return_value=True),
+            patch("tasks.research_infra.ddgs_text_search", side_effect=_fake_ddgs_text_search),
+            patch("tasks.research_infra.duckduckgo_instant_answer", return_value={"heading": "Banana science"}),
+            patch("tasks.research_infra.time.sleep") as mock_sleep,
+        ):
+            payload = research_infra.duckduckgo_ddgs_search(
+                "banana health literature review",
+                num=10,
+                focused_brief="peer reviewed outcomes and adverse effects",
+                max_search_calls=12,
+            )
+
+        self.assertEqual(payload["scope"], "academic")
+        self.assertEqual(payload["call_budget"], 6)
+        self.assertLessEqual(len(executed_queries), 5)
+        self.assertTrue(any("site:pubmed.ncbi.nlm.nih.gov" in query for query, _, _ in executed_queries))
+        self.assertTrue(any("peer reviewed study OR systematic review" in query for query, _, _ in executed_queries))
+        self.assertEqual(payload["instant_answer"]["heading"], "Banana science")
+        self.assertGreaterEqual(mock_sleep.call_count, 1)
+
+    def test_research_search_backend_statuses_warns_when_auto_will_fall_back_to_ddgs(self):
+        with (
+            patch.dict(os.environ, {"SERP_API_KEY": ""}, clear=False),
+            patch("tasks.research_infra._ddgs_available", return_value=True),
+            patch("tasks.research_infra._browser_use_server_enabled", return_value=False),
+            patch("tasks.research_infra._playwright_search_available", return_value=True),
+        ):
+            rows = research_infra.research_search_backend_statuses()
+
+        by_id = {row["id"]: row for row in rows}
+        self.assertTrue(by_id["duckduckgo"]["enabled"])
+        self.assertTrue(by_id["duckduckgo"]["rate_limited"])
+        self.assertIn("fall back to unauthenticated DDGS", by_id["auto"]["warning"])
+
+    def test_resolve_vision_backend_trusts_runtime_override_for_supported_provider(self):
+        with patch(
+            "tasks.research_infra.model_selection_for_agent",
+            return_value={"provider": "glm", "model": "glm-4-flash", "source": "runtime_override"},
+        ):
+            backend = research_infra._resolve_vision_backend(agent_name="ocr_agent")
+
+        self.assertEqual(backend["provider"], "glm")
+        self.assertEqual(backend["model"], "glm-4-flash")
+        self.assertFalse(backend["fallback"])
+
+    def test_resolve_vision_backend_falls_back_to_openai_when_needed(self):
+        def _fake_get_api_key(provider: str) -> str:
+            return "test-openai-key" if provider == "openai" else ""
+
+        with (
+            patch(
+                "tasks.research_infra.model_selection_for_agent",
+                return_value={"provider": "anthropic", "model": "claude-sonnet", "source": "runtime_override"},
+            ),
+            patch("tasks.research_infra.get_api_key", side_effect=_fake_get_api_key),
+        ):
+            backend = research_infra._resolve_vision_backend(agent_name="ocr_agent")
+
+        self.assertEqual(backend["provider"], "openai")
+        self.assertEqual(backend["model"], research_infra.DEFAULT_VISION_MODEL)
+        self.assertTrue(backend["fallback"])
+
+    def test_openai_ocr_image_uses_selected_provider_and_model(self):
+        with TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "scan.png"
+            image_path.write_bytes(b"fake-image")
+
+            response = MagicMock()
+            response.output_text = ""
+            response.choices = [MagicMock(message=MagicMock(content="Invoice 101"))]
+            response.model_dump.return_value = {"id": "resp-1"}
+            client = MagicMock()
+            client.chat.completions.create.return_value = response
+
+            with (
+                patch(
+                    "tasks.research_infra._resolve_vision_backend",
+                    return_value={
+                        "provider": "glm",
+                        "model": "glm-4-flash",
+                        "source": "runtime_override",
+                        "fallback": False,
+                    },
+                ),
+                patch("tasks.research_infra._build_openai_compatible_client", return_value=client),
+            ):
+                payload = openai_ocr_image(str(image_path), "Extract the invoice text.")
+
+        self.assertEqual(payload["provider"], "glm")
+        self.assertEqual(payload["model"], "glm-4-flash")
+        self.assertEqual(payload["selection_source"], "runtime_override")
+        self.assertEqual(payload["text"], "Invoice 101")
 
     def test_parse_document_uses_excel_pdf_fallback_when_primary_read_fails(self):
         with TemporaryDirectory() as tmp:

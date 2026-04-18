@@ -552,6 +552,12 @@ BUILTIN_CHANNEL_DEFINITIONS: tuple[dict[str, str], ...] = (
 
 
 REQUIREMENT_RULES: dict[str, RequirementRule] = {
+    "configured_llm": RequirementRule(
+        name="configured_llm",
+        mode="any",
+        integrations=("openai", "anthropic", "google_gemini", "xai", "ollama", "openrouter", "custom_llm", "minimax", "qwen", "glm"),
+        description="Requires at least one configured LLM provider.",
+    ),
     "openai_or_codex_cli": RequirementRule(
         name="openai_or_codex_cli",
         mode="any",
@@ -658,7 +664,6 @@ def _legacy_requirements() -> dict[str, list[str]]:
         "structured_data_agent",
         "citation_agent",
         "reddit_agent",
-        "deep_research_agent",
         "agent_factory_agent",
         "dynamic_agent_runner",
         "aws_scope_guard_agent",

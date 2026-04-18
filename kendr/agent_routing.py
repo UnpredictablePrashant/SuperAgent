@@ -278,9 +278,19 @@ class AgentRoutingIndex:
             "installed_user_skills": len(user_skills),
         }
 
-    def user_skills_prompt_block(self) -> str:
+    def user_skills_prompt_block(
+        self,
+        *,
+        allowed_slugs: set[str] | None = None,
+        max_items: int | None = None,
+    ) -> str:
         """Return a text block describing installed and core skills for prompts."""
         skills = _get_runtime_skills()
+        if allowed_slugs is not None:
+            normalized_allowed = {str(item or "").strip() for item in allowed_slugs if str(item or "").strip()}
+            skills = [item for item in skills if str(item.get("slug", "") or "").strip() in normalized_allowed]
+        if isinstance(max_items, int) and max_items > 0:
+            skills = skills[:max_items]
         if not skills:
             return ""
         lines = [

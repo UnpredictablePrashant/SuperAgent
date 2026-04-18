@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
+from tasks.research_output import render_artifact_lines
 from tasks.utils import OUTPUT_DIR, llm, log_task_update, normalize_llm_text, resolve_output_path, write_text_file
 
 
@@ -646,13 +647,27 @@ def report_agent(state):
     write_text_file(manifest_filename, json.dumps(manifest, indent=2, ensure_ascii=False))
     write_text_file(summary_filename, report_text)
 
+    artifact_lines = render_artifact_lines(
+        [
+            ("HTML report", output_paths.get("html", "")),
+            ("PDF report", output_paths.get("pdf", "")),
+            ("XLSX workbook", output_paths.get("xlsx", "")),
+            ("Manifest", resolve_output_path(manifest_filename)),
+            ("Plain-text summary", resolve_output_path(summary_filename)),
+        ],
+        output_root=OUTPUT_DIR,
+    )
+
     state["report_data"] = report_data
     state["report_summary"] = report_text
     state["report_files"] = output_paths
     state["report_manifest"] = manifest
+    state["report_artifact_lines"] = artifact_lines
     state["draft_response"] = (
-        f"Generated report '{report_data['title']}' in formats: {', '.join(report_formats)}.\n"
-        + "\n".join(f"- {fmt}: {path}" for fmt, path in output_paths.items())
+        "Report export complete.\n"
+        f"- Generated report '{report_data['title']}'\n"
+        f"- Formats: {', '.join(report_formats)}\n"
+        + "\n".join(artifact_lines)
     )
 
     log_task_update(

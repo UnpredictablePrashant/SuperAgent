@@ -1,7 +1,9 @@
 import base64
 import csv
+import importlib.util
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -18,9 +20,43 @@ from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
-from tasks.utils import llm, normalize_llm_text
+from kendr.llm_router import (
+    PROVIDER_CUSTOM,
+    PROVIDER_GLM,
+    PROVIDER_MINIMAX,
+    PROVIDER_OLLAMA,
+    PROVIDER_OPENAI,
+    PROVIDER_OPENROUTER,
+    PROVIDER_QWEN,
+    PROVIDER_XAI,
+    get_api_key,
+    get_base_url,
+    get_model_capabilities,
+)
+from tasks.utils import llm, model_selection_for_agent, normalize_llm_text
 
 logger = logging.getLogger(__name__)
+
+_DDGS_IMPORT_ERROR = ""
+try:
+    from ddgs import DDGS as _DDGS_CLIENT_FACTORY
+except Exception as exc:
+    _DDGS_IMPORT_ERROR = str(exc)
+    try:
+        from duckduckgo_search import DDGS as _DDGS_CLIENT_FACTORY
+        _DDGS_IMPORT_ERROR = ""
+    except Exception as compat_exc:
+        _DDGS_CLIENT_FACTORY = None
+        _DDGS_IMPORT_ERROR = str(compat_exc)
+
+try:
+    from ddgs.exceptions import RatelimitException as _DDGS_RATELIMIT_EXCEPTION
+except Exception:
+    try:
+        from duckduckgo_search.exceptions import RatelimitException as _DDGS_RATELIMIT_EXCEPTION
+    except Exception:
+        class _DDGS_RATELIMIT_EXCEPTION(Exception):
+            pass
 
 
 DEFAULT_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -34,10 +70,41 @@ SERP_API_URL = "https://serpapi.com/search.json"
 OPENALEX_API_URL = "https://api.openalex.org/works"
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 REDDIT_BASE_URL = "https://www.reddit.com"
+DUCKDUCKGO_INSTANT_ANSWER_URL = "https://api.duckduckgo.com/"
 DUCKDUCKGO_HTML_SEARCH_URL = "https://html.duckduckgo.com/html/"
 BROWSER_USE_SEARCH_ENGINES = {
     "google": "https://www.google.com/search",
     "duckduckgo": "https://duckduckgo.com/html/",
+}
+DDGS_MAX_RESULTS_PER_CALL = max(1, min(int(os.getenv("KENDR_DDGS_MAX_RESULTS_PER_CALL", "10") or 10), 10))
+DDGS_MAX_CALLS_PER_REQUEST = max(1, min(int(os.getenv("KENDR_DDGS_MAX_CALLS_PER_REQUEST", "6") or 6), 10))
+DDGS_RATE_LIMIT_RETRIES = max(1, min(int(os.getenv("KENDR_DDGS_RATE_LIMIT_RETRIES", "3") or 3), 6))
+DDGS_RATE_LIMIT_BACKOFF = max(1.0, float(os.getenv("KENDR_DDGS_RATE_LIMIT_BACKOFF", "3.0") or 3.0))
+DDGS_INTER_CALL_DELAY_SECONDS = max(0.0, float(os.getenv("KENDR_DDGS_INTER_CALL_DELAY_SECONDS", "1.0") or 1.0))
+DDGS_LARGE_BATCH_EXTRA_DELAY_SECONDS = max(0.0, float(os.getenv("KENDR_DDGS_LARGE_BATCH_EXTRA_DELAY_SECONDS", "2.0") or 2.0))
+DDGS_RECENT_MARKERS = {
+    "today", "latest", "recent", "current", "new", "news", "breaking", "this week", "this month",
+}
+DDGS_ACADEMIC_MARKERS = {
+    "academic", "paper", "papers", "study", "studies", "journal", "peer-reviewed", "scientific",
+    "scholarly", "literature", "systematic review", "meta-analysis", "pubmed", "arxiv",
+}
+DDGS_PATENT_MARKERS = {
+    "patent", "patents", "prior art", "prior-art", "inventor", "assignee", "claims", "uspto",
+    "espacenet", "wipo",
+}
+SEARCH_BACKEND_ALIAS_MAP = {
+    "": "auto",
+    "auto": "auto",
+    "duckduckgo": "duckduckgo",
+    "ddgs": "duckduckgo",
+    "duckduckgo_ddgs": "duckduckgo",
+    "serpapi": "serpapi",
+    "browser_use": "browser_use_mcp",
+    "browser-use": "browser_use_mcp",
+    "browser_use_mcp": "browser_use_mcp",
+    "playwright": "playwright_browser",
+    "playwright_browser": "playwright_browser",
 }
 IMAGE_FILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
 TEXT_LIKE_SOURCE_EXTENSIONS = {
@@ -98,6 +165,17 @@ LOCAL_DRIVE_SUPPORTED_EXTENSIONS = {
     ".pptx",
     ".pptm",
     *IMAGE_FILE_EXTENSIONS,
+}
+
+OPENAI_COMPAT_VISION_PROVIDERS = {
+    PROVIDER_OPENAI,
+    PROVIDER_XAI,
+    PROVIDER_MINIMAX,
+    PROVIDER_QWEN,
+    PROVIDER_GLM,
+    PROVIDER_OLLAMA,
+    PROVIDER_OPENROUTER,
+    PROVIDER_CUSTOM,
 }
 
 
@@ -170,6 +248,166 @@ def get_openai_client():
     return OpenAI(api_key=api_key)
 
 
+def _build_openai_compatible_client(provider: str):
+    from openai import OpenAI
+
+    normalized_provider = str(provider or "").strip().lower() or PROVIDER_OPENAI
+    api_key = get_api_key(normalized_provider)
+    if not api_key and normalized_provider in {PROVIDER_OLLAMA, PROVIDER_CUSTOM}:
+        api_key = "ollama"
+    if not api_key:
+        raise ValueError(f"{normalized_provider.upper()} API key is required for OCR/image analysis.")
+
+    init = {"api_key": api_key}
+    base_url = str(get_base_url(normalized_provider) or "").strip()
+    if base_url:
+        init["base_url"] = base_url
+    return OpenAI(**init)
+
+
+def _resolve_vision_backend(
+    *,
+    provider: str = "",
+    model: str = "",
+    agent_name: str = "ocr_agent",
+) -> dict[str, object]:
+    explicit_provider = str(provider or "").strip().lower()
+    explicit_model = str(model or "").strip()
+    if explicit_provider and explicit_model:
+        selection = {"provider": explicit_provider, "model": explicit_model, "source": "explicit"}
+    else:
+        selection = model_selection_for_agent(agent_name)
+
+    selected_provider = str(selection.get("provider") or "").strip().lower() or PROVIDER_OPENAI
+    selected_model = str(selection.get("model") or "").strip()
+    selected_source = str(selection.get("source") or "").strip() or "agent_selection"
+    trusted_selection = bool(explicit_provider and explicit_model) or selected_source == "runtime_override"
+    capabilities = get_model_capabilities(selected_model, selected_provider)
+
+    if (
+        selected_provider in OPENAI_COMPAT_VISION_PROVIDERS
+        and selected_model
+        and (trusted_selection or bool(capabilities.get("vision")))
+    ):
+        return {
+            "provider": selected_provider,
+            "model": selected_model,
+            "source": selected_source,
+            "fallback": False,
+        }
+
+    fallback_model = str(DEFAULT_VISION_MODEL or "").strip()
+    if fallback_model and str(get_api_key(PROVIDER_OPENAI) or "").strip():
+        return {
+            "provider": PROVIDER_OPENAI,
+            "model": fallback_model,
+            "source": "openai_fallback",
+            "fallback": True,
+        }
+
+    if selected_provider in OPENAI_COMPAT_VISION_PROVIDERS and selected_model:
+        return {
+            "provider": selected_provider,
+            "model": selected_model,
+            "source": selected_source,
+            "fallback": True,
+        }
+
+    raise ValueError(
+        "No OCR-capable vision backend is available. Configure OPENAI_API_KEY or enable a supported vision model."
+    )
+
+
+def _image_data_uri(path: Path) -> str:
+    mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    image_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{image_b64}"
+
+
+def _extract_chat_completion_text(response) -> str:
+    output_text = getattr(response, "output_text", "") or ""
+    if output_text:
+        return str(output_text).strip()
+
+    choices = getattr(response, "choices", None) or []
+    for choice in choices:
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", "")
+        if isinstance(content, str):
+            if content.strip():
+                return content.strip()
+            continue
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+                else:
+                    text = getattr(item, "text", "")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+            if parts:
+                return "\n".join(parts).strip()
+    return ""
+
+
+def _run_openai_compat_image_prompt(
+    path_str: str,
+    instruction: str,
+    *,
+    agent_name: str,
+    provider: str = "",
+    model: str = "",
+) -> dict:
+    backend = _resolve_vision_backend(provider=provider, model=model, agent_name=agent_name)
+    path = Path(path_str)
+    client = _build_openai_compatible_client(str(backend.get("provider") or ""))
+    image_url = _image_data_uri(path)
+    response = None
+    try:
+        response = client.chat.completions.create(
+            model=str(backend.get("model") or ""),
+            temperature=0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": instruction},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ],
+        )
+        output_text = _extract_chat_completion_text(response)
+    except Exception:
+        if str(backend.get("provider") or "").strip().lower() != PROVIDER_OPENAI:
+            raise
+        response = client.responses.create(
+            model=str(backend.get("model") or ""),
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": instruction},
+                        {"type": "input_image", "image_url": image_url},
+                    ],
+                }
+            ],
+        )
+        output_text = getattr(response, "output_text", "") or ""
+    payload = response.model_dump() if hasattr(response, "model_dump") else {"response": str(response)}
+    return {
+        "path": str(path),
+        "raw": payload,
+        "provider": str(backend.get("provider") or ""),
+        "model": str(backend.get("model") or ""),
+        "selection_source": str(backend.get("source") or ""),
+        "text": str(output_text or "").strip(),
+    }
+
+
 def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 150) -> list[str]:
     cleaned = " ".join((text or "").split())
     if not cleaned:
@@ -240,6 +478,7 @@ def fetch_urls_content(
     timeout: int = 20,
     max_workers: int | None = None,
     per_domain_limit: int | None = None,
+    progress_callback=None,
 ) -> list[dict]:
     ordered_urls = [str(url or "").strip() for url in urls if str(url or "").strip()]
     if not ordered_urls:
@@ -247,15 +486,31 @@ def fetch_urls_content(
 
     if len(ordered_urls) == 1:
         url = ordered_urls[0]
+        if progress_callback:
+            try:
+                progress_callback(url, "started", None, 1, 1)
+            except Exception:
+                pass
         try:
             payload = dict(fetch_url_content(url, timeout=timeout) or {})
             payload["url"] = str(payload.get("url", "") or url).strip()
             payload["content_type"] = str(payload.get("content_type", "") or "").strip()
             payload["text"] = str(payload.get("text", "") or "")
             payload["raw_text"] = str(payload.get("raw_text", payload["text"]) or "")
+            if progress_callback:
+                try:
+                    progress_callback(payload["url"], "completed", payload, 1, 1)
+                except Exception:
+                    pass
             return [payload]
         except Exception as exc:
-            return [{"url": url, "content_type": "", "text": "", "raw_text": "", "error": str(exc)}]
+            payload = {"url": url, "content_type": "", "text": "", "raw_text": "", "error": str(exc)}
+            if progress_callback:
+                try:
+                    progress_callback(url, "failed", payload, 1, 1)
+                except Exception:
+                    pass
+            return [payload]
 
     worker_count = max_workers if max_workers is not None else _link_worker_count(len(ordered_urls))
     worker_count = max(1, min(len(ordered_urls), int(worker_count)))
@@ -276,6 +531,11 @@ def fetch_urls_content(
     def _fetch_one(index: int, url: str) -> tuple[int, dict]:
         semaphore = _domain_semaphore(url)
         with semaphore:
+            if progress_callback:
+                try:
+                    progress_callback(url, "started", None, index + 1, len(ordered_urls))
+                except Exception:
+                    pass
             try:
                 payload = fetch_url_content(url, timeout=timeout)
                 normalized = dict(payload or {})
@@ -283,9 +543,20 @@ def fetch_urls_content(
                 normalized["content_type"] = str(normalized.get("content_type", "") or "").strip()
                 normalized["text"] = str(normalized.get("text", "") or "")
                 normalized["raw_text"] = str(normalized.get("raw_text", normalized["text"]) or "")
+                if progress_callback:
+                    try:
+                        progress_callback(normalized["url"], "completed", normalized, index + 1, len(ordered_urls))
+                    except Exception:
+                        pass
                 return index, normalized
             except Exception as exc:
-                return index, {"url": url, "content_type": "", "text": "", "raw_text": "", "error": str(exc)}
+                payload = {"url": url, "content_type": "", "text": "", "raw_text": "", "error": str(exc)}
+                if progress_callback:
+                    try:
+                        progress_callback(url, "failed", payload, index + 1, len(ordered_urls))
+                    except Exception:
+                        pass
+                return index, payload
 
     with ThreadPoolExecutor(max_workers=worker_count) as pool:
         futures = [pool.submit(_fetch_one, index, url) for index, url in enumerate(ordered_urls)]
@@ -575,6 +846,408 @@ def _clean_search_result_url(url: str) -> str:
     return value
 
 
+def _ddgs_available() -> bool:
+    return _DDGS_CLIENT_FACTORY is not None
+
+
+def _playwright_search_available() -> bool:
+    return importlib.util.find_spec("playwright") is not None
+
+
+def normalize_research_search_backend(value: str = "") -> str:
+    normalized = str(value or "").strip().lower()
+    return SEARCH_BACKEND_ALIAS_MAP.get(normalized, "auto")
+
+
+def research_search_backend_statuses() -> list[dict]:
+    serpapi_ready = bool(os.getenv("SERP_API_KEY", "").strip())
+    browser_use_ready = _browser_use_server_enabled()
+    ddgs_ready = _ddgs_available()
+    playwright_ready = _playwright_search_available()
+    return [
+        {
+            "id": "auto",
+            "label": "Auto",
+            "enabled": True,
+            "authenticated": False,
+            "rate_limited": False,
+            "description": "Prefer the strongest configured backend, then fall back automatically.",
+            "note": "Uses SerpAPI first when configured; otherwise falls back to local/free search helpers.",
+            "warning": (
+                ""
+                if serpapi_ready or not ddgs_ready
+                else (
+                    "Auto will likely fall back to unauthenticated DDGS search in this setup. "
+                    "That path can rate-limit during heavier runs, even though Kendr caps calls and adds delays."
+                )
+            ),
+        },
+        {
+            "id": "duckduckgo",
+            "label": "DuckDuckGo (DDGS)",
+            "enabled": ddgs_ready,
+            "authenticated": False,
+            "rate_limited": True,
+            "description": "Unauthenticated DuckDuckGo search helper with bounded retries and delays.",
+            "note": "No API key required.",
+            "warning": (
+                "Unauthenticated DDGS search can hit rate limits on heavier runs. "
+                "Kendr keeps DDGS calls capped and delayed, but retries can still slow collection."
+            ),
+        },
+        {
+            "id": "serpapi",
+            "label": "SerpAPI",
+            "enabled": serpapi_ready,
+            "authenticated": True,
+            "rate_limited": False,
+            "description": "Structured authenticated search results via SerpAPI.",
+            "note": "Requires SERP_API_KEY.",
+            "warning": "",
+        },
+        {
+            "id": "browser_use_mcp",
+            "label": "Browser-Use MCP",
+            "enabled": browser_use_ready,
+            "authenticated": False,
+            "rate_limited": False,
+            "description": "Browser-backed search extraction through the browser-use MCP server.",
+            "note": "Requires a running browser-use MCP server.",
+            "warning": "",
+        },
+        {
+            "id": "playwright_browser",
+            "label": "Playwright Browser",
+            "enabled": playwright_ready,
+            "authenticated": False,
+            "rate_limited": False,
+            "description": "Headless browser fallback that extracts results directly from the search page.",
+            "note": "Requires Playwright plus an installed browser runtime.",
+            "warning": "",
+        },
+    ]
+
+
+def _is_ddgs_rate_limit_error(exc: Exception) -> bool:
+    if isinstance(exc, _DDGS_RATELIMIT_EXCEPTION):
+        return True
+    lowered = str(exc or "").strip().lower()
+    return "rate" in lowered and "limit" in lowered or "429" in lowered
+
+
+def _ddgs_with_retry(fn, *, retries: int = DDGS_RATE_LIMIT_RETRIES, backoff: float = DDGS_RATE_LIMIT_BACKOFF):
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= retries or not _is_ddgs_rate_limit_error(exc):
+                raise
+            wait_seconds = min(45.0, backoff ** attempt)
+            logger.warning(
+                "DDGS rate limit encountered (attempt %d/%d): %s — retrying in %.1fs",
+                attempt,
+                retries,
+                exc,
+                wait_seconds,
+            )
+            time.sleep(wait_seconds)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("DDGS retry failed without an explicit exception.")
+
+
+def _ddgs_call_budget(*, num: int, max_search_calls: int = 0) -> int:
+    requested = int(max_search_calls or 0)
+    if requested <= 0:
+        if num <= 3:
+            requested = 2
+        elif num <= 7:
+            requested = 3
+        else:
+            requested = 4
+    return max(1, min(requested, DDGS_MAX_CALLS_PER_REQUEST))
+
+
+def _ddgs_inter_call_delay(call_index: int, total_calls: int) -> float:
+    if call_index >= total_calls:
+        return 0.0
+    delay = DDGS_INTER_CALL_DELAY_SECONDS
+    if total_calls >= 4 and call_index >= 3:
+        delay += DDGS_LARGE_BATCH_EXTRA_DELAY_SECONDS
+    return delay
+
+
+def _search_focus_terms(text: str, *, limit: int = 6) -> str:
+    stop_words = {
+        "the", "and", "for", "with", "from", "that", "this", "into", "about", "after", "before",
+        "using", "used", "should", "would", "could", "these", "those", "their", "there", "which",
+        "what", "when", "where", "while", "than", "then", "into", "onto", "your", "our", "brief",
+        "focused", "focus", "report", "research", "summary", "sources", "evidence",
+    }
+    terms: list[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"[a-z0-9][a-z0-9+./:-]{1,}", str(text or "").lower()):
+        if token in stop_words or len(token) < 3:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        terms.append(token)
+        if len(terms) >= limit:
+            break
+    return " ".join(terms)
+
+
+def _infer_duckduckgo_scope(query: str, *, focused_brief: str = "", research_scope: str = "") -> str:
+    explicit = str(research_scope or "").strip().lower()
+    if explicit in {"academic", "academics", "scholar", "scholarly", "papers"}:
+        return "academic"
+    if explicit in {"patent", "patents"}:
+        return "patents"
+    if explicit in {"news", "recent"}:
+        return "news"
+    haystack = f"{query} {focused_brief}".lower()
+    if any(marker in haystack for marker in DDGS_PATENT_MARKERS):
+        return "patents"
+    if any(marker in haystack for marker in DDGS_ACADEMIC_MARKERS):
+        return "academic"
+    if any(marker in haystack for marker in DDGS_RECENT_MARKERS):
+        return "news"
+    return "web"
+
+
+def _ddgs_timelimit_for_query(query: str, *, scope: str) -> str | None:
+    lowered = str(query or "").lower()
+    if scope == "news":
+        if "today" in lowered or "breaking" in lowered:
+            return "d"
+        if "this week" in lowered or "weekly" in lowered:
+            return "w"
+        return "m"
+    if "latest" in lowered or "recent" in lowered or "current" in lowered:
+        return "m"
+    return None
+
+
+def _build_duckduckgo_query_plan(
+    query: str,
+    *,
+    focused_brief: str = "",
+    research_scope: str = "",
+    max_calls: int,
+) -> tuple[str, list[dict[str, str]]]:
+    base_query = re.sub(r"\s+", " ", str(query or "").strip())
+    scope = _infer_duckduckgo_scope(base_query, focused_brief=focused_brief, research_scope=research_scope)
+    focus_terms = _search_focus_terms(focused_brief)
+    candidate_queries: list[str] = [base_query]
+    if focus_terms and focus_terms.lower() not in base_query.lower():
+        candidate_queries.append(f"{base_query} {focus_terms}")
+
+    if scope == "academic":
+        candidate_queries.extend(
+            [
+                f"{base_query} peer reviewed study OR systematic review",
+                f"site:pubmed.ncbi.nlm.nih.gov {base_query}",
+                f"site:arxiv.org {base_query}",
+                f"site:openalex.org OR site:nih.gov {base_query}",
+            ]
+        )
+    elif scope == "patents":
+        candidate_queries.extend(
+            [
+                f"{base_query} patent prior art",
+                f"site:patents.google.com {base_query}",
+                f"site:worldwide.espacenet.com {base_query}",
+                f"site:uspto.gov {base_query}",
+            ]
+        )
+    elif scope == "news":
+        candidate_queries.extend(
+            [
+                f"{base_query} latest",
+                f"{base_query} official announcement",
+                f"{base_query} press release",
+            ]
+        )
+
+    plan: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in candidate_queries:
+        normalized = re.sub(r"\s+", " ", str(item or "").strip())
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        plan.append(
+            {
+                "query": normalized,
+                "mode": "text",
+                "timelimit": _ddgs_timelimit_for_query(normalized, scope=scope) or "",
+                "scope": scope,
+            }
+        )
+        if len(plan) >= max_calls:
+            break
+    return scope, plan
+
+
+def _normalize_ddgs_result(item: dict, *, fallback_source: str = "DuckDuckGo DDGS") -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    url = _clean_search_result_url(item.get("href") or item.get("url") or item.get("link") or item.get("content") or "")
+    title = re.sub(r"\s+", " ", str(item.get("title") or item.get("heading") or "")).strip()
+    if not url or not title:
+        return None
+    snippet = re.sub(
+        r"\s+",
+        " ",
+        str(item.get("body") or item.get("snippet") or item.get("excerpt") or item.get("description") or ""),
+    ).strip()
+    return {
+        "title": title,
+        "url": url,
+        "snippet": snippet,
+        "source": str(item.get("source") or fallback_source).strip() or fallback_source,
+        "date": str(item.get("date") or item.get("published") or "").strip(),
+    }
+
+
+def ddgs_text_search(query: str, *, max_results: int = 10, region: str = "us-en", timelimit: str | None = None) -> list[dict]:
+    if not _ddgs_available():
+        raise RuntimeError(f"ddgs package is unavailable: {_DDGS_IMPORT_ERROR or 'not installed'}")
+    bounded_results = max(1, min(int(max_results or DDGS_MAX_RESULTS_PER_CALL), DDGS_MAX_RESULTS_PER_CALL))
+
+    def _run() -> list[dict]:
+        client = _DDGS_CLIENT_FACTORY()
+        payload = client.text(
+            query=query,
+            region=region,
+            safesearch="moderate",
+            timelimit=timelimit,
+            max_results=bounded_results,
+        )
+        return list(payload or [])
+
+    return _ddgs_with_retry(_run)
+
+
+def duckduckgo_instant_answer(query: str) -> dict:
+    params = {
+        "q": str(query or "").strip(),
+        "format": "json",
+        "no_redirect": "1",
+        "no_html": "1",
+        "skip_disambig": "1",
+    }
+    request = Request(
+        f"{DUCKDUCKGO_INSTANT_ANSWER_URL}?{urlencode(params)}",
+        headers={
+            "User-Agent": os.getenv(
+                "RESEARCH_USER_AGENT",
+                "multi-agent-research-bot/1.0 (+https://localhost)",
+            ),
+        },
+        method="GET",
+    )
+    with urlopen(request, timeout=20) as response:
+        raw = json.loads(response.read().decode("utf-8", errors="ignore"))
+    return {
+        "heading": str(raw.get("Heading", "") or "").strip(),
+        "abstract": str(raw.get("AbstractText", "") or "").strip(),
+        "abstract_url": str(raw.get("AbstractURL", "") or "").strip(),
+        "answer": str(raw.get("Answer", "") or "").strip(),
+        "answer_type": str(raw.get("AnswerType", "") or "").strip(),
+        "definition": str(raw.get("Definition", "") or "").strip(),
+        "definition_url": str(raw.get("DefinitionURL", "") or "").strip(),
+        "entity": str(raw.get("Entity", "") or "").strip(),
+        "related_topics_count": len(raw.get("RelatedTopics", []) if isinstance(raw.get("RelatedTopics", []), list) else []),
+    }
+
+
+def duckduckgo_ddgs_search(
+    query: str,
+    *,
+    num: int = 10,
+    focused_brief: str = "",
+    research_scope: str = "",
+    max_search_calls: int = 0,
+    include_instant_answer: bool = True,
+) -> dict:
+    if not _ddgs_available():
+        raise RuntimeError(f"ddgs package is unavailable: {_DDGS_IMPORT_ERROR or 'not installed'}")
+
+    bounded_num = max(1, min(int(num or DDGS_MAX_RESULTS_PER_CALL), DDGS_MAX_RESULTS_PER_CALL))
+    call_budget = _ddgs_call_budget(num=bounded_num, max_search_calls=max_search_calls)
+    reserve_instant_answer = bool(include_instant_answer and call_budget > 1)
+    query_call_budget = max(1, call_budget - (1 if reserve_instant_answer else 0))
+    scope, query_plan = _build_duckduckgo_query_plan(
+        query,
+        focused_brief=focused_brief,
+        research_scope=research_scope,
+        max_calls=query_call_budget,
+    )
+    per_call_results = min(
+        DDGS_MAX_RESULTS_PER_CALL,
+        max(3, int(math.ceil(bounded_num / max(1, len(query_plan)))) + 1),
+    )
+    combined_results: list[dict] = []
+    raw_batches: list[dict] = []
+    seen_urls: set[str] = set()
+    minimum_calls = 2 if scope in {"academic", "patents"} and len(query_plan) > 1 else 1
+
+    for index, plan_item in enumerate(query_plan, start=1):
+        raw_results = ddgs_text_search(
+            plan_item["query"],
+            max_results=per_call_results,
+            timelimit=plan_item["timelimit"] or None,
+        )
+        raw_batches.append(
+            {
+                "query": plan_item["query"],
+                "mode": plan_item["mode"],
+                "timelimit": plan_item["timelimit"],
+                "results_count": len(raw_results),
+                "results": raw_results,
+            }
+        )
+        for item in raw_results:
+            normalized = _normalize_ddgs_result(item)
+            if not normalized:
+                continue
+            url = normalized["url"]
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            combined_results.append(normalized)
+            if len(combined_results) >= bounded_num and index >= minimum_calls:
+                break
+        if len(combined_results) >= bounded_num and index >= minimum_calls:
+            break
+        wait_seconds = _ddgs_inter_call_delay(index, len(query_plan))
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    instant_answer: dict = {}
+    if reserve_instant_answer:
+        try:
+            instant_answer = duckduckgo_instant_answer(query)
+        except Exception as exc:
+            instant_answer = {"error": str(exc)}
+
+    return {
+        "results": combined_results[:bounded_num],
+        "query_plan": query_plan,
+        "raw_batches": raw_batches,
+        "instant_answer": instant_answer,
+        "scope": scope,
+        "call_budget": call_budget,
+    }
+
+
 def duckduckgo_html_search(query: str, *, num: int = 10) -> dict:
     payload = urlencode({"q": query, "kl": "us-en"})
     request = Request(
@@ -712,27 +1385,43 @@ def fetch_search_results(
     *,
     num: int = 10,
     fetch_pages: int = 3,
+    progress_callback=None,
+    provider_hint: str = "",
+    focused_brief: str = "",
+    research_scope: str = "",
+    max_search_calls: int = 0,
+    include_instant_answer: bool = True,
 ) -> dict:
     attempts: list[str] = []
     search_results: list[dict] = []
     provider = ""
     raw_payload: dict | None = None
     errors: list[str] = []
+    bounded_num = max(1, min(int(num or DDGS_MAX_RESULTS_PER_CALL), DDGS_MAX_RESULTS_PER_CALL))
 
     serpapi_enabled = bool(os.getenv("SERP_API_KEY", "").strip())
     browser_use_enabled = _browser_use_server_enabled()
+    normalized_backend = normalize_research_search_backend(provider_hint)
 
-    if serpapi_enabled:
-        try:
-            attempts.append("serpapi")
-            serp_payload = serp_search(query, num=num)
-            raw_payload = serp_payload
-            provider = "serpapi"
-            for item in serp_payload.get("organic_results", [])[:num]:
+    provider_order = {
+        "auto": ["serpapi", "browser_use_mcp", "ddgs", "duckduckgo_html", "playwright_browser"],
+        "duckduckgo": ["ddgs", "duckduckgo_html", "browser_use_mcp", "playwright_browser", "serpapi"],
+        "serpapi": ["serpapi", "ddgs", "duckduckgo_html", "browser_use_mcp", "playwright_browser"],
+        "browser_use_mcp": ["browser_use_mcp", "ddgs", "duckduckgo_html", "playwright_browser", "serpapi"],
+        "playwright_browser": ["playwright_browser", "ddgs", "duckduckgo_html", "browser_use_mcp", "serpapi"],
+    }.get(normalized_backend, ["serpapi", "browser_use_mcp", "ddgs", "duckduckgo_html", "playwright_browser"])
+
+    def _run_provider(provider_key: str) -> tuple[str, dict, list[dict]]:
+        if provider_key == "serpapi":
+            if not serpapi_enabled:
+                raise RuntimeError("SERP_API_KEY not configured")
+            serp_payload = serp_search(query, num=bounded_num)
+            normalized_results: list[dict] = []
+            for item in serp_payload.get("organic_results", [])[:bounded_num]:
                 url = _clean_search_result_url(item.get("link", ""))
                 if not url:
                     continue
-                search_results.append(
+                normalized_results.append(
                     {
                         "title": str(item.get("title", "")).strip(),
                         "url": url,
@@ -741,38 +1430,46 @@ def fetch_search_results(
                         "date": str(item.get("date", "")).strip(),
                     }
                 )
-        except Exception as exc:
-            errors.append(f"serpapi: {exc}")
+            return "serpapi", serp_payload, normalized_results
+        if provider_key == "browser_use_mcp":
+            if not browser_use_enabled:
+                raise RuntimeError("browser-use MCP search server is not enabled")
+            browser_use_payload = browser_use_search(query, num=bounded_num)
+            return "browser_use_mcp", browser_use_payload, list(browser_use_payload.get("results", []) or [])
+        if provider_key == "ddgs":
+            ddgs_payload = duckduckgo_ddgs_search(
+                query,
+                num=bounded_num,
+                focused_brief=focused_brief,
+                research_scope=research_scope,
+                max_search_calls=max_search_calls,
+                include_instant_answer=include_instant_answer,
+            )
+            return "ddgs", ddgs_payload, list(ddgs_payload.get("results", []) or [])
+        if provider_key == "duckduckgo_html":
+            ddg_payload = duckduckgo_html_search(query, num=bounded_num)
+            return "duckduckgo_html", ddg_payload, list(ddg_payload.get("results", []) or [])
+        if provider_key == "playwright_browser":
+            if not _playwright_search_available():
+                raise RuntimeError("Playwright is not installed")
+            browser_payload = browser_search(query, num=bounded_num)
+            return "playwright_browser", browser_payload, list(browser_payload.get("results", []) or [])
+        raise RuntimeError(f"Unknown search provider: {provider_key}")
 
-    if not search_results and browser_use_enabled:
+    for provider_key in provider_order:
+        if search_results:
+            break
+        if provider_key == "serpapi" and not serpapi_enabled:
+            continue
+        if provider_key == "browser_use_mcp" and not browser_use_enabled:
+            continue
+        if provider_key == "playwright_browser" and not _playwright_search_available():
+            continue
+        attempts.append(provider_key)
         try:
-            attempts.append("browser_use_mcp")
-            browser_use_payload = browser_use_search(query, num=num)
-            raw_payload = browser_use_payload
-            provider = "browser_use_mcp"
-            search_results = list(browser_use_payload.get("results", []) or [])
+            provider, raw_payload, search_results = _run_provider(provider_key)
         except Exception as exc:
-            errors.append(f"browser_use_mcp: {exc}")
-
-    if not search_results:
-        try:
-            attempts.append("duckduckgo_html")
-            ddg_payload = duckduckgo_html_search(query, num=num)
-            raw_payload = ddg_payload
-            provider = "duckduckgo_html"
-            search_results = list(ddg_payload.get("results", []) or [])
-        except Exception as exc:
-            errors.append(f"duckduckgo_html: {exc}")
-
-    if not search_results:
-        try:
-            attempts.append("playwright_browser")
-            browser_payload = browser_search(query, num=num)
-            raw_payload = browser_payload
-            provider = "playwright_browser"
-            search_results = list(browser_payload.get("results", []) or [])
-        except Exception as exc:
-            errors.append(f"playwright_browser: {exc}")
+            errors.append(f"{provider_key}: {exc}")
 
     viewed_pages: list[dict] = []
     if search_results:
@@ -781,7 +1478,12 @@ def fetch_search_results(
             for item in search_results[: max(0, int(fetch_pages or 0))]
         ]
         view_urls = [url for url in view_urls if url]
-        for page in fetch_urls_content(view_urls, timeout=20, max_workers=min(_link_worker_count(len(view_urls)), len(view_urls) or 1)):
+        for page in fetch_urls_content(
+            view_urls,
+            timeout=20,
+            max_workers=min(_link_worker_count(len(view_urls)), len(view_urls) or 1),
+            progress_callback=progress_callback,
+        ):
             excerpt = re.sub(r"\s+", " ", str(page.get("text", "")).strip())[:1200]
             viewed_pages.append(
                 {
@@ -795,9 +1497,11 @@ def fetch_search_results(
     return {
         "provider": provider,
         "providers_tried": attempts,
-        "results": search_results[:num],
+        "results": search_results[:bounded_num],
         "viewed_pages": viewed_pages,
         "raw": raw_payload or {},
+        "instant_answer": raw_payload.get("instant_answer", {}) if isinstance(raw_payload, dict) else {},
+        "query_plan": raw_payload.get("query_plan", []) if isinstance(raw_payload, dict) else [],
         "error": "" if search_results else "; ".join(errors),
     }
 
@@ -1494,6 +2198,7 @@ def parse_documents(
     continue_on_error: bool = False,
     ocr_images: bool = False,
     ocr_instruction: str | None = None,
+    progress_callback=None,
 ) -> list[dict]:
     ordered_paths = [str(path or "").strip() for path in paths if str(path or "").strip()]
     if not ordered_paths:
@@ -1501,12 +2206,29 @@ def parse_documents(
 
     if len(ordered_paths) == 1:
         path = ordered_paths[0]
+        if progress_callback:
+            try:
+                progress_callback(path, "started", None, 1, 1)
+            except Exception:
+                pass
         try:
-            return [parse_document(path, ocr_images=ocr_images, ocr_instruction=ocr_instruction)]
+            payload = parse_document(path, ocr_images=ocr_images, ocr_instruction=ocr_instruction)
+            if progress_callback:
+                try:
+                    progress_callback(path, "completed", payload, 1, 1)
+                except Exception:
+                    pass
+            return [payload]
         except Exception as exc:
             if not continue_on_error:
                 raise
-            return [_document_parse_error(path, exc)]
+            payload = _document_parse_error(path, exc)
+            if progress_callback:
+                try:
+                    progress_callback(path, "failed", payload, 1, 1)
+                except Exception:
+                    pass
+            return [payload]
 
     bucket_limits = {
         "light": _document_worker_count(len(ordered_paths)),
@@ -1523,12 +2245,29 @@ def parse_documents(
     def _parse_one(index: int, path: str) -> tuple[int, dict]:
         bucket = _document_parse_bucket(path, ocr_images=ocr_images)
         with semaphore_by_bucket[bucket]:
+            if progress_callback:
+                try:
+                    progress_callback(path, "started", None, index + 1, len(ordered_paths))
+                except Exception:
+                    pass
             try:
-                return index, parse_document(path, ocr_images=ocr_images, ocr_instruction=ocr_instruction)
+                payload = parse_document(path, ocr_images=ocr_images, ocr_instruction=ocr_instruction)
+                if progress_callback:
+                    try:
+                        progress_callback(path, "completed", payload, index + 1, len(ordered_paths))
+                    except Exception:
+                        pass
+                return index, payload
             except Exception as exc:
                 if not continue_on_error:
                     raise
-                return index, _document_parse_error(path, exc)
+                payload = _document_parse_error(path, exc)
+                if progress_callback:
+                    try:
+                        progress_callback(path, "failed", payload, index + 1, len(ordered_paths))
+                    except Exception:
+                        pass
+                return index, payload
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
@@ -1548,65 +2287,32 @@ def parse_documents(
 
 
 def openai_ocr_image(path_str: str, instruction: str | None = None) -> dict:
-    client = get_openai_client()
-    path = Path(path_str)
-    mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
-    image_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-    response = client.responses.create(
-        model=DEFAULT_VISION_MODEL,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": instruction
-                        or "Extract all visible text and key structured details from this image. Return plain text.",
-                    },
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{mime_type};base64,{image_b64}",
-                    },
-                ],
-            }
-        ],
+    return _run_openai_compat_image_prompt(
+        path_str,
+        instruction or "Extract all visible text and key structured details from this image. Return plain text.",
+        agent_name="ocr_agent",
     )
-    output_text = getattr(response, "output_text", "") or ""
-    payload = response.model_dump() if hasattr(response, "model_dump") else {"response": str(response)}
-    return {"path": str(path), "text": output_text.strip(), "raw": payload}
 
 
 def openai_analyze_image(path_str: str, instruction: str | None = None) -> dict:
-    client = get_openai_client()
-    path = Path(path_str)
-    mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
-    image_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-    response = client.responses.create(
-        model=DEFAULT_VISION_MODEL,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": instruction
-                        or (
-                            "Analyze this image and extract meaningful information. "
-                            "Describe the scene, objects, text, layout, visual signals, "
-                            "data patterns, probable context, and actionable insights if present."
-                        ),
-                    },
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{mime_type};base64,{image_b64}",
-                    },
-                ],
-            }
-        ],
+    result = _run_openai_compat_image_prompt(
+        path_str,
+        instruction
+        or (
+            "Analyze this image and extract meaningful information. "
+            "Describe the scene, objects, text, layout, visual signals, "
+            "data patterns, probable context, and actionable insights if present."
+        ),
+        agent_name="image_agent",
     )
-    output_text = getattr(response, "output_text", "") or ""
-    payload = response.model_dump() if hasattr(response, "model_dump") else {"response": str(response)}
-    return {"path": str(path), "analysis": output_text.strip(), "raw": payload}
+    return {
+        "path": result.get("path", path_str),
+        "analysis": result.get("text", ""),
+        "raw": result.get("raw", {}),
+        "provider": result.get("provider", ""),
+        "model": result.get("model", ""),
+        "selection_source": result.get("selection_source", ""),
+    }
 
 
 def get_qdrant_client():

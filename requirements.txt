@@ -13,6 +13,7 @@ chromadb
 qdrant-client
 fastmcp
 browser-use[cli]
+ddgs
 telethon
 boto3
 playwright

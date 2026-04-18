@@ -130,6 +130,8 @@ class RuntimeState(TypedDict, total=False):
     long_document_evidence_bank_json_path: str
     long_document_evidence_bank_excerpt: str
     long_document_evidence_sources: list[dict[str, Any]]
+    long_document_source_manifest_path: str
+    long_document_source_manifest_json_path: str
     long_document_addendum_on_review: bool
     long_document_addendum_requested: bool
     long_document_addendum_instructions: str
@@ -150,6 +152,7 @@ class RuntimeState(TypedDict, total=False):
     research_citation_style: str
     research_enable_plagiarism_check: bool
     research_web_search_enabled: bool
+    research_search_backend: str
     research_date_range: str
     research_max_sources: int
     research_checkpoint_enabled: bool

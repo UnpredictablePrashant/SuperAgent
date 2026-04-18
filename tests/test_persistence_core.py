@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import kendr.persistence.core as core
 from kendr.persistence.core import initialize_db, list_legacy_databases, migrate_legacy_databases, resolve_db_path
@@ -33,6 +33,10 @@ def _seed_legacy_runs_db(db_path: str) -> None:
 
 
 class PersistenceCoreTests(unittest.TestCase):
+    def tearDown(self):
+        core._INITIALIZED_PRIMARY_DB_PATHS.clear()
+        core._MIGRATED_PRIMARY_DB_PATHS.clear()
+
     def test_migrate_legacy_database_copies_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target_db = os.path.join(tmpdir, "central.sqlite3")
@@ -131,6 +135,72 @@ class PersistenceCoreTests(unittest.TestCase):
                     core._migrate_legacy_databases_once(target_db)
 
             self.assertEqual(calls["count"], 2)
+
+    def test_apply_connection_pragmas_falls_back_when_wal_raises(self):
+        conn = MagicMock()
+        conn.execute.side_effect = [
+            None,
+            sqlite3.OperationalError("wal unavailable"),
+            MagicMock(fetchone=MagicMock(return_value=("delete",))),
+            None,
+        ]
+
+        journal_mode = core._apply_connection_pragmas(conn, "/tmp/test.sqlite3")
+
+        self.assertEqual(journal_mode, "delete")
+        self.assertEqual(conn.execute.call_args_list[0].args[0], "PRAGMA busy_timeout = 30000")
+        self.assertEqual(conn.execute.call_args_list[1].args[0], "PRAGMA journal_mode = WAL")
+        self.assertEqual(conn.execute.call_args_list[2].args[0], "PRAGMA journal_mode = DELETE")
+        self.assertEqual(conn.execute.call_args_list[3].args[0], "PRAGMA synchronous = NORMAL")
+
+    def test_apply_connection_pragmas_continues_when_synchronous_raises(self):
+        conn = MagicMock()
+        conn.execute.side_effect = [
+            None,
+            MagicMock(fetchone=MagicMock(return_value=("wal",))),
+            sqlite3.OperationalError("disk I/O error"),
+        ]
+
+        journal_mode = core._apply_connection_pragmas(conn, "/tmp/test.sqlite3")
+
+        self.assertEqual(journal_mode, "wal")
+        self.assertEqual(conn.execute.call_args_list[0].args[0], "PRAGMA busy_timeout = 30000")
+        self.assertEqual(conn.execute.call_args_list[1].args[0], "PRAGMA journal_mode = WAL")
+        self.assertEqual(conn.execute.call_args_list[2].args[0], "PRAGMA synchronous = NORMAL")
+
+    def test_initialize_db_retries_locked_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_db = os.path.join(tmpdir, "locked.sqlite3")
+            real_bootstrap = core._bootstrap_schema
+            calls = {"count": 0}
+
+            def _flaky_bootstrap(conn):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                return real_bootstrap(conn)
+
+            with patch.object(core, "_bootstrap_schema", side_effect=_flaky_bootstrap):
+                initialize_db(target_db)
+
+            self.assertEqual(calls["count"], 2)
+            conn = sqlite3.connect(target_db)
+            try:
+                row = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='runs'"
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(row, ("runs",))
+
+    def test_initialize_db_skips_redundant_bootstrap_after_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_db = os.path.join(tmpdir, "cached.sqlite3")
+
+            initialize_db(target_db)
+
+            with patch.object(core, "_bootstrap_schema", side_effect=AssertionError("bootstrap should be cached")):
+                initialize_db(target_db)
 
 
 if __name__ == "__main__":

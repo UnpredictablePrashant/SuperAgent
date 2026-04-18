@@ -18,6 +18,11 @@ import textwrap
 from openai import OpenAI
 
 from kendr.domain.deep_research import build_source_strategy, discover_research_intent
+from kendr.domain.local_drive import (
+    normalize_extension_set as _normalize_extension_set,
+    resolve_paths as _resolve_local_drive_paths,
+    scan_local_drive_tree as _scan_local_drive_tree,
+)
 from kendr.execution_trace import append_execution_event
 from kendr.llm_router import supports_native_web_search
 from kendr.rag_manager import build_research_grounding
@@ -27,11 +32,19 @@ from tasks.coding_tasks import _extract_output_text
 from tasks.file_memory import bootstrap_file_memory, update_planning_file
 from tasks.planning_tasks import build_plan_approval_prompt, normalize_plan_data, plan_as_markdown
 from tasks.plagiarism_checker import build_plagiarism_report as _dedicated_build_plagiarism_report
-from tasks.research_infra import fetch_search_results, fetch_url_content, llm_json, llm_text
+from tasks.research_infra import (
+    fetch_search_results,
+    fetch_url_content,
+    llm_json,
+    llm_text,
+    normalize_research_search_backend,
+    parse_documents,
+)
+from tasks.research_output import render_artifact_lines
 from tasks.utils import OUTPUT_DIR, log_task_update, model_selection_for_agent, write_text_file, resolve_output_path
 
 
-DEFAULT_DEEP_RESEARCH_MODEL = os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research")
+DEFAULT_DEEP_RESEARCH_MODEL = os.getenv("KENDR_DEEP_RESEARCH_MODEL", os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research"))
 DEFAULT_RESEARCH_FORMATS = ["pdf", "docx", "html", "md"]
 SUPPORTED_CITATION_STYLES = {"apa", "mla", "chicago", "ieee", "vancouver", "harvard"}
 DEEP_RESEARCH_LABEL = "Deep Research"
@@ -225,6 +238,8 @@ AGENT_METADATA = {
             "long_document_references_json_path",
             "long_document_visual_index_path",
             "long_document_visual_index_json_path",
+            "long_document_source_manifest_path",
+            "long_document_source_manifest_json_path",
             "long_document_summary",
             "research_kb_used",
             "research_kb_name",
@@ -233,7 +248,7 @@ AGENT_METADATA = {
             "research_kb_warning",
             "draft_response",
         ],
-        "requirements": ["configured_llm", "openai_for_web_search"],
+        "requirements": ["configured_llm"],
         "display_name": "Deep Research Report Agent",
         "category": "documents",
         "intent_patterns": [
@@ -310,6 +325,170 @@ def _trim_text(text: str, limit: int) -> str:
     return value[: max(0, limit - 3)] + "..."
 
 
+def _local_source_log_label(path_value: str, manifest_entry: Mapping[str, Any] | None = None) -> str:
+    entry = manifest_entry if isinstance(manifest_entry, Mapping) else {}
+    relative_path = str(entry.get("relative_path", "") or "").strip().replace("\\", "/")
+    if relative_path:
+        return relative_path
+    file_name = str(entry.get("name", "") or "").strip()
+    if file_name:
+        return file_name
+    raw_path = str(path_value or "").strip()
+    return Path(raw_path).name or raw_path or "local file"
+
+
+def _web_source_log_label(url: str) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return "website"
+    parsed = urlparse(value)
+    if parsed.netloc:
+        compact = parsed.netloc + (parsed.path or "")
+        if parsed.query:
+            compact += f"?{parsed.query}"
+        return _trim_text(compact, 120)
+    return _trim_text(value, 120)
+
+
+def _log_local_file_review(
+    path_value: str,
+    *,
+    status: str,
+    position: int,
+    total: int,
+    manifest_entry: Mapping[str, Any] | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> None:
+    label = _local_source_log_label(path_value, manifest_entry)
+    if status == "started":
+        log_task_update(DEEP_RESEARCH_LABEL, f"Reviewing local file [{position}/{total}]: {label}")
+        return
+    metadata = payload.get("metadata", {}) if isinstance(payload, Mapping) and isinstance(payload.get("metadata"), dict) else {}
+    error_text = str(metadata.get("error", "") or (payload.get("error", "") if isinstance(payload, Mapping) else "") or "").strip()
+    reader = str(metadata.get("reader", "") or "").strip()
+    char_count = len(str((payload or {}).get("text", "") or "").strip()) if isinstance(payload, Mapping) else 0
+    if error_text or status == "failed":
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"Local file review failed [{position}/{total}]: {label} ({_trim_text(error_text or 'document parse failed', 140)})",
+        )
+        return
+    outcome = [f"{char_count} chars" if char_count > 0 else "no readable text"]
+    if reader:
+        outcome.append(f"reader={reader}")
+    log_task_update(DEEP_RESEARCH_LABEL, f"Reviewed local file [{position}/{total}]: {label} ({', '.join(outcome)}).")
+
+
+def _log_web_review(
+    url: str,
+    *,
+    status: str,
+    position: int,
+    total: int,
+    payload: Mapping[str, Any] | None = None,
+    context: str = "website",
+) -> None:
+    label = _web_source_log_label(url)
+    if status == "started":
+        log_task_update(DEEP_RESEARCH_LABEL, f"Reviewing {context} [{position}/{total}]: {label}")
+        return
+    error_text = str((payload or {}).get("error", "") or "").strip() if isinstance(payload, Mapping) else ""
+    char_count = int((payload or {}).get("char_count", 0) or 0) if isinstance(payload, Mapping) else 0
+    if not char_count and isinstance(payload, Mapping):
+        char_count = len(str(payload.get("text", "") or "").strip())
+    content_type = str((payload or {}).get("content_type", "") or "").strip() if isinstance(payload, Mapping) else ""
+    if error_text or status == "failed":
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"{context.capitalize()} review failed [{position}/{total}]: {label} ({_trim_text(error_text or 'fetch failed', 140)})",
+        )
+        return
+    outcome = [f"{char_count} chars" if char_count > 0 else "no readable text"]
+    if content_type:
+        outcome.append(content_type)
+    log_task_update(DEEP_RESEARCH_LABEL, f"Reviewed {context} [{position}/{total}]: {label} ({', '.join(outcome)}).")
+
+
+def _log_search_collection(
+    query: str,
+    payload: Mapping[str, Any] | None,
+    *,
+    max_queries: int = 6,
+    max_results: int = 8,
+) -> None:
+    search_payload = payload if isinstance(payload, Mapping) else {}
+    provider = str(search_payload.get("provider", "") or "").strip()
+    if not provider:
+        providers_tried = search_payload.get("providers_tried", [])
+        if isinstance(providers_tried, list):
+            provider = str(providers_tried[0] or "").strip()
+    provider = provider or "none"
+
+    query_plan = search_payload.get("query_plan", [])
+    if isinstance(query_plan, list) and query_plan:
+        total_queries = len(query_plan)
+        for index, plan in enumerate(query_plan[:max_queries], start=1):
+            if not isinstance(plan, Mapping):
+                continue
+            plan_query = _trim_text(str(plan.get("query", "") or query).strip(), 180)
+            if not plan_query:
+                continue
+            metadata: list[str] = []
+            scope = str(plan.get("scope", "") or "").strip()
+            timelimit = str(plan.get("timelimit", "") or "").strip()
+            if scope:
+                metadata.append(scope)
+            if timelimit:
+                metadata.append(f"timelimit={timelimit}")
+            metadata_text = f" ({', '.join(metadata)})" if metadata else ""
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Search query [{index}/{total_queries}] via {provider}: {plan_query}{metadata_text}",
+            )
+        if total_queries > max_queries:
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Additional search queries omitted from log: {total_queries - max_queries}.",
+            )
+    elif str(query or "").strip():
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"Search query via {provider}: {_trim_text(str(query).strip(), 180)}",
+        )
+
+    results = search_payload.get("results", [])
+    if isinstance(results, list) and results:
+        total_results = len(results)
+        for index, item in enumerate(results[:max_results], start=1):
+            if not isinstance(item, Mapping):
+                continue
+            url = str(item.get("url", "") or "").strip()
+            if not url:
+                continue
+            title = _trim_text(str(item.get("title", "") or "").strip(), 100)
+            title_text = f" — {title}" if title else ""
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Collected search result [{index}/{total_results}] via {provider}: {_web_source_log_label(url)}{title_text}",
+            )
+        if total_results > max_results:
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Additional collected search results omitted from log: {total_results - max_results}.",
+            )
+        return
+
+    error_text = _trim_text(str(search_payload.get("error", "") or "").strip(), 180)
+    log_task_update(
+        DEEP_RESEARCH_LABEL,
+        (
+            f"No search result URLs collected via {provider}: {error_text}"
+            if error_text
+            else f"No search result URLs collected via {provider}."
+        ),
+    )
+
+
 def _normalize_research_formats(raw_value: Any) -> list[str]:
     if isinstance(raw_value, str):
         items = [part.strip().lower() for part in raw_value.split(",")]
@@ -357,8 +536,8 @@ def _copy_artifact_alias(source_path: str, destination_path: str) -> str:
     if not source or not destination:
         return ""
     try:
-        src = Path(source)
-        dst = Path(destination)
+        src = Path(_output_file_path(source))
+        dst = Path(_output_file_path(destination))
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
         return str(dst)
@@ -931,14 +1110,21 @@ def _normalize_output_relative_path(path_value: str) -> str:
     return value
 
 
+def _output_file_path(path_value: str) -> str:
+    value = str(path_value or "").strip()
+    if not value:
+        return ""
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return str(candidate)
+    normalized = _normalize_output_relative_path(value)
+    return resolve_output_path(normalized)
+
+
 def _resolve_existing_output_path(path_value: str) -> str:
     if not str(path_value or "").strip():
         return ""
-    candidate = Path(str(path_value))
-    if candidate.is_absolute() and candidate.exists():
-        return str(candidate)
-    normalized = _normalize_output_relative_path(str(path_value))
-    resolved = resolve_output_path(normalized)
+    resolved = _output_file_path(str(path_value))
     if Path(resolved).exists():
         return resolved
     resolved_fallback = resolve_output_path(str(path_value))
@@ -990,6 +1176,8 @@ def _artifact_dir_has_resume_data(artifact_dir: str) -> bool:
         "checkpoint_after_writing.json",
         "evidence_bank.json",
         "evidence_bank.md",
+        "source_manifest.json",
+        "source_manifest.md",
         "deep_research_analysis.md",
         "deep_research_subplan.md",
     )
@@ -1004,7 +1192,7 @@ def _artifact_dir_has_resume_data(artifact_dir: str) -> bool:
 
 
 def _artifact_dir_objective_key(artifact_dir: str) -> str:
-    for rel_path in ("evidence_bank.json", "deep_research_manifest.json"):
+    for rel_path in ("evidence_bank.json", "deep_research_manifest.json", "source_manifest.json"):
         payload = _read_json_file(resolve_output_path(_artifact_file(artifact_dir, rel_path)), {})
         if isinstance(payload, dict):
             value = _normalize_objective_key(payload.get("objective", ""))
@@ -1077,8 +1265,517 @@ def _load_cached_evidence_bank(
         "artifact_dir": artifact_dir,
         "evidence_markdown": evidence_md,
         "evidence_sources": evidence_sources,
-        "evidence_path": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'evidence_bank.md')}",
-        "evidence_json_path": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'evidence_bank.json')}",
+        "evidence_path": _output_file_path(_artifact_file(artifact_dir, "evidence_bank.md")),
+        "evidence_json_path": _output_file_path(_artifact_file(artifact_dir, "evidence_bank.json")),
+    }
+
+
+def _path_within_root(path_value: str, root_value: str) -> bool:
+    try:
+        normalized_path = os.path.normcase(os.path.abspath(str(path_value or "").strip()))
+        normalized_root = os.path.normcase(os.path.abspath(str(root_value or "").strip()))
+        if not normalized_path or not normalized_root:
+            return False
+        return os.path.commonpath([normalized_path, normalized_root]) == normalized_root
+    except Exception:
+        return False
+
+
+def _collect_local_source_roots(state: dict[str, Any]) -> list[str]:
+    base_directory = (
+        state.get("local_drive_working_directory")
+        or state.get("document_working_directory")
+        or state.get("working_directory")
+    )
+    raw_roots = (
+        state.get("local_drive_paths")
+        or state.get("knowledge_drive_paths")
+        or state.get("drive_paths")
+        or state.get("document_root_paths")
+        or []
+    )
+    return _resolve_local_drive_paths(raw_roots, base_directory)
+
+
+def _build_local_source_tree(local_manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    roots = [str(item).strip() for item in (local_manifest.get("roots", []) or []) if str(item).strip()]
+    folder_entries = [item for item in (local_manifest.get("folders", []) or []) if isinstance(item, dict)]
+    file_entries = [item for item in (local_manifest.get("files", []) or []) if isinstance(item, dict)]
+    folder_paths = {str(item.get("path", "")).strip() for item in folder_entries}
+    file_by_path = {
+        str(item.get("path", "")).strip(): item
+        for item in file_entries
+        if str(item.get("path", "")).strip()
+    }
+    tree: list[dict[str, Any]] = []
+
+    def _node_from_entry(entry: Mapping[str, Any], *, include_children: bool = True) -> dict[str, Any]:
+        node = {
+            "name": str(entry.get("name", "")).strip() or Path(str(entry.get("path", "")).strip()).name or str(entry.get("path", "")).strip(),
+            "path": str(entry.get("path", "")).strip(),
+            "type": "directory" if str(entry.get("entry_type", "")).strip() == "directory" else "file",
+            "relative_path": str(entry.get("relative_path", "")).strip(),
+            "depth": int(entry.get("depth", 0) or 0),
+        }
+        if node["type"] == "file":
+            node["selected_for_processing"] = bool(entry.get("selected_for_processing"))
+            node["exclusion_reason"] = str(entry.get("exclusion_reason", "")).strip()
+            node["selection_reason"] = str(entry.get("selection_reason", "")).strip()
+            node["extension"] = str(entry.get("extension", "")).strip()
+        elif include_children:
+            node["children"] = []
+        return node
+
+    def _sort_tree(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        sorted_nodes = sorted(
+            nodes,
+            key=lambda item: (0 if item.get("type") == "directory" else 1, str(item.get("name", "")).lower()),
+        )
+        for node in sorted_nodes:
+            children = node.get("children")
+            if isinstance(children, list):
+                node["children"] = _sort_tree(children)
+        return sorted_nodes
+
+    for root in roots:
+        if root in file_by_path and root not in folder_paths:
+            tree.append(_node_from_entry(file_by_path[root], include_children=False))
+            continue
+        root_node = {
+            "name": Path(root).name or root,
+            "path": root,
+            "type": "directory",
+            "relative_path": ".",
+            "depth": 0,
+            "children": [],
+        }
+        children_by_relative: dict[str, dict[str, Any]] = {"": root_node}
+        scoped_entries: list[dict[str, Any]] = []
+        for entry in folder_entries + file_entries:
+            path_value = str(entry.get("path", "")).strip()
+            if not path_value or path_value == root or not _path_within_root(path_value, root):
+                continue
+            scoped_entries.append(entry)
+        scoped_entries.sort(
+            key=lambda item: (
+                int(item.get("depth", 0) or 0),
+                0 if str(item.get("entry_type", "")).strip() == "directory" else 1,
+                str(item.get("relative_path", "")).lower(),
+                str(item.get("name", "")).lower(),
+            )
+        )
+        for entry in scoped_entries:
+            relative_path = str(entry.get("relative_path", "")).strip().replace("\\", "/")
+            if not relative_path or relative_path == ".":
+                continue
+            parent_relative = str(Path(relative_path).parent).replace("\\", "/")
+            if parent_relative == ".":
+                parent_relative = ""
+            parent = children_by_relative.get(parent_relative, root_node)
+            node = _node_from_entry(entry)
+            parent.setdefault("children", []).append(node)
+            if node.get("type") == "directory":
+                children_by_relative[relative_path] = node
+        tree.append(root_node)
+    return _sort_tree(tree)
+
+
+def _tree_status_label(node: Mapping[str, Any]) -> str:
+    if str(node.get("type", "")).strip() == "directory":
+        return ""
+    if bool(node.get("selected_for_processing", False)):
+        return " [selected]"
+    exclusion_reason = str(node.get("exclusion_reason", "")).strip()
+    return f" [skipped: {exclusion_reason or 'not_selected'}]"
+
+
+def _render_local_source_tree_markdown(nodes: list[dict[str, Any]], *, depth: int = 0) -> list[str]:
+    lines: list[str] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        indent = "  " * depth
+        label = str(node.get("name", "")).strip() or Path(str(node.get("path", "")).strip()).name or str(node.get("path", "")).strip()
+        if depth == 0:
+            label = str(node.get("path", "")).strip() or label
+        if str(node.get("type", "")).strip() == "directory":
+            lines.append(f"{indent}- {label}/")
+            children = node.get("children", [])
+            if isinstance(children, list):
+                lines.extend(_render_local_source_tree_markdown(children, depth=depth + 1))
+            continue
+        lines.append(f"{indent}- {label}{_tree_status_label(node)}")
+    return lines
+
+
+def _format_source_manifest_markdown(
+    *,
+    objective: str,
+    source_strategy: Mapping[str, Any],
+    local_manifest: Mapping[str, Any],
+    source_tree: list[dict[str, Any]],
+    document_summaries: list[dict[str, Any]],
+    rollup_summary: str,
+) -> str:
+    roots = [str(item).strip() for item in (local_manifest.get("roots", []) or []) if str(item).strip()]
+    lines = [
+        "# Source Manifest",
+        "",
+        "## Objective",
+        str(objective or "").strip() or "No objective provided.",
+        "",
+        "## Discovery Summary",
+        f"- Roots scanned: {len(roots)}",
+        f"- Folders discovered: {int(local_manifest.get('folder_count', 0) or 0)}",
+        f"- Files discovered: {int(local_manifest.get('file_count', 0) or 0)}",
+        f"- Files selected for processing: {int(local_manifest.get('selected_file_count', 0) or 0)}",
+        f"- Files excluded from processing: {int(local_manifest.get('excluded_file_count', 0) or 0)}",
+        "",
+        "## Source Strategy",
+        str(source_strategy.get("summary", "")).strip() or "No source strategy recorded.",
+        "",
+        "## File Tree",
+    ]
+    tree_lines = _render_local_source_tree_markdown(source_tree)
+    lines.extend(tree_lines or ["- No local files or folders were discovered."])
+    lines.extend(["", "## Selected File Summaries"])
+    if document_summaries:
+        for item in document_summaries:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"### {str(item.get('file_name', '')).strip() or Path(str(item.get('path', '')).strip()).name or 'Unnamed file'}")
+            if str(item.get("path", "")).strip():
+                lines.append(f"- Path: {item['path']}")
+            if str(item.get("type", "")).strip():
+                lines.append(f"- Type: {item['type']}")
+            if int(item.get("char_count", 0) or 0) > 0:
+                lines.append(f"- Characters: {int(item.get('char_count', 0) or 0)}")
+            if str(item.get("reader", "")).strip():
+                lines.append(f"- Reader: {item['reader']}")
+            if str(item.get("selection_reason", "")).strip():
+                lines.append(f"- Selection reason: {item['selection_reason']}")
+            if str(item.get("error", "")).strip():
+                lines.append(f"- Extraction error: {item['error']}")
+            summary_text = str(item.get("summary", "")).strip()
+            if summary_text:
+                lines.append("- Summary:")
+                lines.append(textwrap.indent(summary_text, "  "))
+            lines.append("")
+    else:
+        lines.extend(["- No selected files were summarized.", ""])
+    if str(rollup_summary or "").strip():
+        lines.extend(["## Local Source Rollup", str(rollup_summary).strip(), ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _summarize_local_documents(
+    *,
+    objective: str,
+    documents: list[dict[str, Any]],
+    local_manifest: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    manifest_files = local_manifest.get("files", []) if isinstance(local_manifest.get("files", []), list) else []
+    manifest_by_path = {
+        str(item.get("path", "")).strip(): item
+        for item in manifest_files
+        if isinstance(item, dict) and str(item.get("path", "")).strip()
+    }
+    summaries: list[dict[str, Any]] = []
+    for index, parsed in enumerate(documents or [], start=1):
+        if not isinstance(parsed, dict):
+            continue
+        file_path = str(parsed.get("path", "")).strip()
+        parsed_text = str(parsed.get("text", "") or "").strip()
+        metadata = parsed.get("metadata", {}) if isinstance(parsed.get("metadata"), dict) else {}
+        document_type = str(metadata.get("type", Path(file_path).suffix.lstrip(".").lower() or "unknown"))
+        manifest_entry = manifest_by_path.get(file_path, {})
+        if parsed_text:
+            try:
+                summary = llm_text(
+                    f"""
+You are a document-reading sub-agent for a deep research workflow.
+
+Task objective:
+{objective}
+
+Document path:
+{file_path}
+
+Document type:
+{document_type}
+
+Extracted content:
+{parsed_text[:16000]}
+
+Write a concise summary with:
+- what this document is about
+- critical facts, numbers, dates, and entities
+- decisions or action items
+- data quality concerns or missing pieces
+"""
+                ).strip()
+            except Exception:
+                summary = _trim_text(parsed_text, 1400)
+        else:
+            summary = f"No readable text extracted. Reason: {metadata.get('error', 'empty document after extraction')}"
+        summaries.append(
+            {
+                "index": index,
+                "path": file_path,
+                "file_name": Path(file_path).name or file_path or f"Local file {index}",
+                "type": document_type,
+                "summary": summary,
+                "char_count": len(parsed_text),
+                "error": str(metadata.get("error", "") or ""),
+                "error_kind": str(metadata.get("error_kind", "") or ""),
+                "recoverable": bool(metadata.get("recoverable", False)),
+                "reader": str(metadata.get("reader", "") or ""),
+                "selection_reason": str(manifest_entry.get("selection_reason", "") or ""),
+                "metadata": dict(metadata),
+            }
+        )
+    return summaries
+
+
+def _roll_up_local_document_summaries(
+    *,
+    objective: str,
+    document_summaries: list[dict[str, Any]],
+) -> str:
+    if not document_summaries:
+        return ""
+    rollup_input = {
+        "objective": objective,
+        "document_count": len(document_summaries),
+        "documents": [
+            {
+                "index": item.get("index"),
+                "path": item.get("path", ""),
+                "type": item.get("type", ""),
+                "summary": item.get("summary", ""),
+                "error": item.get("error", ""),
+            }
+            for item in document_summaries
+        ],
+    }
+    try:
+        return llm_text(
+            f"""
+You are a knowledge-synthesis agent. Build one actionable summary from these document summaries.
+
+Return:
+- 5-10 bullet key findings
+- contradictions or missing data
+- recommended next tasks for report generation
+- list of highest-priority source files to inspect deeper
+
+Input:
+{json.dumps(rollup_input, indent=2, ensure_ascii=False)[:28000]}
+"""
+        ).strip()
+    except Exception:
+        strong_files = [
+            str(item.get("file_name", "")).strip()
+            for item in document_summaries
+            if str(item.get("summary", "")).strip() and not str(item.get("error", "")).strip()
+        ]
+        return (
+            "Local-source rollup fallback:\n"
+            f"- Objective: {objective or 'not provided'}\n"
+            f"- Files summarized: {len(document_summaries)}\n"
+            f"- Strongest sources: {', '.join(strong_files[:5]) or 'none'}"
+        )
+
+
+def _load_cached_local_source_manifest(
+    *,
+    artifact_dir: str,
+    objective: str,
+) -> dict[str, Any]:
+    manifest_json_abs = resolve_output_path(_artifact_file(artifact_dir, "source_manifest.json"))
+    manifest_md_abs = resolve_output_path(_artifact_file(artifact_dir, "source_manifest.md"))
+    if not Path(manifest_json_abs).exists() and not Path(manifest_md_abs).exists():
+        return {}
+    payload = _read_json_file(manifest_json_abs, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    cached_objective = _normalize_objective_key(payload.get("objective", ""))
+    if cached_objective and cached_objective != _normalize_objective_key(objective):
+        return {}
+    local_manifest = payload.get("manifest", {})
+    document_summaries = payload.get("document_summaries", [])
+    if not isinstance(local_manifest, dict):
+        local_manifest = {}
+    if not isinstance(document_summaries, list):
+        document_summaries = []
+    if not local_manifest and not document_summaries and not Path(manifest_md_abs).exists():
+        return {}
+    return {
+        "artifact_dir": artifact_dir,
+        "manifest": local_manifest,
+        "source_tree": payload.get("tree", []) if isinstance(payload.get("tree", []), list) else [],
+        "document_summaries": [item for item in document_summaries if isinstance(item, dict)],
+        "rollup_summary": str(payload.get("rollup_summary", "") or ""),
+        "manifest_path": _output_file_path(_artifact_file(artifact_dir, "source_manifest.md")),
+        "manifest_json_path": _output_file_path(_artifact_file(artifact_dir, "source_manifest.json")),
+        "manifest_markdown": _read_text_file(manifest_md_abs, ""),
+    }
+
+
+def _ensure_local_source_manifest(
+    state: dict[str, Any],
+    *,
+    objective: str,
+    artifact_dir: str,
+    source_strategy: Mapping[str, Any],
+) -> dict[str, Any]:
+    local_manifest = state.get("local_drive_manifest", {}) if isinstance(state.get("local_drive_manifest"), dict) else {}
+    document_summaries = state.get("local_drive_document_summaries", []) if isinstance(state.get("local_drive_document_summaries"), list) else []
+    rollup_summary = str(state.get("local_drive_rollup_summary", "") or "")
+    roots = _collect_local_source_roots(state)
+
+    if not local_manifest and not document_summaries:
+        cached_manifest = _load_cached_local_source_manifest(artifact_dir=artifact_dir, objective=objective)
+        if cached_manifest:
+            local_manifest = cached_manifest.get("manifest", {}) if isinstance(cached_manifest.get("manifest", {}), dict) else {}
+            document_summaries = list(cached_manifest.get("document_summaries", []) or [])
+            rollup_summary = str(cached_manifest.get("rollup_summary", "") or "")
+            state["local_drive_manifest"] = local_manifest
+            state["local_drive_document_summaries"] = document_summaries
+            state["local_drive_files"] = list(local_manifest.get("selected_files", []) or [])
+            state["local_drive_summary_bank"] = {
+                str(item.get("path", "")).strip(): str(item.get("summary", "")).strip()
+                for item in document_summaries
+                if isinstance(item, dict) and str(item.get("path", "")).strip()
+            }
+            state["local_drive_rollup_summary"] = rollup_summary
+            state["long_document_source_manifest_path"] = str(cached_manifest.get("manifest_path", "") or "")
+            state["long_document_source_manifest_json_path"] = str(cached_manifest.get("manifest_json_path", "") or "")
+            return {
+                "from_cache": True,
+                "manifest": local_manifest,
+                "document_summaries": document_summaries,
+                "rollup_summary": rollup_summary,
+                "source_tree": list(cached_manifest.get("source_tree", []) or []),
+            }
+
+    if not local_manifest and not roots:
+        return {}
+
+    if not local_manifest:
+        local_drive_started_at = _trace_now()
+        _trace_research_event(
+            state,
+            title="Discovering local source tree",
+            detail="Scanning attached local files and folders before research synthesis begins.",
+            command="\n".join(roots),
+            status="running",
+            started_at=local_drive_started_at,
+            metadata={"phase": "local_source_manifest", "roots": roots},
+            subtask="Build local source manifest",
+        )
+        local_manifest = _scan_local_drive_tree(
+            roots,
+            recursive=bool(state.get("local_drive_recursive", True)),
+            include_hidden=bool(state.get("local_drive_include_hidden", False)),
+            max_files=max(1, min(int(state.get("local_drive_max_files", 200) or 200), 1000)),
+            allowed_extensions=_normalize_extension_set(state.get("local_drive_extensions")),
+            objective=objective,
+            source_strategy=source_strategy,
+        )
+        state["local_drive_manifest"] = local_manifest
+        state["local_drive_files"] = list(local_manifest.get("selected_files", []) or [])
+        _trace_research_event(
+            state,
+            title="Discovering local source tree",
+            detail=(
+                f"Discovered {int(local_manifest.get('file_count', 0) or 0)} file(s) and selected "
+                f"{int(local_manifest.get('selected_file_count', 0) or 0)} for processing."
+            ),
+            command="\n".join(roots),
+            status="completed",
+            started_at=local_drive_started_at,
+            completed_at=_trace_now(),
+            metadata={"phase": "local_source_manifest", "roots": roots, "manifest": local_manifest},
+            subtask="Build local source manifest",
+        )
+
+    selected_files = list(local_manifest.get("selected_files", []) or state.get("local_drive_files") or [])
+    if not document_summaries and selected_files:
+        manifest_files = local_manifest.get("files", []) if isinstance(local_manifest.get("files", []), list) else []
+        manifest_by_path = {
+            str(item.get("path", "")).strip(): item
+            for item in manifest_files
+            if isinstance(item, dict) and str(item.get("path", "")).strip()
+        }
+
+        def _document_progress_callback(path_value: str, status: str, payload: Mapping[str, Any] | None, position: int, total: int) -> None:
+            _log_local_file_review(
+                path_value,
+                status=status,
+                position=position,
+                total=total,
+                manifest_entry=manifest_by_path.get(str(path_value or "").strip(), {}),
+                payload=payload,
+            )
+
+        documents = parse_documents(
+            selected_files,
+            continue_on_error=True,
+            ocr_images=bool(state.get("local_drive_enable_image_ocr", True)),
+            ocr_instruction=state.get("local_drive_ocr_instruction"),
+            progress_callback=_document_progress_callback,
+        )
+        state["local_drive_documents"] = documents
+        document_summaries = _summarize_local_documents(
+            objective=objective,
+            documents=documents,
+            local_manifest=local_manifest,
+        )
+        state["local_drive_document_summaries"] = document_summaries
+        state["local_drive_summary_bank"] = {
+            str(item.get("path", "")).strip(): str(item.get("summary", "")).strip()
+            for item in document_summaries
+            if isinstance(item, dict) and str(item.get("path", "")).strip()
+        }
+
+    if not rollup_summary and document_summaries:
+        rollup_summary = _roll_up_local_document_summaries(
+            objective=objective,
+            document_summaries=document_summaries,
+        )
+        state["local_drive_rollup_summary"] = rollup_summary
+
+    source_tree = _build_local_source_tree(local_manifest)
+    payload = {
+        "objective": objective,
+        "roots": list(local_manifest.get("roots", []) or roots),
+        "manifest": local_manifest,
+        "tree": source_tree,
+        "document_summaries": document_summaries,
+        "rollup_summary": rollup_summary,
+        "source_strategy": dict(source_strategy) if isinstance(source_strategy, Mapping) else {},
+    }
+    manifest_md = _format_source_manifest_markdown(
+        objective=objective,
+        source_strategy=source_strategy,
+        local_manifest=local_manifest,
+        source_tree=source_tree,
+        document_summaries=document_summaries,
+        rollup_summary=rollup_summary,
+    )
+    manifest_filename = _artifact_file(artifact_dir, "source_manifest.md")
+    manifest_json_filename = _artifact_file(artifact_dir, "source_manifest.json")
+    write_text_file(manifest_filename, manifest_md)
+    write_text_file(manifest_json_filename, json.dumps(payload, indent=2, ensure_ascii=False))
+    state["long_document_source_manifest_path"] = _output_file_path(manifest_filename)
+    state["long_document_source_manifest_json_path"] = _output_file_path(manifest_json_filename)
+    return {
+        "from_cache": False,
+        "manifest": local_manifest,
+        "document_summaries": document_summaries,
+        "rollup_summary": rollup_summary,
+        "source_tree": source_tree,
     }
 
 
@@ -1413,16 +2110,38 @@ def _collect_user_url_evidence(objective: str, state: dict, *, max_items: int = 
     if fetch_parallelism <= 1:
         for index, url in enumerate(bounded_urls):
             _raise_if_cancelled(state, phase="provided_urls")
-            indexed_entries[index] = _collect_single_user_url_entry(objective, url)
+            _log_web_review(url, status="started", position=index + 1, total=len(bounded_urls), context="website")
+            entry = _collect_single_user_url_entry(objective, url)
+            indexed_entries[index] = entry
+            _log_web_review(
+                url,
+                status="completed" if not str(entry.get("error", "")).strip() else "failed",
+                position=index + 1,
+                total=len(bounded_urls),
+                payload=entry,
+                context="website",
+            )
     else:
         with ThreadPoolExecutor(max_workers=fetch_parallelism, thread_name_prefix="kendr-url") as executor:
             future_map = {
-                executor.submit(_collect_single_user_url_entry, objective, url): index
+                executor.submit(_collect_single_user_url_entry, objective, url): (index, url)
                 for index, url in enumerate(bounded_urls)
             }
+            for index, url in enumerate(bounded_urls):
+                _log_web_review(url, status="started", position=index + 1, total=len(bounded_urls), context="website")
             for future in as_completed(future_map):
                 _raise_if_cancelled(state, phase="provided_urls")
-                indexed_entries[future_map[future]] = future.result()
+                index, url = future_map[future]
+                entry = future.result()
+                indexed_entries[index] = entry
+                _log_web_review(
+                    url,
+                    status="completed" if not str(entry.get("error", "")).strip() else "failed",
+                    position=index + 1,
+                    total=len(bounded_urls),
+                    payload=entry,
+                    context="website",
+                )
     entries = [indexed_entries[index] for index in sorted(indexed_entries)]
     ok_urls = [str(item.get("url", "")).strip() for item in entries if not str(item.get("error", "")).strip()]
     failed_urls = [str(item.get("url", "")).strip() for item in entries if str(item.get("error", "")).strip()]
@@ -1501,8 +2220,16 @@ Write a structured evidence memo that includes:
     ).strip()
 
 
-def _collect_google_search_evidence(query: str, *, num: int = 10) -> dict:
-    payload = fetch_search_results(query, num=num, fetch_pages=min(max(num, 1), 3))
+def _collect_google_search_evidence(query: str, *, num: int = 10, progress_callback=None, search_backend: str = "auto") -> dict:
+    normalized_backend = normalize_research_search_backend(search_backend)
+    payload = fetch_search_results(
+        query,
+        num=num,
+        fetch_pages=min(max(num, 1), 3),
+        progress_callback=progress_callback,
+        provider_hint="" if normalized_backend == "auto" else normalized_backend,
+        focused_brief=query,
+    )
     results = list(payload.get("results", []) or [])
     viewed_pages = list(payload.get("viewed_pages", []) or [])
     viewed_map = {
@@ -1518,14 +2245,18 @@ def _collect_google_search_evidence(query: str, *, num: int = 10) -> dict:
             item["content_type"] = str(evidence.get("content_type", "")).strip()
             if evidence.get("error"):
                 item["view_error"] = str(evidence.get("error", "")).strip()
-    return {
+    response_payload = {
         "results": results,
         "viewed_pages": viewed_pages,
         "provider": str(payload.get("provider", "")).strip(),
         "providers_tried": list(payload.get("providers_tried", []) or []),
         "raw": payload.get("raw", {}),
+        "instant_answer": payload.get("instant_answer", {}),
+        "query_plan": payload.get("query_plan", []),
         "error": str(payload.get("error", "")).strip(),
     }
+    _log_search_collection(query, response_payload)
+    return response_payload
 
 
 # ---------------------------------------------------------------------------
@@ -2055,20 +2786,20 @@ Write an addendum of about {words_target} words that:
         except Exception:
             manifest = {}
         if isinstance(manifest, dict):
-            manifest["addendum_file"] = f"{OUTPUT_DIR}/{addendum_filename}"
+            manifest["addendum_file"] = _output_file_path(addendum_filename)
             manifest["addendum_attempts"] = attempts
             _write_absolute_text_file(manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False))
 
     state["long_document_addendum_requested"] = False
     state["long_document_addendum_completed"] = True
-    state["long_document_addendum_path"] = f"{OUTPUT_DIR}/{addendum_filename}"
+    state["long_document_addendum_path"] = _output_file_path(addendum_filename)
     state["_skip_review_once"] = True
     if bool(state.get("long_document_addendum_force_no_review", True)):
         state["skip_reviews"] = True
     summary = (
         "Addendum generated and appended to compiled report.\n"
         f"- Compiled markdown: {compiled_path}\n"
-        f"- Addendum file: {OUTPUT_DIR}/{addendum_filename}\n"
+        f"- Addendum file: {_output_file_path(addendum_filename)}\n"
     )
     state["draft_response"] = summary
     log_task_update(DEEP_RESEARCH_LABEL, "Addendum appended to compiled report.", summary)
@@ -2913,6 +3644,13 @@ def _deep_research_subplan_auto_approved_message(
     return "\n".join(lines).strip()
 
 
+def _deep_research_handoff_only_enabled(state: Mapping[str, Any]) -> bool:
+    value = state.get("_phase0_handoff_only", os.getenv("KENDR_PHASE0_HANDOFF_ONLY", ""))
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _build_deep_research_confirmation_prompt(analysis_md: str, *, version: int) -> str:
     return build_plan_approval_prompt(
         analysis_md,
@@ -2981,7 +3719,7 @@ def _build_deep_research_analysis_request(
         accept_label="Start Deep Research",
         reject_label="Revise Scope",
         suggest_label="Suggestion",
-        help_text="Accept starts the expensive research pipeline. Reject or Suggestion sends changes back into the paused run.",
+        help_text="Approve starts the expensive research pipeline. Reject or Suggestion sends changes back into the paused run.",
         artifact_paths=[analysis_storage_path] if analysis_storage_path else [],
         metadata={"version": version, "report_title": title},
     )
@@ -3026,7 +3764,7 @@ def _build_deep_research_subplan_request(
         accept_label="Approve Plan",
         reject_label="Revise Plan",
         suggest_label="Suggestion",
-        help_text="Accept keeps the same workflow and starts the section research and drafting stages. Reject or Suggestion regenerates the plan before execution.",
+        help_text="Approve keeps the same workflow and starts the section research and drafting stages. Reject or Suggestion regenerates the plan before execution.",
         artifact_paths=[path for path in [outline_storage_path, subplan_storage_path] if path],
         metadata={"version": version, "section_count": len(sections)},
     )
@@ -3333,7 +4071,7 @@ def _long_document_subplan(outline: dict, *, objective: str, target_pages: int, 
                 "success_criteria": "Research package is strong enough to support a sourced section draft.",
                 "rationale": "Front-load evidence before drafting.",
                 "llm_model": research_model,
-                "model_source": "state.research_model/OPENAI_DEEP_RESEARCH_MODEL",
+                "model_source": "state.research_model/KENDR_DEEP_RESEARCH_MODEL",
                 "substeps": [],
             }
         )
@@ -4486,14 +5224,18 @@ def long_document_agent(state):
     state["research_depth_mode"] = research_depth_mode
 
     draft_selection = model_selection_for_agent("long_document_agent")
-    selected_provider = str(state.get("provider") or draft_selection.get("provider") or "").strip().lower()
+    explicit_research_provider = str(state.get("research_provider") or "").strip().lower()
+    selected_provider = explicit_research_provider or str(state.get("provider") or draft_selection.get("provider") or "").strip().lower()
     selected_model = str(state.get("model") or draft_selection.get("model") or "").strip()
 
     _raw_research_model = str(state.get("research_model") or selected_model).strip()
     _PROVIDER_NAMES = {"openai", "anthropic", "google", "xai", "ollama", "openrouter", "custom", "minimax", "qwen", "glm"}
     if not _raw_research_model or _raw_research_model in _PROVIDER_NAMES:
         if _raw_research_model in _PROVIDER_NAMES:
-            log_task_update(DEEP_RESEARCH_LABEL, f"state.research_model='{_raw_research_model}' looks like a provider name, not a model ID — ignoring and using OPENAI_DEEP_RESEARCH_MODEL default.")
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"state.research_model='{_raw_research_model}' looks like a provider name, not a model ID — ignoring and using the selected deep-research model/default.",
+            )
         research_model = selected_model or DEFAULT_DEEP_RESEARCH_MODEL
     else:
         research_model = _raw_research_model
@@ -4536,6 +5278,7 @@ def long_document_agent(state):
     date_range = str(state.get("research_date_range", "all_time") or "all_time").strip() or "all_time"
     requested_sources = [str(item).strip().lower() for item in state.get("research_sources", []) if str(item).strip()] if isinstance(state.get("research_sources", []), list) else []
     source_family_display = requested_sources or (["web"] if web_search_enabled else ["local"])
+    search_backend = normalize_research_search_backend(state.get("research_search_backend", "auto"))
     max_sources = _safe_int(state.get("research_max_sources"), 0, 0, 400)
     checkpoint_enabled = bool(state.get("research_checkpoint_enabled", False))
     research_kb_enabled = bool(state.get("research_kb_enabled", False))
@@ -4562,7 +5305,7 @@ def long_document_agent(state):
         (
             f"Deep research pass #{call_number} started. depth={research_depth_mode}, "
             f"sections={section_count}, section_pages~{section_pages}, model={research_model}, "
-            f"formats={','.join(output_formats)}, citation_style={citation_style}"
+            f"formats={','.join(output_formats)}, citation_style={citation_style}, search_backend={search_backend}"
         ),
         objective,
     )
@@ -4581,6 +5324,7 @@ def long_document_agent(state):
             "section_count": section_count,
             "research_model": research_model,
             "web_search_mode": web_search_mode,
+            "search_backend": search_backend,
             "research_kb_enabled": research_kb_enabled,
             "research_kb_id": research_kb_id,
         },
@@ -4590,11 +5334,14 @@ def long_document_agent(state):
     state["deep_research_mode"] = deep_research_mode
     state["long_document_mode"] = True
     state["workflow_type"] = "deep_research" if deep_research_mode else "long_document"
+    state["research_provider"] = selected_provider
+    state["research_model"] = research_model
     state["research_output_formats"] = output_formats
     state["research_citation_style"] = citation_style
     state["research_enable_plagiarism_check"] = plagiarism_enabled
     state["research_web_search_enabled"] = web_search_enabled
     state["research_web_search_mode"] = web_search_mode
+    state["research_search_backend"] = search_backend
     state["research_date_range"] = date_range
     state["research_checkpoint_enabled"] = checkpoint_enabled
     if max_sources > 0:
@@ -4644,6 +5391,12 @@ def long_document_agent(state):
         kind="source_strategy",
         metadata={"phase": "source_strategy", "strategy": source_strategy},
         subtask="Plan source strategy",
+    )
+    _ensure_local_source_manifest(
+        state,
+        objective=objective,
+        artifact_dir=artifact_dir,
+        source_strategy=source_strategy,
     )
 
     if bool(state.get("long_document_addendum_requested", False)):
@@ -4899,6 +5652,34 @@ def long_document_agent(state):
                 DEEP_RESEARCH_LABEL,
                 f"Auto-approved section plan v{subplan_version}; continuing to execution.",
             )
+            if _deep_research_handoff_only_enabled(state):
+                update_planning_file(
+                    state,
+                    status="subplan_auto_approved",
+                    objective=objective,
+                    plan_text=state.get("plan", ""),
+                    clarifications=state.get("plan_clarification_questions", []),
+                    execution_note=(
+                        f"Deep research subplan v{subplan_version} auto-approved and handoff prepared for evidence collection."
+                    ),
+                )
+                _trace_research_event(
+                    state,
+                    title="Research handoff prepared",
+                    detail=(
+                        f"Auto-approved subplan v{subplan_version} and stopped after the brief-to-report handoff."
+                    ),
+                    status="completed",
+                    metadata={"phase": "planning", "section_count": len(outline.get("sections", [])), "version": subplan_version},
+                    subtask="Prepare execution handoff",
+                )
+                return publish_agent_output(
+                    state,
+                    "long_document_agent",
+                    state["draft_response"],
+                    f"deep_research_subplan_{subplan_version}",
+                    recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
+                )
         else:
             state["long_document_plan_waiting_for_approval"] = True
             state["long_document_plan_status"] = "pending"
@@ -5035,7 +5816,23 @@ def long_document_agent(state):
             )
             log_task_update(DEEP_RESEARCH_LABEL, "Collecting the cross-report evidence bank.")
             if web_search_enabled:
-                search_results = _collect_google_search_evidence(objective, num=int(state.get("long_document_search_results", 10) or 10))
+                log_task_update(
+                    DEEP_RESEARCH_LABEL,
+                    f"Searching the web for shared report evidence via {search_backend}.",
+                )
+                search_results = _collect_google_search_evidence(
+                    objective,
+                    num=int(state.get("long_document_search_results", 10) or 10),
+                    search_backend=search_backend,
+                    progress_callback=lambda url, status, payload, position, total: _log_web_review(
+                        url,
+                        status=status,
+                        position=position,
+                        total=total,
+                        payload=payload,
+                        context="search result website",
+                    ),
+                )
                 _trace_research_event(
                     state,
                     title="Google search results gathered",
@@ -5051,7 +5848,15 @@ def long_document_agent(state):
                         "viewed_urls": _trace_url_list([str(item.get("url", "")).strip() for item in (search_results or {}).get("viewed_pages", [])]),
                         "urls": _trace_url_list([str(item.get("url", "")).strip() for item in (search_results or {}).get("results", [])]),
                     },
-                    subtask="Search for shared report evidence",
+                        subtask="Search for shared report evidence",
+                    )
+                log_task_update(
+                    DEEP_RESEARCH_LABEL,
+                    (
+                        f"Web search gathered {len((search_results or {}).get('results', []))} result(s); "
+                        f"provider={str((search_results or {}).get('provider', '') or 'none')}, "
+                        f"providers_tried={', '.join(list((search_results or {}).get('providers_tried', []) or [])) or 'none'}."
+                    ),
                 )
                 evidence_instructions = str(
                     state.get(
@@ -5177,8 +5982,8 @@ def long_document_agent(state):
             if url_entries:
                 write_text_file(_artifact_file(artifact_dir, "provided_url_sources.json"), json.dumps(url_entries, indent=2, ensure_ascii=False))
             state["long_document_sources_collected"] = True
-            state["long_document_evidence_bank_path"] = f"{OUTPUT_DIR}/{evidence_md_filename}"
-            state["long_document_evidence_bank_json_path"] = f"{OUTPUT_DIR}/{evidence_json_filename}"
+            state["long_document_evidence_bank_path"] = _output_file_path(evidence_md_filename)
+            state["long_document_evidence_bank_json_path"] = _output_file_path(evidence_json_filename)
             evidence_excerpt = _trim_text(evidence_bank_md, 18000)
             state["long_document_evidence_bank_excerpt"] = evidence_excerpt
             state["long_document_evidence_sources"] = evidence_sources
@@ -5462,7 +6267,23 @@ def long_document_agent(state):
         section_search_text = ""
         if use_section_search:
             search_query = f"{section_title} {section_objective}"
-            section_search_results = _collect_google_search_evidence(search_query, num=section_search_results_count)
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Searching the web for section {index} via {search_backend}: {section_title}",
+            )
+            section_search_results = _collect_google_search_evidence(
+                search_query,
+                num=section_search_results_count,
+                search_backend=search_backend,
+                progress_callback=lambda url, status, payload, position, total: _log_web_review(
+                    url,
+                    status=status,
+                    position=position,
+                    total=total,
+                    payload=payload,
+                    context="search result website",
+                ),
+            )
             _trace_research_event(
                 state,
                 title=f"Google search results for section {index}",
@@ -5481,6 +6302,14 @@ def long_document_agent(state):
                     "urls": _trace_url_list([str(item.get("url", "")).strip() for item in (section_search_results or {}).get("results", [])]),
                 },
                 subtask=f"Search for {section_title}",
+            )
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                (
+                    f"Section {index} web search gathered {len((section_search_results or {}).get('results', []))} result(s); "
+                    f"provider={str((section_search_results or {}).get('provider', '') or 'none')}, "
+                    f"providers_tried={', '.join(list((section_search_results or {}).get('providers_tried', []) or [])) or 'none'}."
+                ),
             )
             if isinstance(section_search_results, dict) and str(section_search_results.get("error", "")).strip():
                 log_task_update(
@@ -5615,6 +6444,13 @@ def long_document_agent(state):
         )
         write_text_file(_artifact_file(artifact_dir, f"section_{index:02d}/sources.json"), json.dumps(section_sources, indent=2, ensure_ascii=False))
         write_text_file(_artifact_file(artifact_dir, f"section_{index:02d}/sources.md"), _references_markdown(section_sources))
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            (
+                f"Saved section {index}/{total_sections} research bundle: {section_title} "
+                f"({len(section_sources)} sources)."
+            ),
+        )
         section_packages.append(
             {
                 "index": index,
@@ -5739,8 +6575,8 @@ def long_document_agent(state):
                     "continuity_note": note,
                     "references": package.get("sources", []),
                     "visual_assets": visual_assets,
-                    "visual_assets_file": f"{OUTPUT_DIR}/{visual_assets_json_filename}",
-                    "visual_assets_markdown_file": f"{OUTPUT_DIR}/{visual_assets_md_filename}",
+                    "visual_assets_file": _output_file_path(visual_assets_json_filename),
+                    "visual_assets_markdown_file": _output_file_path(visual_assets_md_filename),
                     "flowchart_files": flowchart_files,
                     "section_images": section_images,
                 }
@@ -5921,6 +6757,13 @@ def long_document_agent(state):
                 ensure_ascii=False,
             ),
         )
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            (
+                f"Saved section {write_index}/{len(ordered_packages)} artifacts: {section_title} "
+                f"→ {_output_file_path(section_md_filename)}"
+            ),
+        )
 
         note = _section_continuity_note(section_title, section_text)
         continuity_notes.append(f"{section_title}:\n{note}")
@@ -5948,8 +6791,8 @@ def long_document_agent(state):
                 "continuity_note": note,
                 "references": package.get("sources", []),
                 "visual_assets": visual_assets,
-                "visual_assets_file": f"{OUTPUT_DIR}/{visual_assets_json_filename}",
-                "visual_assets_markdown_file": f"{OUTPUT_DIR}/{visual_assets_md_filename}",
+                "visual_assets_file": _output_file_path(visual_assets_json_filename),
+                "visual_assets_markdown_file": _output_file_path(visual_assets_md_filename),
                 "flowchart_files": flowchart_files,
                 "section_images": section_images,
             }
@@ -6163,11 +7006,12 @@ Section continuity notes:
     )
     compiled_filename = _artifact_file(artifact_dir, "deep_research_report.md")
     write_text_file(compiled_filename, compiled_markdown)
+    compiled_path = _output_file_path(compiled_filename)
     compiled_chars = len(compiled_markdown)
     compiled_words = len(compiled_markdown.split())
     log_task_update(
         DEEP_RESEARCH_LABEL,
-        f"Compiled markdown written: {compiled_words} words, {compiled_chars} chars → {OUTPUT_DIR}/{compiled_filename}",
+        f"Compiled markdown written: {compiled_words} words, {compiled_chars} chars → {compiled_path}",
     )
     _trace_research_event(
         state,
@@ -6280,24 +7124,32 @@ Section continuity notes:
             metadata={"phase": "coverage_gap", "gap": gap},
             subtask="Review research coverage gaps",
         )
-    report_alias_md = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'report.md')}"
-    report_alias_html = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'report.html')}"
-    report_alias_pdf = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'report.pdf')}"
-    report_alias_docx = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'report.docx')}"
+    report_alias_md = _output_file_path(_artifact_file(artifact_dir, "report.md"))
+    report_alias_html = _output_file_path(_artifact_file(artifact_dir, "report.html"))
+    report_alias_pdf = _output_file_path(_artifact_file(artifact_dir, "report.pdf"))
+    report_alias_docx = _output_file_path(_artifact_file(artifact_dir, "report.docx"))
     alias_results = {
-        "md": _copy_artifact_alias(f"{OUTPUT_DIR}/{compiled_filename}", report_alias_md),
+        "md": _copy_artifact_alias(compiled_path, report_alias_md),
         "html": _copy_artifact_alias(export_paths.get("html", ""), report_alias_html),
         "pdf": _copy_artifact_alias(export_paths.get("pdf", ""), report_alias_pdf),
         "docx": _copy_artifact_alias(export_paths.get("docx", ""), report_alias_docx),
     }
     created_artifacts = [
-        {"name": "report.md", "path": alias_results.get("md", "") or f"{OUTPUT_DIR}/{compiled_filename}", "kind": "report"},
-        {"name": "source_ledger.json", "path": f"{OUTPUT_DIR}/{source_ledger_filename}", "kind": "evidence"},
-        {"name": "coverage_report.json", "path": f"{OUTPUT_DIR}/{coverage_report_filename}", "kind": "coverage"},
-        {"name": "quality_report.json", "path": f"{OUTPUT_DIR}/{quality_report_filename}", "kind": "quality"},
+        {"name": "report.md", "path": alias_results.get("md", "") or compiled_path, "kind": "report"},
+        {"name": "source_ledger.json", "path": _output_file_path(source_ledger_filename), "kind": "evidence"},
+        {"name": "coverage_report.json", "path": _output_file_path(coverage_report_filename), "kind": "coverage"},
+        {"name": "quality_report.json", "path": _output_file_path(quality_report_filename), "kind": "quality"},
         {"name": "evidence_bank.md", "path": state.get("long_document_evidence_bank_path", ""), "kind": "evidence"},
         {"name": "evidence_bank.json", "path": state.get("long_document_evidence_bank_json_path", ""), "kind": "evidence"},
     ]
+    if str(state.get("long_document_source_manifest_path", "")).strip():
+        created_artifacts.append(
+            {"name": "source_manifest.md", "path": state.get("long_document_source_manifest_path", ""), "kind": "manifest"}
+        )
+    if str(state.get("long_document_source_manifest_json_path", "")).strip():
+        created_artifacts.append(
+            {"name": "source_manifest.json", "path": state.get("long_document_source_manifest_json_path", ""), "kind": "manifest"}
+        )
     if alias_results.get("pdf"):
         created_artifacts.append({"name": "report.pdf", "path": alias_results["pdf"], "kind": "report"})
     if alias_results.get("docx"):
@@ -6318,6 +7170,24 @@ Section continuity notes:
         )
     total_images = len(all_section_images)
     manifest_filename = _artifact_file(artifact_dir, "deep_research_manifest.json")
+    manifest_path = _output_file_path(manifest_filename)
+    outline_json_path = _output_file_path(_artifact_file(artifact_dir, "deep_research_outline.json"))
+    outline_md_path = _output_file_path(_artifact_file(artifact_dir, "deep_research_outline.md"))
+    coherence_base_path = _output_file_path(_artifact_file(artifact_dir, "deep_research_coherence_base.md"))
+    coherence_live_path = _output_file_path(_artifact_file(artifact_dir, "deep_research_coherence_live.md"))
+    correlation_briefing_path = _output_file_path(_artifact_file(artifact_dir, "correlation_briefing.md"))
+    knowledge_graph_path = _output_file_path(_artifact_file(artifact_dir, "knowledge_graph.json"))
+    references_md_path = _output_file_path(references_md_filename)
+    references_json_path = _output_file_path(references_json_filename)
+    visual_index_md_path = _output_file_path(visual_index_md_filename)
+    visual_index_json_path = _output_file_path(visual_index_json_filename)
+    plagiarism_json_path = _output_file_path(plagiarism_json_filename)
+    plagiarism_md_path = _output_file_path(plagiarism_md_filename)
+    source_ledger_path = _output_file_path(source_ledger_filename)
+    coverage_report_path = _output_file_path(coverage_report_filename)
+    quality_report_path = _output_file_path(quality_report_filename)
+    intent_path = _output_file_path(intent_json_path)
+    strategy_path = _output_file_path(strategy_json_path)
     write_text_file(
         manifest_filename,
         json.dumps(
@@ -6327,33 +7197,35 @@ Section continuity notes:
                 "tier": analysis.get("tier", 0),
                 "target_pages": target_pages,
                 "section_count": len(section_outputs),
-                "compiled_markdown_file": f"{OUTPUT_DIR}/{compiled_filename}",
-                "report_markdown_file": alias_results.get("md", "") or f"{OUTPUT_DIR}/{compiled_filename}",
+                "compiled_markdown_file": compiled_path,
+                "report_markdown_file": alias_results.get("md", "") or compiled_path,
                 "report_html_file": alias_results.get("html", "") or export_paths.get("html", ""),
                 "report_docx_file": alias_results.get("docx", "") or export_paths.get("docx", ""),
                 "report_pdf_file": alias_results.get("pdf", "") or export_paths.get("pdf", ""),
-                "outline_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_outline.json')}",
-                "outline_markdown_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_outline.md')}",
-                "coherence_base_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_base.md')}",
-                "coherence_live_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_live.md')}",
-                "correlation_briefing_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'correlation_briefing.md')}",
-                "knowledge_graph_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'knowledge_graph.json')}",
-                "references_markdown_file": f"{OUTPUT_DIR}/{references_md_filename}",
-                "references_json_file": f"{OUTPUT_DIR}/{references_json_filename}",
-                "visual_index_markdown_file": f"{OUTPUT_DIR}/{visual_index_md_filename}",
-                "visual_index_json_file": f"{OUTPUT_DIR}/{visual_index_json_filename}",
-                "plagiarism_report_json": f"{OUTPUT_DIR}/{plagiarism_json_filename}",
-                "plagiarism_report_markdown": f"{OUTPUT_DIR}/{plagiarism_md_filename}",
-                "source_ledger_file": f"{OUTPUT_DIR}/{source_ledger_filename}",
-                "coverage_report_file": f"{OUTPUT_DIR}/{coverage_report_filename}",
-                "quality_report_file": f"{OUTPUT_DIR}/{quality_report_filename}",
+                "outline_file": outline_json_path,
+                "outline_markdown_file": outline_md_path,
+                "coherence_base_file": coherence_base_path,
+                "coherence_live_file": coherence_live_path,
+                "correlation_briefing_file": correlation_briefing_path,
+                "knowledge_graph_file": knowledge_graph_path,
+                "references_markdown_file": references_md_path,
+                "references_json_file": references_json_path,
+                "visual_index_markdown_file": visual_index_md_path,
+                "visual_index_json_file": visual_index_json_path,
+                "plagiarism_report_json": plagiarism_json_path,
+                "plagiarism_report_markdown": plagiarism_md_path,
+                "source_ledger_file": source_ledger_path,
+                "coverage_report_file": coverage_report_path,
+                "quality_report_file": quality_report_path,
                 "compiled_html_file": export_paths.get("html", ""),
                 "compiled_docx_file": export_paths.get("docx", ""),
                 "compiled_pdf_file": export_paths.get("pdf", ""),
                 "evidence_bank_file": state.get("long_document_evidence_bank_path", ""),
                 "evidence_bank_json_file": state.get("long_document_evidence_bank_json_path", ""),
-                "intent_file": f"{OUTPUT_DIR}/{intent_json_path}",
-                "source_strategy_file": f"{OUTPUT_DIR}/{strategy_json_path}",
+                "source_manifest_file": state.get("long_document_source_manifest_path", ""),
+                "source_manifest_json_file": state.get("long_document_source_manifest_json_path", ""),
+                "intent_file": intent_path,
+                "source_strategy_file": strategy_path,
                 "created_artifacts": created_artifacts,
                 "image_gallery_count": total_images,
                 "image_gallery": [
@@ -6410,6 +7282,19 @@ Section continuity notes:
         downloadable_report_formats.append("HTML")
     downloadable_report_formats.append("MD")
     export_issue_line = f"- Export issues: {'; '.join(export_errors)}\n" if export_errors else ""
+    artifact_summary_lines = render_artifact_lines(
+        [
+            ("Artifact bundle", _output_file_path(artifact_dir)),
+            ("Markdown report", alias_results.get("md", "") or compiled_path),
+            ("PDF report", alias_results.get("pdf", "")),
+            ("DOCX report", alias_results.get("docx", "")),
+            ("HTML report", alias_results.get("html", "")),
+            ("Source manifest", state.get("long_document_source_manifest_path", "")),
+            ("Research manifest", manifest_path),
+        ],
+        output_root=OUTPUT_DIR,
+    )
+    artifact_summary_block = "".join(f"{line}\n" for line in artifact_summary_lines)
 
     final_summary = (
         f"Deep research pipeline completed.\n"
@@ -6427,7 +7312,8 @@ Section continuity notes:
         f"- Citations: {len(consolidated_references)}\n"
         f"- Plagiarism: {plagiarism_report.get('overall_score', 0)}% ({plagiarism_report.get('status', 'PASS')})\n"
         f"- Report downloads in chat: {', '.join(downloadable_report_formats)}\n"
-        f"- Supporting research files: references, evidence bank, source ledger, coverage report, quality report, manifest\n"
+        f"{artifact_summary_block}"
+        f"- Supporting research files: source_manifest.md, deep_research_references.md, evidence_bank.md, source_ledger.json, coverage_report.json, quality_report.json\n"
         f"- Visual assets generated: {total_tables} tables, {total_flowcharts} flowcharts\n"
         f"- Web images collected: {total_images} (Appendix D)\n"
         f"{export_issue_line}"
@@ -6459,20 +7345,22 @@ Section continuity notes:
         }
         for item in section_outputs
     ]
-    state["long_document_artifact_dir"] = f"{OUTPUT_DIR}/{artifact_dir}"
-    state["long_document_compiled_path"] = f"{OUTPUT_DIR}/{compiled_filename}"
+    state["long_document_artifact_dir"] = _output_file_path(artifact_dir)
+    state["long_document_compiled_path"] = compiled_path
     state["long_document_compiled_html_path"] = export_paths.get("html", "")
     state["long_document_compiled_docx_path"] = export_paths.get("docx", "")
     state["long_document_compiled_pdf_path"] = export_paths.get("pdf", "")
-    state["long_document_manifest_path"] = f"{OUTPUT_DIR}/{manifest_filename}"
-    state["long_document_outline_md_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_outline.md')}"
-    state["long_document_coherence_base_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_base.md')}"
-    state["long_document_coherence_live_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_live.md')}"
-    state["long_document_references_path"] = f"{OUTPUT_DIR}/{references_md_filename}"
-    state["long_document_references_json_path"] = f"{OUTPUT_DIR}/{references_json_filename}"
+    state["long_document_manifest_path"] = manifest_path
+    state["long_document_source_manifest_path"] = str(state.get("long_document_source_manifest_path", "") or "")
+    state["long_document_source_manifest_json_path"] = str(state.get("long_document_source_manifest_json_path", "") or "")
+    state["long_document_outline_md_path"] = outline_md_path
+    state["long_document_coherence_base_path"] = coherence_base_path
+    state["long_document_coherence_live_path"] = coherence_live_path
+    state["long_document_references_path"] = references_md_path
+    state["long_document_references_json_path"] = references_json_path
     state["long_document_references"] = consolidated_references
-    state["long_document_visual_index_path"] = f"{OUTPUT_DIR}/{visual_index_md_filename}"
-    state["long_document_visual_index_json_path"] = f"{OUTPUT_DIR}/{visual_index_json_filename}"
+    state["long_document_visual_index_path"] = visual_index_md_path
+    state["long_document_visual_index_json_path"] = visual_index_json_path
     state["long_document_summary"] = executive_summary
     state["long_document_evidence_sources"] = evidence_sources or explicit_source_entries
     state["research_kb_used"] = bool(research_kb_enabled and int(kb_grounding.get("hit_count", 0) or 0) > 0)
@@ -6487,8 +7375,8 @@ Section continuity notes:
     state["deep_research_coverage_report"] = coverage_report
     state["deep_research_quality_report"] = quality_report
     state["deep_research_artifacts_manifest"] = {
-        "artifact_dir": f"{OUTPUT_DIR}/{artifact_dir}",
-        "manifest_path": f"{OUTPUT_DIR}/{manifest_filename}",
+        "artifact_dir": _output_file_path(artifact_dir),
+        "manifest_path": manifest_path,
         "created_artifacts": created_artifacts,
     }
     state["deep_research_result_card"] = {
@@ -6525,23 +7413,27 @@ Section continuity notes:
         "why_selected": dict(source_strategy.get("selection_notes", {}) or {}),
         "why_skipped": dict(source_strategy.get("skip_notes", {}) or {}),
         "formats": output_formats,
-        "report_path": f"{OUTPUT_DIR}/{compiled_filename}",
+        "report_path": compiled_path,
         "html_path": export_paths.get("html", ""),
         "docx_path": export_paths.get("docx", ""),
         "pdf_path": export_paths.get("pdf", ""),
-        "report_md_path": alias_results.get("md", "") or f"{OUTPUT_DIR}/{compiled_filename}",
+        "report_md_path": alias_results.get("md", "") or compiled_path,
         "report_docx_path": alias_results.get("docx", "") or export_paths.get("docx", ""),
         "report_pdf_path": alias_results.get("pdf", "") or export_paths.get("pdf", ""),
-        "knowledge_graph_path": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'knowledge_graph.json')}",
-        "plagiarism_report_path": f"{OUTPUT_DIR}/{plagiarism_json_filename}",
-        "raw_json_path": f"{OUTPUT_DIR}/{manifest_filename}",
-        "source_ledger_path": f"{OUTPUT_DIR}/{source_ledger_filename}",
-        "coverage_report_path": f"{OUTPUT_DIR}/{coverage_report_filename}",
-        "quality_report_path": f"{OUTPUT_DIR}/{quality_report_filename}",
+        "knowledge_graph_path": knowledge_graph_path,
+        "plagiarism_report_path": plagiarism_json_path,
+        "raw_json_path": manifest_path,
+        "source_manifest_path": state.get("long_document_source_manifest_path", ""),
+        "source_manifest_json_path": state.get("long_document_source_manifest_json_path", ""),
+        "source_ledger_path": source_ledger_path,
+        "coverage_report_path": coverage_report_path,
+        "quality_report_path": quality_report_path,
         "coverage_status": coverage_report.get("status", ""),
         "coverage_gaps": coverage_report.get("gaps", []),
         "coverage_revisit_plan": coverage_report.get("revisit_plan", []),
         "failed_extractions": coverage_report.get("failed_extractions", []),
+        "discovered_files": int(local_manifest.get("file_count", 0) or 0),
+        "selected_local_files": int(local_manifest.get("selected_file_count", 0) or 0),
         "quality_status": quality_report.get("status", ""),
         "quality_flags": quality_report.get("flags", []),
         "created_artifacts": created_artifacts,

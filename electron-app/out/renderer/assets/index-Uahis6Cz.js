@@ -7849,6 +7849,108 @@ function MenuBar() {
     ) })
   ] }, menu.label)) });
 }
+function formatErrorMessage(error) {
+  if (!error) return "Unknown renderer failure.";
+  const message = String(error?.message || error || "").trim();
+  return message || "Unknown renderer failure.";
+}
+class RendererErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null, info: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    this.setState({ error, info });
+    try {
+      console.error("RendererErrorBoundary caught an error", error, info);
+    } catch (_2) {
+    }
+  }
+  handleReload = () => {
+    try {
+      window.location.reload();
+    } catch (_2) {
+    }
+  };
+  render() {
+    const { error, info } = this.state;
+    if (!error) return this.props.children;
+    const detail = String(info?.componentStack || "").trim();
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        style: {
+          minHeight: "100vh",
+          display: "grid",
+          placeItems: "center",
+          padding: 24,
+          background: "radial-gradient(circle at top, rgba(232, 117, 88, 0.14), transparent 42%), #0d0f14",
+          color: "#f3f4f6"
+        },
+        children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              width: "min(760px, 100%)",
+              borderRadius: 20,
+              border: "1px solid rgba(255,255,255,0.12)",
+              background: "rgba(15, 23, 42, 0.88)",
+              boxShadow: "0 18px 48px rgba(0,0,0,0.32)",
+              padding: 24
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, letterSpacing: "0.08em", textTransform: "uppercase", color: "#fca5a5", marginBottom: 10 }, children: "Renderer Recovery" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 28, fontWeight: 700, marginBottom: 12 }, children: "Kendr hit a renderer error." }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 15, lineHeight: 1.6, color: "#cbd5e1", marginBottom: 18 }, children: "The app stayed open instead of falling through to a blank screen. Reload the window and try the same action again." }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    borderRadius: 14,
+                    border: "1px solid rgba(252, 165, 165, 0.26)",
+                    background: "rgba(127, 29, 29, 0.22)",
+                    padding: 14,
+                    marginBottom: 18,
+                    fontFamily: "'Cascadia Code', 'Fira Code', monospace",
+                    fontSize: 13,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word"
+                  },
+                  children: [
+                    formatErrorMessage(error),
+                    detail ? `
+
+${detail}` : ""
+                  ]
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  onClick: this.handleReload,
+                  style: {
+                    border: "none",
+                    borderRadius: 10,
+                    background: "#f97316",
+                    color: "#111827",
+                    fontWeight: 700,
+                    padding: "11px 16px",
+                    cursor: "pointer"
+                  },
+                  children: "Reload Kendr"
+                }
+              )
+            ]
+          }
+        )
+      }
+    );
+  }
+}
 function basename$2(filePath) {
   return String(filePath || "").split(/[\\/]/).pop() || filePath || "file";
 }
@@ -8042,6 +8144,80 @@ function resolveAgentCapability(selectedModel, modelInventory) {
 function basename$1(path) {
   return String(path || "").split(/[\\/]/).pop() || "";
 }
+function normalizeStageRow(stage) {
+  if (!stage || typeof stage !== "object" || Array.isArray(stage)) return null;
+  return {
+    stage: String(stage.stage || "").trim(),
+    label: String(stage.label || "").trim(),
+    provider: String(stage.provider || "").trim(),
+    model: String(stage.model || "").trim(),
+    reason: String(stage.reason || "").trim()
+  };
+}
+function normalizeStageCandidate(candidate) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const provider = String(candidate.provider || "").trim();
+  const model = String(candidate.model || "").trim();
+  if (!provider || !model) return null;
+  return {
+    stage: String(candidate.stage || "").trim(),
+    label: String(candidate.label || "").trim(),
+    provider,
+    model,
+    value: `${provider}/${model}`,
+    labelFull: String(candidate.label_full || "").trim(),
+    reason: String(candidate.reason || "").trim(),
+    costBand: String(candidate.cost_band || candidate.costBand || "unknown").trim() || "unknown",
+    qualityScore: Number(candidate.quality_score || candidate.qualityScore || 0) || 0
+  };
+}
+function normalizeWorkflowCombo(combo) {
+  if (!combo || typeof combo !== "object" || Array.isArray(combo)) {
+    return {
+      available: false,
+      summary: "",
+      estimatedCostBand: "unknown",
+      estimated_cost_band: "unknown",
+      stages: []
+    };
+  }
+  const estimatedCostBand = String(combo.estimated_cost_band || combo.estimatedCostBand || "unknown").trim() || "unknown";
+  return {
+    available: Boolean(combo.available),
+    summary: String(combo.summary || "").trim(),
+    estimatedCostBand,
+    estimated_cost_band: estimatedCostBand,
+    stages: Array.isArray(combo.stages) ? combo.stages.map(normalizeStageRow).filter(Boolean) : []
+  };
+}
+function normalizeWorkflowStageOptions(stageOptions) {
+  const raw = Array.isArray(stageOptions) ? stageOptions : [];
+  return raw.map((stageOption) => {
+    if (!stageOption || typeof stageOption !== "object" || Array.isArray(stageOption)) return null;
+    return {
+      stage: String(stageOption.stage || "").trim(),
+      label: String(stageOption.label || "").trim(),
+      candidates: Array.isArray(stageOption.candidates) ? stageOption.candidates.map(normalizeStageCandidate).filter(Boolean) : []
+    };
+  }).filter(Boolean);
+}
+function resolveWorkflowRecommendation(modelInventory, workflowId) {
+  const normalizedId = String(workflowId).trim();
+  if (!normalizedId) return null;
+  const payload = modelInventory?.workflow_recommendations;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const workflowList = Array.isArray(payload.workflows) ? payload.workflows : payload.workflows && typeof payload.workflows === "object" && !Array.isArray(payload.workflows) ? Object.values(payload.workflows) : [];
+  const directMatch = workflowList.find((item) => item && typeof item === "object" && !Array.isArray(item) && String(item.id || "").trim() === normalizedId);
+  if (directMatch) return directMatch;
+  const legacyEntry = payload[normalizedId];
+  if (legacyEntry && typeof legacyEntry === "object" && !Array.isArray(legacyEntry)) {
+    return {
+      id: normalizedId,
+      ...legacyEntry
+    };
+  }
+  return null;
+}
 function basename(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -8069,7 +8245,7 @@ function pushUniqueItem(list, item, limit = 4) {
     viewUrl: String(item?.viewUrl || "").trim()
   });
 }
-function normalizeArtifactItem(artifact) {
+function normalizeArtifactItem$1(artifact) {
   if (!artifact) return null;
   if (typeof artifact === "string") {
     const raw = artifact.trim();
@@ -8256,7 +8432,7 @@ function summarizeRunArtifacts(progress = [], artifacts = []) {
     }
   }
   const artifactList = [...Array.isArray(artifacts) ? artifacts : []].sort((left, right) => {
-    const normalize = (item) => normalizeArtifactItem(item) || {};
+    const normalize = (item) => normalizeArtifactItem$1(item) || {};
     const priority = (item) => {
       const normalized = normalize(item);
       const name = String(normalized.name || normalized.label || "").toLowerCase();
@@ -8270,7 +8446,7 @@ function summarizeRunArtifacts(progress = [], artifacts = []) {
   });
   const reportItems = [];
   for (const artifact of artifactList) {
-    const normalized = normalizeArtifactItem(artifact);
+    const normalized = normalizeArtifactItem$1(artifact);
     if (!normalized) continue;
     counts.artifact += 1;
     if (/^report\.(pdf|docx|html|md)$/i.test(String(normalized.name || normalized.label || ""))) {
@@ -8458,10 +8634,16 @@ function deepResearchModelDisabledReason(option, webSearchEnabled) {
 function scoreDeepResearchOption(option, { webSearchEnabled = true, preferredValue = "" } = {}) {
   if (!option) return Number.NEGATIVE_INFINITY;
   let score = 0;
+  const capabilities = option.capabilities && typeof option.capabilities === "object" ? option.capabilities : {};
+  const contextWindow = Number(option.contextWindow || 0);
   if (option.value === preferredValue) score += 1e3;
   if (!webSearchEnabled && option.isLocal) score += 240;
-  if (webSearchEnabled && option.provider === "openai") score += 240;
-  if (webSearchEnabled && hasNativeWebSearchCapability(option.provider, option.model, option.capabilities)) score += 120;
+  if (webSearchEnabled && hasNativeWebSearchCapability(option.provider, option.model, capabilities)) score += 220;
+  else if (webSearchEnabled && capabilities.tool_calling) score += 90;
+  if (capabilities.reasoning) score += 140;
+  if (capabilities.structured_output) score += 80;
+  if (capabilities.tool_calling) score += 70;
+  if (!option.isLocal) score += 20;
   const name = String(option.model || "").trim().toLowerCase();
   if (name.includes("gpt-5")) score += 160;
   else if (name.includes("o3")) score += 145;
@@ -8471,7 +8653,11 @@ function scoreDeepResearchOption(option, { webSearchEnabled = true, preferredVal
   else if (name.includes("gemini")) score += 100;
   else if (name.includes("grok")) score += 95;
   else if (name.includes("llama") || name.includes("qwen") || name.includes("mistral")) score += 80;
-  score += Math.min(Number(option.contextWindow || 0), 2e6) / 2e4;
+  if (contextWindow >= 2e5) score += 55;
+  else if (contextWindow >= 128e3) score += 35;
+  else if (contextWindow >= 64e3) score += 15;
+  else if (contextWindow > 0 && contextWindow < 32e3) score -= 180;
+  score += Math.min(contextWindow, 2e6) / 24e3;
   return score;
 }
 function resolveDeepResearchModelSelection({ requestedValue = "", inheritedValue = "", modelInventory = null, webSearchEnabled = true }) {
@@ -8499,6 +8685,82 @@ function resolveDeepResearchModelSelection({ requestedValue = "", inheritedValue
     effectiveOption,
     effectiveSource
   };
+}
+const DEFAULT_SEARCH_PROVIDER_OPTIONS = [
+  {
+    id: "auto",
+    label: "Auto",
+    enabled: true,
+    authenticated: false,
+    rate_limited: false,
+    note: "Prefer the strongest configured backend, then fall back automatically.",
+    warning: ""
+  },
+  {
+    id: "duckduckgo",
+    label: "DuckDuckGo (DDGS)",
+    enabled: false,
+    authenticated: false,
+    rate_limited: true,
+    note: "No API key required.",
+    warning: "Unauthenticated DDGS search can hit rate limits on heavier runs."
+  },
+  {
+    id: "serpapi",
+    label: "SerpAPI",
+    enabled: false,
+    authenticated: true,
+    rate_limited: false,
+    note: "Requires SERP_API_KEY.",
+    warning: ""
+  },
+  {
+    id: "browser_use_mcp",
+    label: "Browser-Use MCP",
+    enabled: false,
+    authenticated: false,
+    rate_limited: false,
+    note: "Requires a running browser-use MCP server.",
+    warning: ""
+  },
+  {
+    id: "playwright_browser",
+    label: "Playwright Browser",
+    enabled: false,
+    authenticated: false,
+    rate_limited: false,
+    note: "Requires Playwright plus an installed browser runtime.",
+    warning: ""
+  }
+];
+function buildDeepResearchSearchProviders(modelInventory) {
+  const rows = Array.isArray(modelInventory?.search_providers) && modelInventory.search_providers.length ? modelInventory.search_providers : DEFAULT_SEARCH_PROVIDER_OPTIONS;
+  const seen2 = /* @__PURE__ */ new Set();
+  const options = [];
+  for (const row of rows) {
+    const id2 = String(row?.id || "").trim().toLowerCase();
+    if (!id2 || seen2.has(id2)) continue;
+    seen2.add(id2);
+    options.push({
+      id: id2,
+      label: String(row?.label || id2).trim() || id2,
+      enabled: row?.enabled !== false || id2 === "auto",
+      authenticated: !!row?.authenticated,
+      rateLimited: !!row?.rate_limited,
+      note: String(row?.note || row?.description || "").trim(),
+      warning: String(row?.warning || "").trim()
+    });
+  }
+  if (!seen2.has("auto")) options.unshift({ ...DEFAULT_SEARCH_PROVIDER_OPTIONS[0] });
+  return options;
+}
+function resolveDeepResearchSearchProviderSelection(searchProviders, requestedId = "") {
+  const options = Array.isArray(searchProviders) ? searchProviders : DEFAULT_SEARCH_PROVIDER_OPTIONS;
+  const normalized = String(requestedId || "auto").trim().toLowerCase() || "auto";
+  const optionById = new Map(options.map((option) => [option.id, option]));
+  const requested = optionById.get(normalized) || optionById.get("auto") || options[0] || null;
+  const effective = requested && requested.enabled ? requested : options.find((option) => option.id === "auto") || options.find((option) => option.enabled) || requested;
+  return { options, requested, effective };
 }
 const initChat = {
   messages: [],
@@ -8586,7 +8848,7 @@ function chatReducer(s, a) {
           if (Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs !== rightMs) return leftMs - rightMs;
           if (Number.isFinite(leftMs) !== Number.isFinite(rightMs)) return Number.isFinite(leftMs) ? -1 : 1;
           return String(left?.ts || left?.timestamp || "").localeCompare(String(right?.ts || right?.timestamp || ""));
-        }).slice(-40);
+        }).slice(-1e3);
         return { ...m2, logs: next };
       });
       return { ...s, messages: msgs };
@@ -8659,6 +8921,7 @@ User request: ${text}` : text;
     research_citation_style: dr.citationStyle,
     research_enable_plagiarism_check: dr.plagiarismCheck,
     research_web_search_enabled: dr.webSearchEnabled,
+    research_search_backend: dr.searchBackend || "auto",
     research_date_range: dr.dateRange,
     research_sources: allSources,
     research_max_sources: dr.maxSources || 0,
@@ -8668,6 +8931,24 @@ User request: ${text}` : text;
     research_kb_top_k: dr.kbTopK || 8,
     deep_research_source_urls: webLinks
   };
+  if (dr.multiModelEnabled) {
+    payload.multi_model_enabled = true;
+    payload.multi_model_strategy = dr.multiModelStrategy === "cheapest" ? "cheapest" : "best";
+    const stageOverrides = Object.fromEntries(
+      Object.entries(dr.multiModelStageOverrides && typeof dr.multiModelStageOverrides === "object" ? dr.multiModelStageOverrides : {}).map(([stageName, value]) => {
+        const resolved = resolveSelectedModel(value);
+        if (!resolved.provider || !resolved.model) return null;
+        return [
+          String(stageName || "").trim(),
+          {
+            provider: resolved.provider,
+            model: resolved.model
+          }
+        ];
+      }).filter(Boolean)
+    );
+    if (Object.keys(stageOverrides).length) payload.multi_model_stage_overrides = stageOverrides;
+  }
   if (mergedLocalPaths.length) {
     payload.local_drive_paths = mergedLocalPaths;
     payload.local_drive_recursive = true;
@@ -9086,8 +9367,97 @@ function runSnapshotErrorText(snapshot, runId, fallbackStatus = "") {
 }
 function runSnapshotArtifacts(snapshot) {
   const data = snapshot && typeof snapshot === "object" ? snapshot : {};
-  const result = data.result && typeof data.result === "object" ? data.result : {};
-  return result.artifact_files || data.artifact_files || [];
+  const result = runSnapshotResult(data);
+  const artifacts = [];
+  const seen2 = /* @__PURE__ */ new Set();
+  const appendArtifact = (artifact) => {
+    const normalized = normalizeArtifactItem(artifact);
+    if (!normalized) return;
+    const key = [
+      String(normalized.name || "").trim(),
+      String(normalized.path || "").trim(),
+      String(normalized.downloadUrl || "").trim(),
+      String(normalized.viewUrl || "").trim()
+    ].join("::");
+    if (seen2.has(key)) return;
+    seen2.add(key);
+    artifacts.push(normalized);
+  };
+  const appendArtifactList = (items) => {
+    if (!Array.isArray(items)) return;
+    for (const item of items) appendArtifact(item);
+  };
+  const appendCardArtifacts = (card) => {
+    const safeCard = card && typeof card === "object" ? card : {};
+    appendArtifactList(safeCard.created_artifacts);
+    appendArtifactList(safeCard.downloadable_reports);
+  };
+  appendArtifactList(result.artifact_files);
+  appendArtifactList(data.artifact_files);
+  appendCardArtifacts(result.deep_research_result_card);
+  appendCardArtifacts(data.deep_research_result_card);
+  const appendManifestArtifacts = (manifest) => {
+    if (!manifest || typeof manifest !== "object") return;
+    appendArtifactList(manifest.created_artifacts);
+  };
+  appendManifestArtifacts(result.deep_research_artifacts_manifest);
+  appendManifestArtifacts(data.deep_research_artifacts_manifest);
+  const appendExportHints = (items) => {
+    if (!Array.isArray(items)) return;
+    for (const item of items) {
+      const safe = item && typeof item === "object" ? item : {};
+      const ext = String(safe.ext || "").trim().toLowerCase();
+      const name = String(safe.name || safe.label || (ext ? `report.${ext}` : "")).trim();
+      if (!name) continue;
+      appendArtifact({
+        name,
+        label: String(safe.label || name).trim(),
+        ext,
+        kind: "report",
+        download_url: safe.download_url || safe.downloadUrl || "",
+        view_url: safe.view_url || safe.viewUrl || ""
+      });
+    }
+  };
+  appendExportHints(result.long_document_exports);
+  appendExportHints(data.long_document_exports);
+  for (const key of [
+    "long_document_compiled_path",
+    "long_document_compiled_html_path",
+    "long_document_compiled_pdf_path",
+    "long_document_compiled_docx_path"
+  ]) {
+    const candidate = String(result[key] || data[key] || "").trim();
+    if (!candidate) continue;
+    appendArtifact({
+      name: basename$1(candidate),
+      path: candidate,
+      kind: "report"
+    });
+  }
+  return artifacts;
+}
+const REPORT_ARTIFACT_NAMES = /* @__PURE__ */ new Set([
+  "report.md",
+  "report.html",
+  "report.pdf",
+  "report.docx",
+  "deep_research_report.md",
+  "deep_research_report.html",
+  "deep_research_report.pdf",
+  "deep_research_report.docx"
+]);
+function hasReportArtifacts(items) {
+  if (!Array.isArray(items) || !items.length) return false;
+  return items.some((item) => {
+    const safe = item && typeof item === "object" ? item : {};
+    const name = String(safe.name || safe.label || safe.path || "").trim().toLowerCase();
+    if (!name) return false;
+    const base = basename$1(name).toLowerCase();
+    if (REPORT_ARTIFACT_NAMES.has(base)) return true;
+    const ext = String(safe.ext || "").trim().toLowerCase();
+    return !!ext && ["md", "html", "pdf", "docx"].includes(ext) && (base.startsWith("report.") || base.startsWith("deep_research_report."));
+  });
 }
 function runSnapshotChecklist(snapshot) {
   const data = snapshot && typeof snapshot === "object" ? snapshot : {};
@@ -9378,6 +9748,7 @@ const DR_DEFAULTS = {
   depthMode: "standard",
   pages: 25,
   researchModel: "",
+  searchBackend: "auto",
   citationStyle: "apa",
   dateRange: "all_time",
   maxSources: 0,
@@ -9393,6 +9764,9 @@ const DR_DEFAULTS = {
   kbEnabled: false,
   kbId: "",
   kbTopK: 8,
+  multiModelEnabled: false,
+  multiModelStrategy: "best",
+  multiModelStageOverrides: {},
   collapsed: false
 };
 const DEEP_RESEARCH_DEPTH_PRESETS = [
@@ -9464,6 +9838,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false, 
   const esRef = reactExports.useRef(null);
   const resumeAttemptedRunRef = reactExports.useRef("");
   const staleRunRecoveryRef = reactExports.useRef("");
+  const artifactRecoveryRef = reactExports.useRef(/* @__PURE__ */ new Set());
   const mirroredActivityIdsRef = reactExports.useRef([]);
   const apiBase = appState.backendUrl || "http://127.0.0.1:2151";
   const updateDr = (patch) => setDr((s) => ({ ...s, ...patch }));
@@ -9477,7 +9852,18 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false, 
     modelInventory,
     webSearchEnabled: !!dr.webSearchEnabled
   }), [dr.researchModel, dr.webSearchEnabled, appState.selectedModel, modelInventory]);
+  const deepResearchSearchProviderState = reactExports.useMemo(() => resolveDeepResearchSearchProviderSelection(
+    buildDeepResearchSearchProviders(modelInventory),
+    dr.searchBackend
+  ), [dr.searchBackend, modelInventory]);
   const effectiveDeepResearchModel = deepResearchModelState.effectiveOption;
+  const recommendedDeepResearchModel = deepResearchModelState.recommendedOption;
+  const effectiveDeepResearchSearchProvider = deepResearchSearchProviderState.effective;
+  reactExports.useEffect(() => {
+    const effectiveId = effectiveDeepResearchSearchProvider?.id || "auto";
+    const requestedId = dr.searchBackend || "auto";
+    if (requestedId !== effectiveId) updateDr({ searchBackend: effectiveId });
+  }, [dr.searchBackend, effectiveDeepResearchSearchProvider?.id]);
   const composerModelRaw = chat.mode === "research" ? effectiveDeepResearchModel?.value || appState.selectedModel || "" : appState.selectedModel || "";
   const composerModelMeta = resolveSelectedModel(composerModelRaw);
   const selectedModelAgentCapable = resolveAgentCapability(appState.selectedModel, modelInventory);
@@ -9537,6 +9923,19 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false, 
     if (dr.kbId) return indexedResearchKbs.find((kb2) => kb2.id === dr.kbId) || null;
     return activeResearchKb;
   }, [dr.kbEnabled, dr.kbId, indexedResearchKbs, activeResearchKb]);
+  const deepResearchWorkflowRecommendation = reactExports.useMemo(() => {
+    return resolveWorkflowRecommendation(modelInventory, "deep_research_report");
+  }, [modelInventory]);
+  const deepResearchWorkflowStageOptions = reactExports.useMemo(() => normalizeWorkflowStageOptions(deepResearchWorkflowRecommendation?.stage_options), [deepResearchWorkflowRecommendation]);
+  const activeDeepResearchWorkflowCombo = reactExports.useMemo(() => {
+    if (!dr.multiModelEnabled || !deepResearchWorkflowRecommendation) return null;
+    const rawCombo = dr.multiModelStrategy === "cheapest" ? deepResearchWorkflowRecommendation.cheapest : deepResearchWorkflowRecommendation.best;
+    return normalizeWorkflowCombo(rawCombo);
+  }, [dr.multiModelEnabled, dr.multiModelStrategy, deepResearchWorkflowRecommendation]);
+  const recommendedDeepResearchEvidenceStage = reactExports.useMemo(() => {
+    if (!activeDeepResearchWorkflowCombo) return null;
+    return activeDeepResearchWorkflowCombo.stages.find((stage) => stage?.stage === "evidence") || null;
+  }, [activeDeepResearchWorkflowCombo]);
   reactExports.useEffect(() => {
     if (!dr.researchModel) return;
     if (!deepResearchModelState.requestedReason) return;
@@ -9631,6 +10030,51 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false, 
     if (!chat.awaitingContext || displayableAwaitingContext) return;
     dispatch({ type: "CLEAR_AWAITING" });
   }, [chat.awaitingContext, displayableAwaitingContext]);
+  reactExports.useEffect(() => {
+    const candidates = (chat.messages || []).filter((msg) => msg?.role === "assistant" && String(msg?.runId || "").trim() && !isPendingRunStatus(msg?.status) && (!Array.isArray(msg?.artifacts) || !hasReportArtifacts(msg.artifacts)));
+    if (!candidates.length) return;
+    let cancelled = false;
+    (async () => {
+      for (const msg of candidates.slice(-8)) {
+        const runId = String(msg.runId || "").trim();
+        if (!runId || artifactRecoveryRef.current.has(runId)) continue;
+        try {
+          let recoveredArtifacts = [];
+          let runSnapshot = {};
+          const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}`);
+          runSnapshot = await resp.json().catch(() => ({}));
+          if (cancelled) return;
+          if (resp.ok) recoveredArtifacts = runSnapshotArtifacts(runSnapshot);
+          if (!recoveredArtifacts.length) {
+            const artifactResp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}/artifacts`);
+            const artifactData = await artifactResp.json().catch(() => ({}));
+            if (cancelled) return;
+            if (artifactResp.ok && Array.isArray(artifactData?.files)) {
+              recoveredArtifacts = artifactData.files;
+            }
+          }
+          if (!recoveredArtifacts.length) continue;
+          if (Array.isArray(msg?.artifacts) && msg.artifacts.length) {
+            recoveredArtifacts = [...msg.artifacts, ...recoveredArtifacts];
+          }
+          artifactRecoveryRef.current.add(runId);
+          dispatch({
+            type: "UPD_MSG",
+            id: msg.id,
+            patch: {
+              ...runSnapshotMessageMeta(runSnapshot),
+              artifacts: recoveredArtifacts
+            }
+          });
+        } catch (_2) {
+          continue;
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chat.messages, apiBase]);
   reactExports.useEffect(() => {
     const staleAwaiting = (chat.messages || []).filter((msg) => msg?.role === "assistant" && String(msg?.status || "").trim().toLowerCase() === "awaiting" && String(msg?.runId || "").trim() && !messageHasConcreteAwaitingPrompt(msg));
     if (!staleAwaiting.length) return;
@@ -10887,12 +11331,18 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false, 
           inheritedReason: deepResearchModelState.inheritedReason,
           effectiveModel: deepResearchModelState.effectiveOption,
           effectiveModelSource: deepResearchModelState.effectiveSource,
+          recommendedDeepResearchModel,
+          recommendedDeepResearchEvidenceStage,
+          searchProviderState: deepResearchSearchProviderState,
+          effectiveSearchProvider: effectiveDeepResearchSearchProvider,
           indexedKbs: indexedResearchKbs,
           activeKb: activeResearchKb,
           selectedKb: selectedResearchKb,
           projectRoot: appState.projectRoot,
           apiBase,
-          refreshKbs: loadResearchKbs
+          refreshKbs: loadResearchKbs,
+          activeDeepResearchWorkflowCombo,
+          workflowStageOptions: deepResearchWorkflowStageOptions
         }
       )
     ] }),
@@ -11155,16 +11605,46 @@ function DeepResearchPanel({
   inheritedReason = "",
   effectiveModel = null,
   effectiveModelSource = "none",
+  recommendedDeepResearchModel = null,
+  recommendedDeepResearchEvidenceStage = null,
+  searchProviderState = { options: [] },
+  effectiveSearchProvider = null,
   indexedKbs = [],
   activeKb = null,
   selectedKb = null,
   projectRoot = "",
   apiBase = "",
-  refreshKbs = null
+  refreshKbs = null,
+  activeDeepResearchWorkflowCombo = null,
+  workflowStageOptions = []
 }) {
   const api = window.kendrAPI;
   const [kbSetupState, setKbSetupState] = reactExports.useState({ status: "idle", message: "" });
   const depthPreset = resolveDeepResearchDepthPreset(dr.depthMode, dr.pages);
+  const recommendedStageSelections = reactExports.useMemo(() => {
+    const next = {};
+    const stages = Array.isArray(activeDeepResearchWorkflowCombo?.stages) ? activeDeepResearchWorkflowCombo.stages : [];
+    for (const stage of stages) {
+      const stageName = String(stage?.stage || "").trim();
+      const provider = String(stage?.provider || "").trim();
+      const model = String(stage?.model || "").trim();
+      if (stageName && provider && model) next[stageName] = `${provider}/${model}`;
+    }
+    return next;
+  }, [activeDeepResearchWorkflowCombo]);
+  const actionableWorkflowStageOptions = reactExports.useMemo(() => (Array.isArray(workflowStageOptions) ? workflowStageOptions : []).filter((stageOption) => ["router", "merge", "verify"].includes(String(stageOption?.stage || "").trim())), [workflowStageOptions]);
+  const stageOverrideSelections = dr.multiModelStageOverrides && typeof dr.multiModelStageOverrides === "object" ? dr.multiModelStageOverrides : {};
+  const updateStageOverride = (stageName, value) => {
+    const normalizedStage = String(stageName || "").trim();
+    if (!normalizedStage) return;
+    const normalizedValue = String(value || "").trim();
+    const recommendedValue = String(recommendedStageSelections[normalizedStage] || "").trim();
+    const nextOverrides = { ...stageOverrideSelections };
+    if (!normalizedValue || normalizedValue === recommendedValue) delete nextOverrides[normalizedStage];
+    else nextOverrides[normalizedStage] = normalizedValue;
+    updateDr({ multiModelStageOverrides: nextOverrides });
+  };
+  const clearStageOverrides = () => updateDr({ multiModelStageOverrides: {} });
   const toggleFormat = (fmt) => {
     const cur = dr.outputFormats;
     const next = cur.includes(fmt) ? cur.filter((f2) => f2 !== fmt) : [...cur, fmt];
@@ -11306,6 +11786,8 @@ function DeepResearchPanel({
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-summary", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: depthPreset.summary }),
         effectiveModel?.model && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: effectiveModel.model }),
+        dr.webSearchEnabled && effectiveSearchProvider?.label && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: effectiveSearchProvider.label }),
+        dr.multiModelEnabled && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: dr.multiModelStrategy === "cheapest" ? "Cheapest combo" : "Best combo" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: dr.citationStyle.toUpperCase() }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: dr.outputFormats.join("·") }),
         dr.webSearchEnabled && effectiveModel?.model && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: hasNativeWebSearchCapability(effectiveModel.provider, effectiveModel.model, effectiveModel.capabilities) ? "Native web" : "Kendr search" }),
@@ -11355,12 +11837,21 @@ function DeepResearchPanel({
             }
           ),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: effectiveModel ? `Active for Deep Research: ${effectiveModel.shortLabel}${effectiveModelSource === "recommended" ? " (recommended)" : effectiveModelSource === "header" ? " (from header model)" : ""}.` : "No compatible Deep Research model is available with the current settings." }),
+          recommendedDeepResearchModel && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: effectiveModel && recommendedDeepResearchModel.value === effectiveModel.value ? `Best-fit suggestion: ${recommendedDeepResearchModel.shortLabel}.` : `Best-fit suggestion: ${recommendedDeepResearchModel.shortLabel}${effectiveModel ? `, while this run is currently using ${effectiveModel.shortLabel}.` : "."}` }),
           dr.webSearchEnabled ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: effectiveModel && hasNativeWebSearchCapability(effectiveModel.provider, effectiveModel.model, effectiveModel.capabilities) ? "This model can use native web search for Deep Research." : "This model will use Kendr web search fallback: Kendr gathers sources, then the selected model synthesizes the report." }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Local-only runs can use local models or any configured provider with enough context." }),
+          dr.multiModelEnabled && recommendedDeepResearchEvidenceStage?.provider && recommendedDeepResearchEvidenceStage?.model && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-note", children: [
+            "Multi-model evidence-stage suggestion: ",
+            providerDisplayLabel(recommendedDeepResearchEvidenceStage.provider),
+            " · ",
+            recommendedDeepResearchEvidenceStage.model,
+            "."
+          ] }),
           !dr.researchModel && inheritedReason && effectiveModel && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-note", children: [
             "The current chat-header model is incompatible here, so this run will fall back to ",
             effectiveModel.shortLabel,
             "."
-          ] })
+          ] }),
+          dr.multiModelEnabled && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "The selected Deep Research model remains the base fallback. Route, evidence, draft, merge, and verification stages can be overridden by the multi-model workflow plan for this task." })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Citation Style" }),
@@ -11394,6 +11885,21 @@ function DeepResearchPanel({
               placeholder: "0 = auto"
             }
           )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Search Backend" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "select",
+            {
+              className: "dr-select",
+              value: effectiveSearchProvider?.id || "auto",
+              onChange: (e) => updateDr({ searchBackend: e.target.value }),
+              disabled: !dr.webSearchEnabled,
+              children: searchProviderState.options.map((option) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: option.id, disabled: !option.enabled, children: option.enabled ? option.label : `${option.label} — not configured` }, option.id))
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: !dr.webSearchEnabled ? "Search backend selection is disabled while web search is off." : effectiveSearchProvider?.note || "Choose which backend Kendr should prefer while gathering external sources." }),
+          dr.webSearchEnabled && effectiveSearchProvider?.warning && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", style: { color: "var(--warn)" }, children: effectiveSearchProvider.warning })
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-grid", style: { marginTop: 8 }, children: [
@@ -11444,6 +11950,82 @@ function DeepResearchPanel({
               "Checkpointing"
             ] })
           ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Model Allocation" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-checks", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "dr-check", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "input",
+              {
+                type: "checkbox",
+                checked: !!dr.multiModelEnabled,
+                onChange: (e) => updateDr({ multiModelEnabled: e.target.checked })
+              }
+            ),
+            "Use multi-model workflow"
+          ] }) }),
+          dr.multiModelEnabled ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "select",
+              {
+                className: "dr-select",
+                value: dr.multiModelStrategy || "best",
+                onChange: (e) => updateDr({ multiModelStrategy: e.target.value === "cheapest" ? "cheapest" : "best" }),
+                style: { marginTop: 8 },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "best", children: "Best combination" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "cheapest", children: "Cheapest combination" })
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Deep Research can split route, evidence, draft, merge, and verification across different models when the current task enables it." }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: activeDeepResearchWorkflowCombo?.available ? `${dr.multiModelStrategy === "cheapest" ? "Cheapest" : "Best"} combo: ${activeDeepResearchWorkflowCombo.summary || "Stage recommendations are available."}` : "No compatible multi-model Deep Research combination is currently available from the connected providers." }),
+            activeDeepResearchWorkflowCombo?.available && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-note", children: [
+              "Estimated cost band: ",
+              String(activeDeepResearchWorkflowCombo.estimated_cost_band || "unknown"),
+              "."
+            ] }),
+            activeDeepResearchWorkflowCombo?.available && actionableWorkflowStageOptions.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", style: { marginTop: 8 }, children: "The recommendation preset seeds the stage picks below. Change a stage only when you want to pin a different model for that part of the workflow." }),
+              actionableWorkflowStageOptions.map((stageOption) => {
+                const stageName = String(stageOption.stage || "").trim();
+                const selectedValue = String(stageOverrideSelections[stageName] || "").trim();
+                const recommendedValue = String(recommendedStageSelections[stageName] || "").trim();
+                const recommendedCandidate = (Array.isArray(stageOption.candidates) ? stageOption.candidates : []).find((candidate) => String(candidate?.value || "").trim() === recommendedValue) || null;
+                const manualCandidate = (Array.isArray(stageOption.candidates) ? stageOption.candidates : []).find((candidate) => String(candidate?.value || "").trim() === selectedValue) || null;
+                return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 10 }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "dr-label", children: [
+                    stageOption.label,
+                    " Model"
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "select",
+                    {
+                      className: "dr-select",
+                      value: selectedValue,
+                      onChange: (e) => updateStageOverride(stageName, e.target.value),
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "", children: recommendedCandidate ? `Use ${dr.multiModelStrategy === "cheapest" ? "cheapest" : "best"} recommendation · ${recommendedCandidate.labelFull || recommendedCandidate.value}` : "Use the recommendation preset" }),
+                        (Array.isArray(stageOption.candidates) ? stageOption.candidates : []).map((candidate) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: candidate.value, children: candidate.labelFull || candidate.value }, candidate.value))
+                      ]
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: manualCandidate ? `Pinned manually: ${manualCandidate.labelFull || manualCandidate.value}. ${manualCandidate.reason || ""}`.trim() : recommendedCandidate ? `Recommended: ${recommendedCandidate.labelFull || recommendedCandidate.value}. ${recommendedCandidate.reason || ""}`.trim() : "No compatible model candidates are available for this stage." })
+                ] }, stageName);
+              }),
+              Object.keys(stageOverrideSelections).length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  className: "dr-action-btn",
+                  style: { marginTop: 10 },
+                  onClick: clearStageOverrides,
+                  children: "Reset Stage Overrides"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", style: { marginTop: 8 }, children: "The Deep Research model above controls evidence collection. Section drafting currently follows the merge-stage model during long-document execution." })
+            ] })
+          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Single-model mode keeps the whole task on the selected Deep Research model." })
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", style: { marginTop: 8 }, children: [
@@ -11752,7 +12334,7 @@ function ExecutionLogPanel({ logs, expanded, onToggle }) {
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-log-panel-toggle", onClick: onToggle, children: expanded ? "Collapse" : "Expand" })
     ] }),
-    expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-panel-body", children: items.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-empty", children: "Waiting for execution log output..." }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-lines", children: items.slice(-18).map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-log-line", children: [
+    expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-panel-body", children: items.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-empty", children: "Waiting for execution log output..." }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-lines", children: items.slice(-120).map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-log-line", children: [
       item.clock && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-log-clock", children: item.clock }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-log-text", children: item.text })
     ] }, item.id)) }) })
@@ -15367,15 +15949,15 @@ function TerminalPanel() {
       }
       try {
         const { Terminal } = await __vitePreload(async () => {
-          const { Terminal: Terminal2 } = await import("./xterm-hpfJQVx7.js").then((n2) => n2.x);
+          const { Terminal: Terminal2 } = await import("./xterm-B3XbghfL.js").then((n2) => n2.x);
           return { Terminal: Terminal2 };
         }, true ? [] : void 0, import.meta.url);
         const { FitAddon } = await __vitePreload(async () => {
-          const { FitAddon: FitAddon2 } = await import("./addon-fit-C-78uEHQ.js").then((n2) => n2.a);
+          const { FitAddon: FitAddon2 } = await import("./addon-fit-D14XCO-b.js").then((n2) => n2.a);
           return { FitAddon: FitAddon2 };
         }, true ? [] : void 0, import.meta.url);
         const { WebLinksAddon } = await __vitePreload(async () => {
-          const { WebLinksAddon: WebLinksAddon2 } = await import("./addon-web-links-D6DZySQH.js").then((n2) => n2.a);
+          const { WebLinksAddon: WebLinksAddon2 } = await import("./addon-web-links-C2J5duG4.js").then((n2) => n2.a);
           return { WebLinksAddon: WebLinksAddon2 };
         }, true ? [] : void 0, import.meta.url);
         if (cancelled) return;
@@ -19826,7 +20408,7 @@ function AboutList({ items }) {
 }
 function App() {
   const { state } = useApp();
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "app-root", children: [
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(RendererErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "app-root", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "titlebar", style: { WebkitAppRegion: "drag" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "titlebar-icon titlebar-icon--brand", style: { WebkitAppRegion: "no-drag" }, children: "K" }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "titlebar-brand", style: { WebkitAppRegion: "no-drag" }, children: [
@@ -19844,7 +20426,7 @@ function App() {
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "app-body app-body--shell", children: /* @__PURE__ */ jsxRuntimeExports.jsx(RenderActiveView, {}) }),
     /* @__PURE__ */ jsxRuntimeExports.jsx(StatusBar, {}),
     state.commandPaletteOpen && /* @__PURE__ */ jsxRuntimeExports.jsx(CommandPalette, {})
-  ] });
+  ] }) });
 }
 function RenderActiveView() {
   const { state, dispatch } = useApp();

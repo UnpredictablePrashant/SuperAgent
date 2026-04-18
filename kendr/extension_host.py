@@ -522,15 +522,23 @@ def _run_web_search(query: str, num_results: int, *, permissions: dict | None = 
     _ensure_network_allowed(
         manifest,
         approval,
-        url="https://api.duckduckgo.com/",
+        url="https://duckduckgo.com/",
         capability="Web search skill",
     )
-    payload = fetch_search_results(str(query or "").strip(), num=max(1, int(num_results or 5)), fetch_pages=0)
+    payload = fetch_search_results(
+        str(query or "").strip(),
+        num=max(1, int(num_results or 5)),
+        fetch_pages=0,
+        provider_hint="duckduckgo",
+        focused_brief=str(query or "").strip(),
+    )
     return {
         "query": str(query or "").strip(),
         "results": list(payload.get("results", []) or []),
         "provider": str(payload.get("provider", "") or "").strip(),
         "providers_tried": list(payload.get("providers_tried", []) or []),
+        "instant_answer": payload.get("instant_answer", {}),
+        "query_plan": list(payload.get("query_plan", []) or []),
         "source_surface": (
             "mcp:browser-use/browser_extract_content"
             if str(payload.get("provider", "") or "").strip() == "browser_use_mcp"

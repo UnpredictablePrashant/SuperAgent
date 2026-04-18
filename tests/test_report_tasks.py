@@ -86,6 +86,11 @@ class ReportAgentSmokeTests(unittest.TestCase):
             prompt_text = captured_prompt.get("text", "")
             self.assertIn("deep_research_result_card", prompt_text)
             self.assertIn("research_source_summary", prompt_text)
+            self.assertIn("Report export complete.", report_state["draft_response"])
+            self.assertIn("Generated report 'Phase 0 Launch Report'", report_state["draft_response"])
+            self.assertIn("HTML report: phase0_launch_report_1.html", report_state["draft_response"])
+            self.assertIn("Manifest: phase0_launch_report_manifest_1.json", report_state["draft_response"])
+            self.assertNotIn(tmp, report_state["draft_response"])
 
             report_data = report_state["report_data"]
             headings = [section["heading"] for section in report_data["sections"]]

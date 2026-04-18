@@ -6,6 +6,7 @@ import re
 import shlex
 import time
 import uuid
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from collections.abc import Mapping
@@ -56,6 +57,7 @@ from kendr.agent_routing import build_agent_routing_index, AgentRoutingIndex
 from kendr.workflow_contract import is_deep_research_workflow_type, normalize_approval_request
 from kendr.workflow_execution_policies import dispatch_workflow_execution_policies
 from kendr.workflow_registry import WorkflowDispatchPlan
+from kendr.model_workflows import build_workflow_recommendations
 
 from tasks.a2a_protocol import (
     append_artifact,
@@ -83,6 +85,7 @@ from tasks.utils import (
     OUTPUT_DIR,
     append_text_file,
     agent_model_context,
+    console_logging_suppressed,
     create_run_output_dir,
     llm,
     log_task_update,
@@ -116,6 +119,31 @@ _DEEP_RESEARCH_OUTPUT_ONLY_BLOCKED_AGENTS = {
     "post_setup_agent",
 }
 
+_DEEP_RESEARCH_CAPABILITY_ALLOWED_AGENTS = {
+    "long_document_agent",
+    "report_agent",
+    "reviewer_agent",
+    "planner_agent",
+    "worker_agent",
+    "os_agent",
+    "document_formatter_agent",
+    "local_drive_agent",
+    "document_ingestion_agent",
+    "ocr_agent",
+    "excel_agent",
+    "image_agent",
+    "research_pipeline_agent",
+}
+
+_DEEP_RESEARCH_CAPABILITY_ALLOWED_SKILLS = {
+    "web-search",
+    "pdf-reader",
+    "file-reader",
+    "file-finder",
+    "doc-summarizer",
+    "spreadsheet-basic",
+}
+
 
 def _truthy(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -139,14 +167,131 @@ class AgentRuntime:
         self.agent_routing: AgentRoutingIndex = build_agent_routing_index(registry)
         self._live_plan_data: dict = {}
         _ar_summary = self.agent_routing.summary()
-        print(
-            f"[kendr] Agent routing index ready: "
-            f"{_ar_summary['active']} active / {_ar_summary['total']} total agents across "
-            f"{len(_ar_summary.get('by_category', {}))} categories."
-        )
+        if not console_logging_suppressed():
+            print(
+                f"[kendr] Agent routing index ready: "
+                f"{_ar_summary['active']} active / {_ar_summary['total']} total agents across "
+                f"{len(_ar_summary.get('by_category', {}))} categories."
+            )
 
     def _agent_cards(self) -> list[dict]:
         return self.registry.agent_cards()
+
+    def _deep_research_skill_agent_names(self) -> set[str]:
+        skill_agents: set[str] = set()
+        for slug in _DEEP_RESEARCH_CAPABILITY_ALLOWED_SKILLS:
+            safe_slug = "".join(char if char.isalnum() else "_" for char in str(slug).lower()).strip("_")
+            if safe_slug:
+                skill_agents.add(f"skill_{safe_slug}_agent")
+        return skill_agents
+
+    def _use_deep_research_capability_profile(self, state: Mapping[str, Any]) -> bool:
+        workflow_type = str(state.get("workflow_type", "") or "").strip().lower()
+        selected_intent_type = str(state.get("selected_intent_type", "") or "").strip().lower()
+        return (
+            workflow_type in {"deep_research", "long_document"}
+            or selected_intent_type in {"deep_research", "long_document"}
+            or bool(state.get("deep_research_mode", False))
+            or bool(state.get("long_document_mode", False))
+        )
+
+    def _apply_deep_research_capability_profile(self, state: dict) -> dict:
+        allowed_agents = set(_DEEP_RESEARCH_CAPABILITY_ALLOWED_AGENTS) | self._deep_research_skill_agent_names()
+
+        active_task = state.get("active_task")
+        if isinstance(active_task, dict):
+            recipient = str(active_task.get("recipient", "") or "").strip()
+            if recipient:
+                allowed_agents.add(recipient)
+
+        for key in ("next_agent", "last_agent", "review_target_agent", "review_subject_agent"):
+            name = str(state.get(key, "") or "").strip()
+            if name:
+                allowed_agents.add(name)
+
+        for step in list(state.get("plan_steps") or []):
+            if not isinstance(step, dict):
+                continue
+            name = str(step.get("agent", "") or "").strip()
+            if name:
+                allowed_agents.add(name)
+
+        available_agents = [
+            name for name in list(state.get("available_agents") or [])
+            if str(name or "").strip() in allowed_agents
+        ]
+        state["available_agents"] = available_agents
+
+        cards = [
+            card for card in list(state.get("available_agent_cards") or [])
+            if str(card.get("agent_name", "") or "").strip() in allowed_agents
+        ]
+        state["available_agent_cards"] = cards
+
+        disabled_agents = state.get("disabled_agents", {})
+        if isinstance(disabled_agents, dict):
+            state["disabled_agents"] = {
+                name: details
+                for name, details in disabled_agents.items()
+                if str(name or "").strip() in allowed_agents
+            }
+
+        connector_catalog = list(state.get("connector_catalog") or [])
+        filtered_catalog = [
+            item for item in connector_catalog
+            if isinstance(item, dict)
+            and str(item.get("agent_name", "") or "").strip() in allowed_agents
+            and str(item.get("connector_type", "") or "").strip() != "mcp_tool"
+        ]
+        state["connector_catalog"] = filtered_catalog
+
+        try:
+            from kendr.connector_registry import ConnectorSpec, connector_catalog_prompt_block as _catalog_prompt
+
+            filtered_specs = [
+                ConnectorSpec(
+                    agent_name=str(item.get("agent_name", "") or "").strip(),
+                    connector_type=str(item.get("connector_type", "") or "").strip() or "task_agent",
+                    display_name=str(item.get("display_name", "") or "").strip(),
+                    description=str(item.get("description", "") or "").strip(),
+                    icon=str(item.get("icon", "") or "").strip(),
+                    status=str(item.get("status", "") or "").strip() or "ready",
+                    category=str(item.get("category", "") or "").strip() or "General",
+                    state_input_key=str(item.get("state_input_key", "") or "").strip(),
+                    input_schema=item.get("input_schema") if isinstance(item.get("input_schema"), dict) else {},
+                    required_inputs=list(item.get("required_inputs") or []),
+                    state_output_key=str(item.get("state_output_key", "") or "").strip() or "draft_response",
+                    output_schema=item.get("output_schema") if isinstance(item.get("output_schema"), dict) else {},
+                    missing_config=list(item.get("missing_config") or []),
+                    metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+                )
+                for item in filtered_catalog
+            ]
+            state["connector_catalog_prompt"] = _catalog_prompt(
+                filtered_specs,
+                include_types={"skill", "task_agent"},
+                only_ready=True,
+                max_per_type=8,
+            )
+        except Exception:
+            state["connector_catalog_prompt"] = ""
+
+        try:
+            state["skills_context"] = self.agent_routing.user_skills_prompt_block(
+                allowed_slugs=set(_DEEP_RESEARCH_CAPABILITY_ALLOWED_SKILLS),
+                max_items=6,
+            ) or ""
+        except Exception:
+            state["skills_context"] = ""
+
+        state["mcp_servers_context"] = ""
+
+        visible_agents = ", ".join(available_agents[:10]) if available_agents else "none"
+        state["setup_summary"] = (
+            "Deep research capability profile active. "
+            f"Visible research agents/connectors: {visible_agents}."
+        )
+        return state
 
     def _resolve_working_directory(self, state_overrides: dict | None = None) -> str:
         overrides = state_overrides or {}
@@ -243,7 +388,9 @@ class AgentRuntime:
             state["skills_context"] = self.agent_routing.user_skills_prompt_block() or "No custom skills installed"
         except Exception:
             state["skills_context"] = "unavailable"
-        ensure_a2a_state(state, filtered_cards)
+        if self._use_deep_research_capability_profile(state):
+            state = self._apply_deep_research_capability_profile(state)
+        ensure_a2a_state(state, state.get("available_agent_cards") or filtered_cards)
         return state
 
     def _db_path(self, state: Mapping[str, Any]) -> str:
@@ -983,6 +1130,396 @@ class AgentRuntime:
             return cleaned
         return cleaned[: limit - 3] + "..."
 
+    def _estimate_token_count(self, value: Any) -> int:
+        try:
+            if isinstance(value, str):
+                payload = value
+            else:
+                payload = json.dumps(value, ensure_ascii=False)
+        except Exception:
+            payload = str(value)
+        return max(1, (len(payload) + 3) // 4)
+
+    def _router_token_budget(self, state: Mapping[str, Any]) -> int:
+        raw = str(state.get("router_token_budget") or os.getenv("KENDR_ROUTER_TOKEN_BUDGET", "2200")).strip()
+        try:
+            budget = int(raw)
+        except Exception:
+            budget = 2200
+        return max(600, budget)
+
+    def _router_text_hint(self, text: str, limit: int) -> str:
+        normalized = " ".join(str(text or "").split())
+        if not normalized:
+            return ""
+        if normalized in {
+            "No agents have run yet.",
+            "No prior chat history provided for this turn.",
+            "No A2A messages yet.",
+            "None",
+        }:
+            return ""
+        return self._truncate(normalized, limit)
+
+    def _router_setup_action_hints(self, state: Mapping[str, Any], limit: int = 4) -> list[str]:
+        rows: list[str] = []
+        for item in list(state.get("setup_actions") or [])[:limit]:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("title") or item.get("service") or item.get("action") or "").strip()
+            detail = str(item.get("summary") or item.get("description") or item.get("note") or "").strip()
+            if label and detail:
+                rows.append(self._truncate(f"{label}: {detail}", 160))
+            elif label:
+                rows.append(self._truncate(label, 160))
+        return rows
+
+    def _router_setup_gap_hints(self, state: Mapping[str, Any], limit: int = 6) -> list[str]:
+        disabled = state.get("disabled_agents", {})
+        if not isinstance(disabled, dict):
+            return []
+        rows: list[str] = []
+        for agent_name, details in list(disabled.items())[:limit]:
+            if not isinstance(details, dict):
+                rows.append(str(agent_name))
+                continue
+            services = details.get("missing_services", [])
+            reasons = details.get("reasons", [])
+            reason_text = ""
+            if isinstance(services, list) and services:
+                reason_text = "missing " + ", ".join(str(item).strip() for item in services[:3] if str(item).strip())
+            elif isinstance(reasons, list) and reasons:
+                reason_text = ", ".join(str(item).strip() for item in reasons[:2] if str(item).strip())
+            elif str(details.get("reason") or "").strip():
+                reason_text = str(details.get("reason") or "").strip()
+            if reason_text:
+                rows.append(self._truncate(f"{agent_name}: {reason_text}", 180))
+            else:
+                rows.append(self._truncate(str(agent_name), 180))
+        return rows
+
+    def _router_candidate_agents(self, state: Mapping[str, Any], limit: int = 8) -> list[dict[str, str]]:
+        available = self._available_agent_descriptions(dict(state))
+        if not available:
+            return []
+
+        workflow_type = str(state.get("workflow_type", "") or "").strip().lower()
+        selected_intent_type = str(state.get("selected_intent_type", "") or "").strip().lower()
+        preferred_names: list[str] = []
+        seen: set[str] = set()
+
+        def add(name: str) -> None:
+            normalized = str(name or "").strip()
+            if not normalized or normalized in seen or normalized not in available:
+                return
+            seen.add(normalized)
+            preferred_names.append(normalized)
+
+        plan_summary = self._plan_step_summary(state)
+        steps = plan_summary.get("plan_steps", [])
+        index = int(plan_summary.get("plan_step_index", 0) or 0)
+        if isinstance(steps, list):
+            for step in steps[max(0, index - 1): index + 3]:
+                if isinstance(step, dict):
+                    add(str(step.get("agent") or "").strip())
+
+        add(str(state.get("review_target_agent") or "").strip())
+        add(str(state.get("review_subject_agent") or "").strip())
+
+        workflow_hints = {
+            "deep_research": [
+                "long_document_agent",
+                "deep_research_agent",
+                "research_pipeline_agent",
+                "local_drive_agent",
+                "ocr_agent",
+                "reviewer_agent",
+                "report_agent",
+                "planner_agent",
+            ],
+            "long_document": [
+                "long_document_agent",
+                "report_agent",
+                "deep_research_agent",
+                "reviewer_agent",
+                "planner_agent",
+            ],
+            "project_build": [
+                "master_coding_agent",
+                "planner_agent",
+                "reviewer_agent",
+                "project_verifier_agent",
+                "worker_agent",
+            ],
+            "project_workbench": [
+                "worker_agent",
+                "planner_agent",
+                "reviewer_agent",
+                "local_drive_agent",
+            ],
+            "project_audit": [
+                "reviewer_agent",
+                "planner_agent",
+                "worker_agent",
+                "project_verifier_agent",
+            ],
+            "local_command": [
+                "os_agent",
+                "planner_agent",
+                "worker_agent",
+            ],
+            "github": [
+                "github_agent",
+                "planner_agent",
+                "reviewer_agent",
+            ],
+        }
+        intent_hints = {
+            "deep_research": ["long_document_agent", "deep_research_agent", "research_pipeline_agent", "planner_agent"],
+            "long_document": ["long_document_agent", "report_agent", "planner_agent"],
+            "local_command": ["os_agent", "planner_agent", "worker_agent"],
+            "github_ops": ["github_agent", "planner_agent", "reviewer_agent"],
+            "project_build": ["master_coding_agent", "planner_agent", "project_verifier_agent"],
+            "local_drive_analysis": ["local_drive_agent", "document_ingestion_agent", "ocr_agent", "planner_agent"],
+            "superrag": ["planner_agent", "worker_agent", "reviewer_agent"],
+            "general_task": ["planner_agent", "worker_agent", "reviewer_agent", "report_agent"],
+        }
+        for name in workflow_hints.get(workflow_type, []):
+            add(name)
+        for name in intent_hints.get(selected_intent_type, []):
+            add(name)
+
+        last_agent = str(state.get("last_agent", "") or "").strip()
+        if last_agent and last_agent != "orchestrator_agent":
+            add("reviewer_agent")
+
+        for name in ("planner_agent", "worker_agent", "reviewer_agent", "report_agent"):
+            add(name)
+
+        for name in self._effective_available_agents(dict(state)):
+            add(name)
+            if len(preferred_names) >= limit:
+                break
+
+        return [
+            {
+                "name": name,
+                "description": self._truncate(available.get(name, ""), 180),
+            }
+            for name in preferred_names[:limit]
+        ]
+
+    def _build_router_stage_toon(self, state: Mapping[str, Any], *, current_objective: str) -> dict[str, Any]:
+        available_agent_names = [str(item).strip() for item in self._effective_available_agents(dict(state)) if str(item).strip()]
+        candidate_agents = self._router_candidate_agents(state)
+        selected_intent = state.get("selected_intent", {}) if isinstance(state.get("selected_intent"), dict) else {}
+        review_corrected_values = state.get("review_corrected_values", {})
+        corrected_keys = []
+        if isinstance(review_corrected_values, dict):
+            corrected_keys = sorted(str(key).strip() for key in review_corrected_values.keys() if str(key).strip())[:8]
+
+        plan_summary = self._plan_step_summary(state)
+        step_rows: list[dict[str, Any]] = []
+        steps = plan_summary.get("plan_steps", [])
+        index = int(plan_summary.get("plan_step_index", 0) or 0)
+        if isinstance(steps, list):
+            for step in steps[index:index + 3]:
+                if not isinstance(step, dict):
+                    continue
+                step_rows.append(
+                    {
+                        "id": str(step.get("id") or "").strip(),
+                        "agent": str(step.get("agent") or "").strip(),
+                        "title": self._truncate(str(step.get("title") or "").strip(), 120),
+                        "status": str(step.get("status") or "").strip(),
+                    }
+                )
+
+        a2a_state = state.get("a2a", {})
+        a2a_messages = a2a_state.get("messages", []) if isinstance(a2a_state, dict) else []
+        multi_model_plan = state.get("multi_model_plan", {}) if isinstance(state.get("multi_model_plan"), dict) else {}
+
+        toon = {
+            "toon_version": 1,
+            "stage": "route",
+            "objective": self._truncate(str(current_objective or ""), 640),
+            "user_query": self._truncate(str(state.get("user_query", "") or ""), 480),
+            "workflow_gate": {
+                "workflow_type": str(state.get("workflow_type", "") or "").strip(),
+                "execution_mode": str(state.get("execution_mode", "") or "").strip(),
+                "planner_policy_mode": str(state.get("planner_policy_mode", "") or "").strip(),
+                "reviewer_policy_mode": str(state.get("reviewer_policy_mode", "") or "").strip(),
+                "plan_ready": bool(state.get("plan_ready", False)),
+                "plan_waiting_for_approval": bool(state.get("plan_waiting_for_approval", False)),
+                "approval_scope": str(state.get("approval_pending_scope", "") or "").strip(),
+                "awaiting_user_input": self._awaiting_user_input(state),
+            },
+            "capability_gate": {
+                "web_search_enabled": bool(state.get("research_web_search_enabled", True)),
+                "kb_enabled": bool(state.get("research_kb_enabled", False)),
+                "local_paths_present": bool(state.get("local_drive_paths")),
+                "image_inputs_present": any(
+                    Path(str(item or "")).suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
+                    for item in list(state.get("local_drive_paths") or [])
+                ),
+                "multi_model_enabled": bool(state.get("multi_model_enabled", False)),
+            },
+            "selected_intent": {
+                "intent_id": str(selected_intent.get("intent_id", "") or "").strip(),
+                "intent_type": str(selected_intent.get("intent_type", "") or "").strip(),
+                "label": str(selected_intent.get("label", "") or "").strip(),
+                "execution_mode": str(selected_intent.get("execution_mode", "") or "").strip(),
+                "requires_planner": bool(selected_intent.get("requires_planner", False)),
+                "risk_level": str(selected_intent.get("risk_level", "") or "").strip(),
+                "reasons": list(selected_intent.get("reasons", []) or [])[:4],
+            },
+            "plan_state": {
+                "summary": self._truncate(str(state.get("plan", "") or ""), 360),
+                "step_index": index,
+                "step_total": int(plan_summary.get("plan_step_total", 0) or 0),
+                "focus_steps": step_rows,
+            },
+            "review_state": {
+                "decision": str(state.get("review_decision", "") or "").strip(),
+                "reason": self._truncate(str(state.get("review_reason", "") or ""), 220),
+                "target_agent": str(state.get("review_target_agent", "") or "").strip(),
+                "corrected_keys": corrected_keys,
+            },
+            "multi_model": {
+                "enabled": bool(state.get("multi_model_enabled", False)),
+                "workflow_id": str(multi_model_plan.get("workflow_id", "") or "").strip(),
+                "strategy": str(multi_model_plan.get("strategy", "") or "").strip(),
+                "summary": self._truncate(str(multi_model_plan.get("summary", "") or ""), 240),
+            },
+            "available_agent_names": available_agent_names,
+            "candidate_agents": candidate_agents,
+            "blocked_agent_names": [str(item).strip() for item in list(state.get("_policy_blocked_agents") or []) if str(item).strip()][:12],
+            "setup_gaps": self._router_setup_gap_hints(state),
+            "setup_actions": self._router_setup_action_hints(state),
+            "context_hints": {
+                "setup_summary": self._router_text_hint(str(state.get("setup_summary", "") or ""), 360),
+                "file_memory_summary": self._router_text_hint(str(state.get("file_memory_context", "") or ""), 520),
+                "agent_history": self._router_text_hint(self._history_as_text(dict(state)), 720),
+                "chat_summary": self._router_text_hint(self._session_history_as_text(dict(state)), 960),
+                "a2a_recent": self._router_text_hint(self._recent_a2a_messages(dict(state)), 520),
+            },
+            "artifacts": {
+                "deep_research_confirmed": bool(state.get("deep_research_confirmed", False)),
+                "deep_research_result_kind": str(
+                    ((state.get("deep_research_result_card") or {}) if isinstance(state.get("deep_research_result_card"), dict) else {}).get("kind", "")
+                    or ""
+                ).strip(),
+                "run_output_dir": self._truncate(str(state.get("run_output_dir", "") or ""), 180),
+                "session_id": str(state.get("session_id", "") or "").strip(),
+            },
+            "counts": {
+                "available_agents": len(available_agent_names),
+                "blocked_agents": len(list(state.get("_policy_blocked_agents") or [])),
+                "setup_actions": len(list(state.get("setup_actions") or [])),
+                "setup_gaps": len(list((state.get("disabled_agents") or {}).keys())) if isinstance(state.get("disabled_agents"), dict) else 0,
+                "a2a_messages": len(a2a_messages) if isinstance(a2a_messages, list) else 0,
+                "agent_history": len(list(state.get("agent_history") or [])),
+                "session_turns": len(list(state.get("session_history") or [])),
+            },
+        }
+
+        budget_tokens = self._router_token_budget(state)
+        compacted = False
+        dropped_sections: list[str] = []
+
+        def estimated_tokens() -> int:
+            return self._estimate_token_count(toon)
+
+        def _drop_context_hint(key: str, label: str, truncate_to: int = 0) -> bool:
+            hints = toon.get("context_hints")
+            if not isinstance(hints, dict):
+                return False
+            value = str(hints.get(key) or "").strip()
+            if not value:
+                return False
+            if truncate_to > 0 and len(value) > truncate_to:
+                hints[key] = self._truncate(value, truncate_to)
+            else:
+                hints.pop(key, None)
+            dropped_sections.append(label)
+            return True
+
+        def _shrink_candidate_descriptions(limit_desc: int) -> bool:
+            rows = toon.get("candidate_agents")
+            if not isinstance(rows, list) or not rows:
+                return False
+            changed = False
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                desc = str(row.get("description") or "").strip()
+                if not desc:
+                    continue
+                shortened = self._truncate(desc, limit_desc)
+                if shortened != desc:
+                    row["description"] = shortened
+                    changed = True
+            if changed:
+                dropped_sections.append("candidate_agent_descriptions")
+            return changed
+
+        def _drop_candidate_descriptions() -> bool:
+            rows = toon.get("candidate_agents")
+            if not isinstance(rows, list) or not rows:
+                return False
+            changed = False
+            for row in rows:
+                if isinstance(row, dict) and row.pop("description", None) is not None:
+                    changed = True
+            if changed:
+                dropped_sections.append("candidate_agent_descriptions_removed")
+            return changed
+
+        def _limit_candidate_agents(max_items: int) -> bool:
+            rows = toon.get("candidate_agents")
+            if not isinstance(rows, list) or len(rows) <= max_items:
+                return False
+            toon["candidate_agents"] = rows[:max_items]
+            dropped_sections.append(f"candidate_agents_top_{max_items}")
+            return True
+
+        def _limit_focus_steps(max_items: int) -> bool:
+            plan_state = toon.get("plan_state")
+            if not isinstance(plan_state, dict):
+                return False
+            rows = plan_state.get("focus_steps")
+            if not isinstance(rows, list) or len(rows) <= max_items:
+                return False
+            plan_state["focus_steps"] = rows[:max_items]
+            dropped_sections.append(f"focus_steps_top_{max_items}")
+            return True
+
+        reducers = [
+            lambda: _drop_context_hint("file_memory_summary", "file_memory_summary", truncate_to=240),
+            lambda: _drop_context_hint("a2a_recent", "a2a_recent"),
+            lambda: _drop_context_hint("chat_summary", "chat_summary_trimmed", truncate_to=420),
+            lambda: _drop_context_hint("agent_history", "agent_history_trimmed", truncate_to=320),
+            lambda: _drop_context_hint("setup_summary", "setup_summary"),
+            lambda: _shrink_candidate_descriptions(96),
+            _drop_candidate_descriptions,
+            lambda: _limit_candidate_agents(5),
+            lambda: _limit_focus_steps(2),
+        ]
+
+        for reducer in reducers:
+            if estimated_tokens() <= budget_tokens:
+                break
+            if reducer():
+                compacted = True
+
+        toon["budget_gate"] = {
+            "token_budget": budget_tokens,
+            "estimated_tokens": estimated_tokens(),
+            "compacted": compacted,
+            "dropped_sections": dropped_sections,
+        }
+        return toon
+
     def _execution_surface_note(self, state: Mapping[str, Any]) -> str:
         raw = state.get("used_execution_surfaces") or []
         if not isinstance(raw, list):
@@ -1310,6 +1847,226 @@ class AgentRuntime:
         if workflow_type:
             state["workflow_type"] = workflow_type
         return workflow_type
+
+    def _infer_multi_model_workflow_id(self, state: Mapping[str, Any]) -> str:
+        workflow_type = str(state.get("workflow_type", "") or "").strip().lower()
+        if workflow_type in {"deep_research", "long_document"}:
+            return "deep_research_report"
+        if bool(state.get("deep_research_mode", False)) or bool(state.get("long_document_mode", False)):
+            return "deep_research_report"
+        local_paths = list(state.get("local_drive_paths") or [])
+        image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
+        if any(Path(str(item or "")).suffix.lower() in image_exts for item in local_paths):
+            return "ocr_ingestion"
+        if bool(local_paths) or bool(state.get("local_drive_files")) or bool(state.get("local_drive_document_summaries")):
+            return "document_qa"
+        return ""
+
+    def _prime_multi_model_plan(self, state: RuntimeState) -> None:
+        enabled = _truthy(state.get("multi_model_enabled"), False)
+        if not enabled:
+            state["multi_model_plan"] = {}
+            state["multi_model_active_workflow"] = ""
+            return
+        try:
+            from kendr.llm_router import all_provider_statuses
+
+            statuses = all_provider_statuses()
+            recommendations = build_workflow_recommendations(statuses, multi_model=True)
+        except Exception as exc:
+            state["multi_model_plan"] = {
+                "error": str(exc),
+                "enabled": True,
+            }
+            return
+        state["multi_model_recommendations"] = recommendations
+        workflow_id = self._infer_multi_model_workflow_id(state)
+        state["multi_model_active_workflow"] = workflow_id
+        strategy = str(state.get("multi_model_strategy", "best") or "best").strip().lower()
+        strategy = "cheapest" if strategy == "cheapest" else "best"
+        workflows = recommendations.get("workflows") if isinstance(recommendations.get("workflows"), list) else []
+        workflow = next((item for item in workflows if isinstance(item, dict) and item.get("id") == workflow_id), None)
+        if not isinstance(workflow, dict):
+            state["multi_model_plan"] = {
+                "enabled": True,
+                "workflow_id": workflow_id,
+                "strategy": strategy,
+                "available": False,
+                "reason": "no matching workflow template",
+            }
+            return
+        combo = workflow.get(strategy) if isinstance(workflow.get(strategy), dict) else {}
+        stage_models: dict[str, dict[str, Any]] = {}
+        for stage in combo.get("stages", []) if isinstance(combo.get("stages"), list) else []:
+            if not isinstance(stage, dict):
+                continue
+            stage_name = str(stage.get("stage") or "").strip()
+            provider = str(stage.get("provider") or "").strip().lower()
+            model = str(stage.get("model") or "").strip()
+            if stage_name and provider and model:
+                stage_models[stage_name] = {
+                    "provider": provider,
+                    "model": model,
+                    "reason": str(stage.get("reason") or "").strip(),
+                    "cost_band": str(stage.get("cost_band") or "").strip(),
+                    "source": "recommended",
+                }
+        stage_option_lookup: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
+        for stage_option in workflow.get("stage_options", []) if isinstance(workflow.get("stage_options"), list) else []:
+            if not isinstance(stage_option, dict):
+                continue
+            stage_name = str(stage_option.get("stage") or "").strip()
+            if not stage_name:
+                continue
+            option_rows: dict[tuple[str, str], dict[str, Any]] = {}
+            for candidate in stage_option.get("candidates", []) if isinstance(stage_option.get("candidates"), list) else []:
+                if not isinstance(candidate, dict):
+                    continue
+                provider = str(candidate.get("provider") or "").strip().lower()
+                model = str(candidate.get("model") or "").strip()
+                if provider and model:
+                    option_rows[(provider, model)] = candidate
+            if option_rows:
+                stage_option_lookup[stage_name] = option_rows
+        manual_stage_overrides = state.get("multi_model_stage_overrides", {})
+        applied_stage_overrides: dict[str, dict[str, Any]] = {}
+        if isinstance(manual_stage_overrides, dict):
+            for raw_stage_name, raw_override in manual_stage_overrides.items():
+                stage_name = str(raw_stage_name or "").strip()
+                if not stage_name:
+                    continue
+                provider = ""
+                model = ""
+                if isinstance(raw_override, dict):
+                    provider = str(raw_override.get("provider") or "").strip().lower()
+                    model = str(raw_override.get("model") or "").strip()
+                elif isinstance(raw_override, str):
+                    provider_name, _, model_name = str(raw_override).partition("/")
+                    provider = provider_name.strip().lower()
+                    model = model_name.strip()
+                if not provider or not model:
+                    continue
+                candidate = (stage_option_lookup.get(stage_name) or {}).get((provider, model))
+                if not isinstance(candidate, dict):
+                    continue
+                stage_models[stage_name] = {
+                    "provider": provider,
+                    "model": model,
+                    "reason": f"Manual selection. {str(candidate.get('reason') or '').strip()}".strip(),
+                    "cost_band": str(candidate.get("cost_band") or "").strip(),
+                    "source": "manual",
+                }
+                applied_stage_overrides[stage_name] = {
+                    "provider": provider,
+                    "model": model,
+                }
+        summary_parts: list[str] = []
+        for stage_name in workflow.get("stages", []) if isinstance(workflow.get("stages"), list) else []:
+            stage_key = str(stage_name or "").strip()
+            selected = stage_models.get(stage_key)
+            if not isinstance(selected, dict):
+                continue
+            provider = str(selected.get("provider") or "").strip()
+            model = str(selected.get("model") or "").strip()
+            if not provider or not model:
+                continue
+            stage_label = stage_key
+            for stage_row in combo.get("stages", []) if isinstance(combo.get("stages"), list) else []:
+                if isinstance(stage_row, dict) and str(stage_row.get("stage") or "").strip() == stage_key:
+                    stage_label = str(stage_row.get("label") or stage_key)
+                    break
+            summary_parts.append(f"{stage_label}: {provider}/{model}")
+            if len(summary_parts) >= 3:
+                break
+        state["multi_model_plan"] = {
+            "enabled": True,
+            "workflow_id": workflow_id,
+            "strategy": strategy,
+            "available": bool(combo.get("available", False)),
+            "mode_used": str(combo.get("mode_used") or "").strip(),
+            "summary": "; ".join(summary_parts) if summary_parts else str(combo.get("summary") or "").strip(),
+            "stage_models": stage_models,
+            "manual_stage_overrides": applied_stage_overrides,
+        }
+        # Only seed the research backend automatically when the user explicitly opted in to
+        # multi-model and did not already pin a research backend for the run.
+        if (
+            workflow_id == "deep_research_report"
+            and not str(state.get("research_model") or "").strip()
+            and not str(state.get("research_provider") or "").strip()
+        ):
+            evidence = stage_models.get("evidence") or {}
+            provider = str(evidence.get("provider") or "").strip().lower()
+            model = str(evidence.get("model") or "").strip()
+            if provider and model:
+                state["research_provider"] = provider
+                state["research_model"] = model
+                state["research_model_source"] = (
+                    "multi_model_manual_override"
+                    if str(evidence.get("source") or "").strip().lower() == "manual"
+                    else "multi_model_plan"
+                )
+
+    def _multi_model_stage_for_agent(self, agent_name: str, state: Mapping[str, Any]) -> str:
+        name = str(agent_name or "").strip()
+        if name in {"orchestrator_agent", "planner_agent"}:
+            return "router"
+        if name in {"ocr_agent", "image_agent"}:
+            return "ocr"
+        if name in {"reviewer_agent", "citation_agent", "claim_evidence_mapping_agent"}:
+            return "verify"
+        if name in {"document_ingestion_agent", "local_drive_agent"}:
+            return "extract"
+        if name in {"report_agent", "long_document_agent"}:
+            return "merge"
+        if name in {
+            "deep_research_agent",
+            "research_pipeline_agent",
+            "google_search_agent",
+            "literature_search_agent",
+            "patent_search_agent",
+            "company_research_agent",
+            "people_research_agent",
+            "news_monitor_agent",
+            "reddit_agent",
+            "web_crawl_agent",
+            "source_verification_agent",
+        }:
+            return "evidence"
+        return ""
+
+    def _multi_model_override_for_agent(self, state: RuntimeState, agent_name: str) -> dict[str, Any]:
+        if not _truthy(state.get("multi_model_enabled"), False):
+            return {}
+        plan = state.get("multi_model_plan", {})
+        if not isinstance(plan, dict) or not bool(plan.get("available", False)):
+            return {}
+        stage = self._multi_model_stage_for_agent(agent_name, state)
+        if not stage:
+            return {}
+        stage_models = plan.get("stage_models") if isinstance(plan.get("stage_models"), dict) else {}
+        selected = stage_models.get(stage) if isinstance(stage_models.get(stage), dict) else {}
+        provider = str(selected.get("provider") or "").strip().lower()
+        model = str(selected.get("model") or "").strip()
+        if not provider or not model:
+            return {}
+        if agent_name in {"ocr_agent", "image_agent"} and provider not in {
+            "openai",
+            "xai",
+            "minimax",
+            "qwen",
+            "glm",
+            "ollama",
+            "openrouter",
+            "custom",
+        }:
+            return {}
+        return {
+            "stage": stage,
+            "provider": provider,
+            "model": model,
+            "reason": str(selected.get("reason") or "").strip(),
+        }
 
     def _prime_deep_research_plan(self, state: RuntimeState, *, record_trace: bool = True) -> None:
         if not self._is_deep_research_workflow(dict(state)):
@@ -3441,18 +4198,37 @@ class AgentRuntime:
         return batch or [first_step]
 
     def _quality_gate_report(self, state: dict) -> tuple[bool, str]:
+        lines: list[str] = []
+        all_ok = True
+
+        failure_checkpoint = state.get("failure_checkpoint", {})
+        if isinstance(failure_checkpoint, dict) and failure_checkpoint:
+            failed_agent = str(failure_checkpoint.get("agent", "")).strip() or "unknown"
+            failed_error = str(
+                failure_checkpoint.get("error")
+                or state.get("last_error")
+                or ""
+            ).strip() or "unknown error"
+            lines.extend(
+                [
+                    "Unresolved failure checkpoint:",
+                    f"- agent: {failed_agent}",
+                    f"- error: {failed_error}",
+                ]
+            )
+            all_ok = False
+
         if not bool(state.get("project_build_mode", False)):
-            return True, ""
+            return all_ok, "\n".join(lines).strip()
         if not bool(state.get("enforce_quality_gate", True)):
-            return True, ""
+            return all_ok, "\n".join(lines).strip()
 
         checks = [
             ("tests", state.get("test_agent_status"), {"passed", "pass", "ok", "completed"}),
             ("security_scan", state.get("security_scan_status"), {"passed", "pass", "ok", "completed"}),
             ("verifier", state.get("verifier_status"), {"pass", "passed", "ok", "completed"}),
         ]
-        lines = ["Quality gate checks:"]
-        all_ok = True
+        lines.append("Quality gate checks:")
         for name, value, ok_values in checks:
             status = str(value or "missing").strip().lower() or "missing"
             ok = status in ok_values
@@ -3823,6 +4599,42 @@ class AgentRuntime:
         if self._kill_switch_triggered(state):
             raise RuntimeError("Kill switch triggered. Refusing further execution.")
         state = self.apply_runtime_setup(state)
+        requested_agent_name = str(agent_name or "").strip()
+        workflow_type = str(state.get("workflow_type", "") or "").strip().lower()
+        if (
+            requested_agent_name == "deep_research_agent"
+            and self._is_agent_available(state, "long_document_agent")
+            and (
+                workflow_type in {"deep_research", "long_document"}
+                or bool(state.get("deep_research_mode", False))
+                or bool(state.get("long_document_mode", False))
+                or bool(state.get("local_drive_force_long_document", False))
+            )
+        ):
+            agent_name = "long_document_agent"
+            active_task = state.get("active_task")
+            active_task_id = ""
+            if isinstance(active_task, dict) and str(active_task.get("recipient", "")).strip() == requested_agent_name:
+                active_task["recipient"] = agent_name
+                state["active_task"] = active_task
+                active_task_id = str(active_task.get("task_id", "") or "").strip()
+            ensure_a2a_state(state, state.get("available_agent_cards") or self._agent_cards())
+            for task in state.get("a2a", {}).get("tasks", []):
+                if not isinstance(task, dict):
+                    continue
+                if active_task_id and str(task.get("task_id", "")).strip() != active_task_id:
+                    continue
+                if str(task.get("recipient", "")).strip() == requested_agent_name and str(task.get("status", "pending")).strip() == "pending":
+                    task["recipient"] = agent_name
+                    break
+            if str(state.get("review_target_agent", "") or "").strip() == requested_agent_name:
+                state["review_target_agent"] = agent_name
+            if str(state.get("review_subject_agent", "") or "").strip() == requested_agent_name:
+                state["review_subject_agent"] = agent_name
+            log_task_update(
+                "System",
+                "Redirecting deep_research_agent to long_document_agent for the canonical deep research pipeline.",
+            )
         parallel_plan_step = bool(state.get("_parallel_plan_step", False))
         if not self._is_agent_available(state, agent_name):
             unavailable_reason = (
@@ -3837,11 +4649,12 @@ class AgentRuntime:
 
         spec = self.registry.agents[agent_name]
         log_task_update("System", f"Dispatching to {agent_name}.")
-        try:
-            from kendr.cli_output import step_start as _cli_step_start
-            _cli_step_start(agent_name)
-        except Exception:
-            pass
+        if not console_logging_suppressed():
+            try:
+                from kendr.cli_output import step_start as _cli_step_start
+                _cli_step_start(agent_name)
+            except Exception:
+                pass
         ensure_a2a_state(state, state.get("available_agent_cards") or self._agent_cards())
         active_task = task_for_agent(state, agent_name)
         if not active_task:
@@ -3914,8 +4727,25 @@ class AgentRuntime:
         except Exception:
             pass
         try:
+            multi_model_override = self._multi_model_override_for_agent(state, agent_name)
+            if multi_model_override:
+                state["multi_model_last_selection"] = {
+                    "agent": agent_name,
+                    **multi_model_override,
+                }
+            else:
+                state["multi_model_last_selection"] = {}
+            override_ctx = (
+                runtime_model_override(
+                    str(multi_model_override.get("provider") or "").strip().lower(),
+                    str(multi_model_override.get("model") or "").strip(),
+                )
+                if multi_model_override
+                else nullcontext()
+            )
             with agent_model_context(agent_name):
-                state = spec.handler(state)
+                with override_ctx:
+                    state = spec.handler(state)
             if _spinner_ctx is not None:
                 try:
                     _spinner_ctx.stop()
@@ -3925,6 +4755,13 @@ class AgentRuntime:
             _agent_elapsed = time.monotonic() - _agent_start_mono
             output_text = self._infer_agent_output(before_state, state)
             self._clear_agent_failures(state, agent_name)
+            failure_checkpoint = state.get("failure_checkpoint", {})
+            if isinstance(failure_checkpoint, dict):
+                failed_agent = str(failure_checkpoint.get("agent", "")).strip()
+                if failed_agent and failed_agent == str(agent_name).strip():
+                    state["failure_checkpoint"] = {}
+                    if str(state.get("last_error", "")).strip() == str(failure_checkpoint.get("error", "")).strip():
+                        state["last_error"] = ""
             # Clear stale deterministic-block markers once an agent completes successfully.
             if isinstance(state.get("deterministic_failure"), dict):
                 state.pop("deterministic_failure", None)
@@ -3963,11 +4800,12 @@ class AgentRuntime:
                     "intent": active_task.get("intent", ""),
                 },
             )
-            try:
-                from kendr.cli_output import step_done as _cli_step_done
-                _cli_step_done(agent_name, duration=_agent_elapsed)
-            except Exception:
-                pass
+            if not console_logging_suppressed():
+                try:
+                    from kendr.cli_output import step_done as _cli_step_done
+                    _cli_step_done(agent_name, duration=_agent_elapsed)
+                except Exception:
+                    pass
             if not parallel_plan_step:
                 append_daily_memory_note(state, agent_name, "completed", self._truncate(output_text, 1000))
                 append_session_event(state, agent_name, "completed", self._truncate(output_text, 600))
@@ -4030,11 +4868,12 @@ class AgentRuntime:
                     "intent": active_task.get("intent", ""),
                 },
             )
-            try:
-                from kendr.cli_output import step_error as _cli_step_error
-                _cli_step_error(agent_name, error_message)
-            except Exception:
-                pass
+            if not console_logging_suppressed():
+                try:
+                    from kendr.cli_output import step_error as _cli_step_error
+                    _cli_step_error(agent_name, error_message)
+                except Exception:
+                    pass
             if not parallel_plan_step:
                 append_daily_memory_note(state, agent_name, "failed", self._truncate(error_message, 1000))
                 append_session_event(state, agent_name, "failed", self._truncate(error_message, 600))
@@ -4198,19 +5037,19 @@ class AgentRuntime:
             if execution_mode == "direct_tools"
             else ""
         )
+        router_stage_toon = self._build_router_stage_toon(state, current_objective=str(current_objective or ""))
+        state["router_stage_toon"] = router_stage_toon
+        state["router_prompt_estimated_tokens"] = int(((router_stage_toon.get("budget_gate") or {}) if isinstance(router_stage_toon.get("budget_gate"), dict) else {}).get("estimated_tokens", 0) or 0)
 
         prompt = f"""
 You are the orchestration agent for a plugin-driven multi-agent AI system.
 
 Your job is to decide which agent should run next, or whether the workflow should finish.
-Choose from exactly these currently available agents:
-{json.dumps(self._available_agent_descriptions(state), indent=2)}
-
-Policy-gated agents for this turn (treat as unavailable):
-{json.dumps(state.get("_policy_blocked_agents", []), ensure_ascii=False)}
+Use the compact router stage context JSON below. It is intentionally budgeted and omits large raw state dumps.
+Prefer the listed candidate agents first. If none fit, choose another value from `available_agent_names`.
 
 Rules:
-- Only choose agents that appear in the available-agent list above.
+- Only choose `finish` or an agent that appears in `available_agent_names`.
 - Use the description of each agent as the source of truth for what it does.
 - If incoming_channel or incoming_payload is present and gateway_message has not been created yet, prefer channel_gateway_agent first.
 - If gateway_message exists but channel_session is missing, prefer session_router_agent before other work.
@@ -4222,61 +5061,15 @@ Rules:
 - If the reviewer already requested a retry, follow that instruction rather than inventing a different reroute.
 - Avoid repeating the same failing agent unless the inputs changed.
 - Put only useful state updates for the chosen agent in `state_updates`.
+- Missing raw details can be fetched later by the selected agent. Route from the compact context you have.
 {direct_tool_rule}
 
-Current user query:
-{state.get("user_query", "")}
-
-Current objective:
-{current_objective}
-
-Current plan:
-{state.get("plan", "") or "None"}
-
-Current draft response:
-{state.get("draft_response", "") or "None"}
-
-Current review decision:
-{state.get("review_decision", "") or "None"}
-
-Current review reason:
-{state.get("review_reason", "") or "None"}
-
-Reviewer recommended next agent:
-{state.get("review_target_agent", "") or "None"}
-
-Reviewer corrected values:
-{json.dumps(state.get("review_corrected_values", {}), ensure_ascii=False)}
-
-Current setup summary:
-{state.get("setup_summary", "")}
-
-{state.get("connector_catalog_prompt", "")}
-
-File memory context:
-{self._truncate(state.get("file_memory_context", "") or "None", 1800)}
-
-Disabled or unavailable agents:
-{json.dumps(state.get("disabled_agents", {}), indent=2, ensure_ascii=False)}
-
-Available setup actions:
-{json.dumps(state.get("setup_actions", []), indent=2, ensure_ascii=False)}
-
-A2A agent cards:
-{json.dumps(state["a2a"]["agent_cards"], indent=2)}
-
-A2A messages:
-{self._recent_a2a_messages(state)}
-
-Recent agent history:
-{self._history_as_text(state)}
-
-Recent user/assistant chat history:
-{self._session_history_as_text(state)}
+Router stage context (JSON):
+{json.dumps(router_stage_toon, indent=2, ensure_ascii=False)}
 
 Return ONLY valid JSON in this exact schema:
 {{
-  "agent": "{self._agent_enum(state, include_finish=True)}",
+  "agent": "agent name from available_agent_names or finish",
   "reason": "short reason",
   "state_updates": {{}},
   "task_content": "short task content for the chosen agent",
@@ -4290,8 +5083,18 @@ Return ONLY valid JSON in this exact schema:
         last_llm_exc = None
         for _attempt in range(_MAX_RETRIES + 1):
             try:
+                orchestrator_override = self._multi_model_override_for_agent(state, "orchestrator_agent")
+                override_ctx = (
+                    runtime_model_override(
+                        str(orchestrator_override.get("provider") or "").strip().lower(),
+                        str(orchestrator_override.get("model") or "").strip(),
+                    )
+                    if orchestrator_override
+                    else nullcontext()
+                )
                 with agent_model_context("orchestrator_agent"):
-                    response = llm.invoke(prompt)
+                    with override_ctx:
+                        response = llm.invoke(prompt)
                 raw_output = response.content.strip() if hasattr(response, "content") else str(response).strip()
                 last_llm_exc = None
                 break
@@ -4348,7 +5151,15 @@ Return ONLY valid JSON in this exact schema:
 
         if next_agent == "finish":
             state["next_agent"] = "__finish__"
-            state["final_output"] = decision.get("final_response") or state.get("draft_response") or state.get("last_agent_output") or "No final response was generated."
+            final_response = str(decision.get("final_response") or "").strip()
+            if final_response == "No final response was generated.":
+                final_response = ""
+            state["final_output"] = (
+                final_response
+                or state.get("draft_response")
+                or state.get("last_agent_output")
+                or "No final response was generated."
+            )
             state = append_message(state, make_message("orchestrator_agent", "user", "final", state["final_output"]))
         else:
             state["next_agent"] = next_agent
@@ -4703,10 +5514,17 @@ Return ONLY valid JSON in this exact schema:
             "deep_research_result_card": {},
             "deep_research_source_urls": [],
             "workflow_type": "",
+            "multi_model_enabled": _truthy(overrides.get("multi_model_enabled"), False),
+            "multi_model_strategy": str(overrides.get("multi_model_strategy", "best") or "best").strip().lower() or "best",
+            "multi_model_stage_overrides": {},
+            "multi_model_recommendations": {},
+            "multi_model_active_workflow": "",
+            "multi_model_plan": {},
             "research_output_formats": ["pdf", "docx", "html", "md"],
             "research_citation_style": "apa",
             "research_enable_plagiarism_check": True,
             "research_web_search_enabled": True,
+            "research_search_backend": "auto",
             "research_date_range": "all_time",
             "research_max_sources": 0,
             "research_checkpoint_enabled": False,
@@ -4944,6 +5762,7 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["research_citation_style"] = str(prior_channel_state.get("research_citation_style", initial_state.get("research_citation_style", "")) or initial_state.get("research_citation_style", ""))
                 initial_state["research_enable_plagiarism_check"] = bool(prior_channel_state.get("research_enable_plagiarism_check", initial_state.get("research_enable_plagiarism_check", True)))
                 initial_state["research_web_search_enabled"] = bool(prior_channel_state.get("research_web_search_enabled", initial_state.get("research_web_search_enabled", True)))
+                initial_state["research_search_backend"] = str(prior_channel_state.get("research_search_backend", initial_state.get("research_search_backend", "")) or initial_state.get("research_search_backend", ""))
                 initial_state["research_date_range"] = str(prior_channel_state.get("research_date_range", initial_state.get("research_date_range", "")) or initial_state.get("research_date_range", ""))
                 initial_state["research_max_sources"] = int(prior_channel_state.get("research_max_sources", 0) or 0)
                 initial_state["research_checkpoint_enabled"] = bool(prior_channel_state.get("research_checkpoint_enabled", False))
@@ -4951,6 +5770,20 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["research_kb_id"] = str(prior_channel_state.get("research_kb_id", initial_state.get("research_kb_id", "")) or initial_state.get("research_kb_id", ""))
                 initial_state["research_kb_top_k"] = int(prior_channel_state.get("research_kb_top_k", initial_state.get("research_kb_top_k", 8)) or initial_state.get("research_kb_top_k", 8))
                 initial_state["workflow_type"] = str(prior_channel_state.get("workflow_type", initial_state.get("workflow_type", "")) or initial_state.get("workflow_type", ""))
+                if "multi_model_enabled" not in overrides:
+                    initial_state["multi_model_enabled"] = bool(prior_channel_state.get("multi_model_enabled", initial_state.get("multi_model_enabled", False)))
+                if "multi_model_strategy" not in overrides:
+                    initial_state["multi_model_strategy"] = str(
+                        prior_channel_state.get("multi_model_strategy", initial_state.get("multi_model_strategy", "best"))
+                        or initial_state.get("multi_model_strategy", "best")
+                    ).strip().lower() or "best"
+                if "multi_model_stage_overrides" not in overrides:
+                    prior_stage_overrides = prior_channel_state.get("multi_model_stage_overrides", {})
+                    initial_state["multi_model_stage_overrides"] = (
+                        dict(prior_stage_overrides)
+                        if isinstance(prior_stage_overrides, dict)
+                        else {}
+                    )
                 if prior_channel_state.get("long_document_outline"):
                     initial_state["long_document_outline"] = prior_channel_state.get("long_document_outline", {})
                 if initial_state.get("plan_steps") and initial_state.get("plan_approval_status") == "approved" and not initial_state.get("plan_waiting_for_approval", False):
@@ -5090,6 +5923,9 @@ Return ONLY valid JSON in this exact schema:
             or bool(project_root)
         )
         self._ensure_workflow_type(initial_state)
+        if self._use_deep_research_capability_profile(initial_state):
+            initial_state = self._apply_deep_research_capability_profile(initial_state)
+        self._prime_multi_model_plan(initial_state)
         if do_scan:
             try:
                 scan_dir = project_root or str(initial_state.get("working_directory", "")).strip()
@@ -5257,7 +6093,7 @@ Return ONLY valid JSON in this exact schema:
         if self._kill_switch_triggered(initial_state):
             raise RuntimeError("Kill switch triggered. Remove kill-switch file to continue.")
         if not self._is_agent_available(initial_state, "worker_agent"):
-            raise RuntimeError("Core LLM setup is incomplete. OPENAI_API_KEY is required before the agent system can run.")
+            raise RuntimeError("Core LLM setup is incomplete. Configure at least one ready provider and model before the agent system can run.")
         initial_state = append_message(initial_state, make_message("user", "orchestrator_agent", "request", user_query))
         record_work_note(initial_state, "user", "request", user_query)
         append_daily_memory_note(initial_state, "user", "request", user_query)
@@ -5281,7 +6117,7 @@ Return ONLY valid JSON in this exact schema:
             final_output = self._with_execution_surface_note(final_output, result)
             result["final_output"] = final_output
             if create_outputs:
-                write_text_file("final_output.txt", final_output)
+                write_text_file(str(Path(run_output_dir) / "final_output.txt"), final_output)
             completed_at = datetime.now(timezone.utc).isoformat()
             final_status = "awaiting_user_input" if self._awaiting_user_input(result) else "completed"
             result = self._sync_orchestration_plan_record(result, final_status=final_status if final_status != "awaiting_user_input" else "")
