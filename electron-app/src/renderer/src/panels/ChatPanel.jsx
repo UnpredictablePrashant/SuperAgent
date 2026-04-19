@@ -922,9 +922,20 @@ function hasConcreteAwaitingRequest(request = null) {
 const ACTIVE_RUN_STATUSES = new Set(['running', 'started', 'cancelling'])
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled'])
 
-function runSnapshotResult(snapshot) {
+function runSnapshotState(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
-  return data.result && typeof data.result === 'object' ? data.result : {}
+  const directResult = data.result && typeof data.result === 'object' ? data.result : {}
+  const directState = data.state_snapshot && typeof data.state_snapshot === 'object' ? data.state_snapshot : {}
+  const resultState = directResult.state_snapshot && typeof directResult.state_snapshot === 'object' ? directResult.state_snapshot : {}
+  return {
+    ...directState,
+    ...resultState,
+    ...directResult,
+  }
+}
+
+function runSnapshotResult(snapshot) {
+  return runSnapshotState(snapshot)
 }
 
 function runSnapshotStatus(snapshot, fallbackStatus = '') {
@@ -1009,10 +1020,15 @@ function normalizeAwaitingRequest(request = null, prompt = '', scope = '', kind 
 
 function resolveRunSnapshotLogPath(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  const result = runSnapshotResult(data)
   const logPaths = data.log_paths && typeof data.log_paths === 'object' ? data.log_paths : {}
   const direct = String(logPaths.execution_log || '').trim()
   if (direct) return direct
-  const runDir = String(data.run_output_dir || data.output_dir || data.resume_output_dir || '').trim()
+  const runDir = String(
+    data.run_output_dir || data.output_dir || data.resume_output_dir
+    || result.run_output_dir || result.output_dir || result.resume_output_dir
+    || '',
+  ).trim()
   if (!runDir) return ''
   const normalized = runDir.replace(/[\\/]+$/, '')
   const separator = normalized.includes('\\') ? '\\' : '/'
@@ -1021,7 +1037,7 @@ function resolveRunSnapshotLogPath(snapshot) {
 
 function runSnapshotOutputText(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
-  const result = data.result && typeof data.result === 'object' ? data.result : {}
+  const result = runSnapshotResult(data)
   return String(
     result.final_output || result.output || result.draft_response || result.response
     || data.final_output || data.output || data.response || '',
@@ -1134,32 +1150,67 @@ const REPORT_ARTIFACT_NAMES = new Set([
   'deep_research_report.docx',
 ])
 
+function isReportArtifactItem(item) {
+  const safe = item && typeof item === 'object' ? item : {}
+  const name = String(safe.name || safe.label || safe.path || '').trim().toLowerCase()
+  if (!name) return false
+  const base = basename(name).toLowerCase()
+  if (REPORT_ARTIFACT_NAMES.has(base)) return true
+  const ext = String(safe.ext || '').trim().toLowerCase()
+  return !!ext && ['md', 'html', 'pdf', 'docx'].includes(ext) && (base.startsWith('report.') || base.startsWith('deep_research_report.'))
+}
+
 function hasReportArtifacts(items) {
   if (!Array.isArray(items) || !items.length) return false
-  return items.some((item) => {
-    const safe = item && typeof item === 'object' ? item : {}
-    const name = String(safe.name || safe.label || safe.path || '').trim().toLowerCase()
-    if (!name) return false
-    const base = basename(name).toLowerCase()
-    if (REPORT_ARTIFACT_NAMES.has(base)) return true
-    const ext = String(safe.ext || '').trim().toLowerCase()
-    return !!ext && ['md', 'html', 'pdf', 'docx'].includes(ext) && (base.startsWith('report.') || base.startsWith('deep_research_report.'))
-  })
+  return items.some((item) => isReportArtifactItem(item))
+}
+
+function stripReportArtifacts(items) {
+  if (!Array.isArray(items) || !items.length) return []
+  return items.filter((item) => !isReportArtifactItem(item))
+}
+
+function snapshotOwnsReportArtifacts(snapshot) {
+  const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  const result = runSnapshotResult(data)
+  const card = (result.deep_research_result_card && typeof result.deep_research_result_card === 'object')
+    ? result.deep_research_result_card
+    : ((data.deep_research_result_card && typeof data.deep_research_result_card === 'object') ? data.deep_research_result_card : {})
+  const kind = String(card.kind || '').trim().toLowerCase()
+  if (kind === 'result') return true
+  for (const key of [
+    'long_document_compiled_path',
+    'long_document_compiled_html_path',
+    'long_document_compiled_pdf_path',
+    'long_document_compiled_docx_path',
+  ]) {
+    if (String(result[key] || data[key] || '').trim()) return true
+  }
+  const manifest = (result.deep_research_artifacts_manifest && typeof result.deep_research_artifacts_manifest === 'object')
+    ? result.deep_research_artifacts_manifest
+    : ((data.deep_research_artifacts_manifest && typeof data.deep_research_artifacts_manifest === 'object') ? data.deep_research_artifacts_manifest : {})
+  const createdArtifacts = Array.isArray(manifest.created_artifacts) ? manifest.created_artifacts : []
+  return createdArtifacts.some((item) => isReportArtifactItem(item))
 }
 
 function runSnapshotChecklist(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
-  const result = data.result && typeof data.result === 'object' ? data.result : {}
+  const result = runSnapshotResult(data)
   return extractChecklist(Object.keys(result).length ? result : data)
 }
 
 function runSnapshotMessageMeta(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  const result = runSnapshotResult(data)
   const status = runSnapshotStatus(data)
   const logPath = resolveRunSnapshotLogPath(data)
   return {
     runStartedAt: data.started_at || data.created_at || '',
-    runOutputDir: String(data.run_output_dir || data.output_dir || data.resume_output_dir || '').trim(),
+    runOutputDir: String(
+      data.run_output_dir || data.output_dir || data.resume_output_dir
+      || result.run_output_dir || result.output_dir || result.resume_output_dir
+      || '',
+    ).trim(),
     executionLogPath: logPath,
     lastKnownRunStatus: status,
     lastError: runSnapshotErrorText(data, String(data.run_id || '').trim(), status),
@@ -1313,6 +1364,18 @@ function buildRunningMessagePatch(snapshot, fallback = {}) {
   })
 }
 
+function snapshotArtifactsOrFallback(snapshot, fallback = {}) {
+  const artifacts = runSnapshotArtifacts(snapshot)
+  if (artifacts.length > 0) return artifacts
+  return Array.isArray(fallback?.artifacts) ? fallback.artifacts : []
+}
+
+function snapshotChecklistOrFallback(snapshot, fallback = {}) {
+  const checklist = runSnapshotChecklist(snapshot)
+  if (checklist.length > 0) return checklist
+  return Array.isArray(fallback?.checklist) ? fallback.checklist : []
+}
+
 function buildCompletedMessagePatch(snapshot, fallback = {}) {
   const fallbackWasAwaiting = String(fallback?.status || '').trim().toLowerCase() === 'awaiting'
   return clearAwaitingMessageFields({
@@ -1320,8 +1383,8 @@ function buildCompletedMessagePatch(snapshot, fallback = {}) {
     content: runSnapshotOutputText(snapshot) || (fallbackWasAwaiting ? '' : String(fallback?.content || '').trim()),
     status: 'done',
     statusText: '',
-    artifacts: runSnapshotArtifacts(snapshot),
-    checklist: runSnapshotChecklist(snapshot),
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback),
   })
 }
 
@@ -1331,8 +1394,8 @@ function buildFailedMessagePatch(snapshot, runId, fallbackStatus = '', fallback 
     content: runSnapshotErrorText(snapshot, runId, fallbackStatus) || invalidAwaitingMessage(snapshot, runId, fallback),
     status: 'error',
     statusText: '',
-    artifacts: runSnapshotArtifacts(snapshot),
-    checklist: runSnapshotChecklist(snapshot),
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback),
   })
 }
 
@@ -1342,8 +1405,8 @@ function buildInvalidAwaitingErrorPatch(snapshot, runId, fallback = {}) {
     content: invalidAwaitingMessage(snapshot, runId, fallback),
     status: 'error',
     statusText: '',
-    artifacts: runSnapshotArtifacts(snapshot),
-    checklist: runSnapshotChecklist(snapshot),
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback),
   })
 }
 
@@ -1351,8 +1414,8 @@ function buildInvalidAwaitingRunningPatch(snapshot, fallback = {}, statusText = 
   return {
     ...buildRunningMessagePatch(snapshot, fallback),
     statusText,
-    artifacts: runSnapshotArtifacts(snapshot),
-    checklist: runSnapshotChecklist(snapshot),
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback),
   }
 }
 
@@ -1845,7 +1908,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
           if (cancelled) return
           if (resp.ok) recoveredArtifacts = runSnapshotArtifacts(runSnapshot)
 
-          if (!recoveredArtifacts.length) {
+          if (!recoveredArtifacts.length && snapshotOwnsReportArtifacts(runSnapshot)) {
             const artifactResp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}/artifacts`)
             const artifactData = await artifactResp.json().catch(() => ({}))
             if (cancelled) return
@@ -2285,8 +2348,11 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     const userMsgId = `u-${runId}`
     const currentAwaitingContext = chat.awaitingContext || null
     const resumeMessageId = String(currentAwaitingContext?.messageId || '').trim()
+    const resumeMessage = resumeMessageId
+      ? (chat.messages || []).find((item) => item?.id === resumeMessageId) || null
+      : null
     const preserveAwaitingBubble = isResume && resumeMessageId && shouldInlineAwaitingContext(currentAwaitingContext)
-    const asstMsgId = isResume && resumeMessageId && !preserveAwaitingBubble ? resumeMessageId : `a-${runId}`
+    const asstMsgId = `a-${runId}`
 
     const currentMode = chat.mode
     const currentModeLabel = modeLabel(currentMode)
@@ -2309,7 +2375,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     dispatch({ type: 'CLEAR_AWAITING' })
     setAttachments([])
 
-    if (preserveAwaitingBubble && resumeMessageId) {
+    if (isResume && resumeMessageId) {
       const normalizedReply = msg.toLowerCase()
       const approvalState = normalizedReply === 'approve'
         ? 'approved'
@@ -2322,55 +2388,35 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
         patch: {
           status: 'done',
           approvalState,
+          artifacts: stripReportArtifacts(resumeMessage?.artifacts),
         },
       })
     }
 
-    if (isResume && resumeMessageId && !preserveAwaitingBubble) {
-      dispatch({
-        type: 'UPD_MSG',
+    dispatch({
+      type: 'ADD_MSG',
+      msg: {
         id: asstMsgId,
-        patch: {
-          content: '',
-          status: 'thinking',
-          runId: isSimpleStudioChat ? null : runId,
-          runStartedAt: new Date().toISOString(),
-          logs: [],
-          mode: currentMode,
-          modeLabel: currentModeLabel,
-          statusText: 'Continuing approved plan...',
-          approvalScope: '',
-          approvalKind: '',
-          approvalRequest: null,
-          awaitingDecision: '',
-          approvalState: '',
-        },
-      })
-    } else {
-      dispatch({
-        type: 'ADD_MSG',
-        msg: {
-          id: asstMsgId,
-          role: 'assistant',
-          content: '',
-          steps: [],
-          progress: [],
-          logs: [],
-          checklist: [],
-          status: 'thinking',
-          runId: isSimpleStudioChat ? null : runId,
-          runStartedAt: new Date().toISOString(),
-          mode: currentMode,
-          modeLabel: currentModeLabel,
-          approvalScope: '',
-          approvalKind: '',
-          approvalRequest: null,
-          awaitingDecision: '',
-          approvalState: '',
-          ts: new Date(),
-        }
-      })
-    }
+        role: 'assistant',
+        content: '',
+        steps: [],
+        progress: [],
+        logs: [],
+        checklist: [],
+        status: 'thinking',
+        runId: isSimpleStudioChat ? null : runId,
+        runStartedAt: new Date().toISOString(),
+        mode: currentMode,
+        modeLabel: currentModeLabel,
+        statusText: isResume ? 'Continuing approved plan...' : '',
+        approvalScope: '',
+        approvalKind: '',
+        approvalRequest: null,
+        awaitingDecision: '',
+        approvalState: '',
+        ts: new Date(),
+      }
+    })
 
     appDispatch({ type: 'SET_STREAMING', streaming: true })
 

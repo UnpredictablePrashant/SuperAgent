@@ -4,6 +4,7 @@ import os
 import re
 import textwrap
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 
 
@@ -273,25 +274,44 @@ def preprocess_markdown(md_text: str, asset_dir: Path) -> str:
     return replace_mermaid_blocks(md_text, asset_dir)
 
 
-def link_callback(uri, rel):
-    """
-    Resolve local image/file paths for xhtml2pdf.
-    """
-    path = Path(uri)
+def _resolve_local_resource(uri: str, *, base_path: str | Path | None = None, rel: str | None = None) -> str:
+    if not uri:
+        return uri
 
+    parsed = urlparse(uri)
+    if parsed.scheme in {"http", "https", "data", "mailto"}:
+        return uri
+    if parsed.scheme == "file":
+        file_path = Path(unquote(parsed.path))
+        return str(file_path) if file_path.exists() else uri
+
+    path = Path(uri)
     if path.is_absolute() and path.exists():
         return str(path)
 
+    roots = []
+    if base_path:
+        roots.append(Path(base_path))
     if rel:
-        rel_path = Path(rel) / uri
-        if rel_path.exists():
-            return str(rel_path.resolve())
+        roots.append(Path(rel))
+    roots.append(Path.cwd())
 
-    cwd_path = Path.cwd() / uri
-    if cwd_path.exists():
-        return str(cwd_path.resolve())
+    for root in roots:
+        try:
+            candidate = (root / uri).resolve()
+        except Exception:
+            continue
+        if candidate.exists():
+            return str(candidate)
 
     return uri
+
+
+def link_callback(uri, rel, *, base_path: str | Path | None = None):
+    """
+    Resolve local image/file paths for xhtml2pdf.
+    """
+    return _resolve_local_resource(uri, base_path=base_path, rel=rel)
 
 
 def _report_stylesheet(*, for_pdf: bool) -> str:
@@ -473,10 +493,92 @@ def _report_stylesheet(*, for_pdf: bool) -> str:
                 border-top: 1px solid #cbd5e1;
                 margin: 22px 0;
             }}
+
+            .report-footer {{
+                margin-top: 34px;
+                padding-top: 16px;
+                border-top: 1px solid #d7e1eb;
+                page-break-inside: avoid;
+                text-align: center;
+            }}
+
+            .brand-lockup {{
+                display: inline-flex;
+                align-items: center;
+                gap: 10px;
+                color: #0f172a;
+                font-family: "Georgia", "Times New Roman", serif;
+                font-weight: 700;
+                letter-spacing: 0.02em;
+            }}
+
+            .brand-mark {{
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 28px;
+                height: 28px;
+                border-radius: 9px;
+                background: linear-gradient(135deg, #0f766e 0%, #134e4a 100%);
+                color: #f8fafc;
+                font-size: 12pt;
+                line-height: 1;
+                box-shadow: 0 8px 18px rgba(15, 118, 110, 0.16);
+            }}
+
+            .brand-name {{
+                font-size: 11pt;
+                color: #0f172a;
+            }}
     """
 
 
-def build_html_from_markdown(md_text: str, *, for_pdf: bool = False) -> str:
+def _inject_named_anchors(html_body: str) -> str:
+    def _replace(match):
+        tag_name = match.group(1)
+        attrs = match.group(2) or ""
+        if re.search(r'\bname\s*=', attrs):
+            return match.group(0)
+        id_match = re.search(r'\bid\s*=\s*"([^"]+)"', attrs)
+        if not id_match:
+            return match.group(0)
+        anchor = id_match.group(1)
+        return f'<a name="{anchor}"></a><{tag_name}{attrs}>'
+
+    return re.sub(r"<(h[1-6])([^>]*)>", _replace, html_body)
+
+
+def _absolutize_local_media_paths(html_body: str, *, base_path: str | Path | None = None) -> str:
+    if not base_path:
+        return html_body
+
+    def _replace(match):
+        attr = match.group(1)
+        quote = match.group(2)
+        value = match.group(3)
+        resolved = _resolve_local_resource(value, base_path=base_path)
+        return f'{attr}={quote}{resolved}{quote}'
+
+    return re.sub(r'(src)\s*=\s*(["\'])([^"\']+)\2', _replace, html_body)
+
+
+def _report_footer_html() -> str:
+    return """
+            <footer class="report-footer" aria-label="Kendr footer">
+                <div class="brand-lockup">
+                    <span class="brand-mark">K</span>
+                    <span class="brand-name">Kendr</span>
+                </div>
+            </footer>
+    """
+
+
+def build_html_from_markdown(
+    md_text: str,
+    *,
+    for_pdf: bool = False,
+    base_path: str | Path | None = None,
+) -> str:
     import markdown
     html_body = markdown.markdown(
         md_text,
@@ -490,6 +592,8 @@ def build_html_from_markdown(md_text: str, *, for_pdf: bool = False) -> str:
             "attr_list",
         ]
     )
+    html_body = _inject_named_anchors(html_body)
+    html_body = _absolutize_local_media_paths(html_body, base_path=base_path)
 
     return f"""
     <html>
@@ -502,6 +606,7 @@ def build_html_from_markdown(md_text: str, *, for_pdf: bool = False) -> str:
     <body>
         <main class="report-shell">
             {html_body}
+            {_report_footer_html()}
         </main>
     </body>
     </html>
@@ -522,14 +627,14 @@ def md_to_pdf(md_file: str, pdf_file: str) -> None:
     md_text = md_path.read_text(encoding="utf-8")
 
     processed_md = preprocess_markdown(md_text, asset_dir)
-    html_output = build_html_from_markdown(processed_md, for_pdf=True)
+    html_output = build_html_from_markdown(processed_md, for_pdf=True, base_path=md_path.parent)
 
     from xhtml2pdf import pisa
     with open(pdf_file, "wb") as pdf:
         result = pisa.CreatePDF(
             src=html_output,
             dest=pdf,
-            link_callback=link_callback
+            link_callback=lambda uri, rel: link_callback(uri, rel, base_path=md_path.parent),
         )
 
     if result.err:

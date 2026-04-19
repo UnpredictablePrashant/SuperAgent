@@ -158,6 +158,7 @@ class ResearchInfraTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"SERP_API_KEY": "", "KENDR_BROWSER_USE_SEARCH_ENABLED": "0"}, clear=False),
             patch("tasks.research_infra._browser_use_server_enabled", return_value=False),
+            patch("tasks.research_infra.duckduckgo_ddgs_search", side_effect=RuntimeError("ddgs unavailable")),
             patch(
                 "tasks.research_infra.duckduckgo_html_search",
                 return_value={
@@ -171,6 +172,7 @@ class ResearchInfraTests(unittest.TestCase):
         ):
             result = fetch_search_results("ordered query", num=2, fetch_pages=2)
 
+        self.assertEqual(result["provider"], "duckduckgo_html")
         self.assertEqual(
             [item["url"] for item in result["viewed_pages"]],
             ["https://example.com/a", "https://example.com/b"],

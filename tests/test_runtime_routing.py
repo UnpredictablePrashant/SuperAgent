@@ -307,6 +307,123 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertIn("find ", str(updates.get("os_command", "")))
         self.assertFalse(bool(routed_state.get("research_pipeline_enabled", False)))
 
+    def test_report_file_lookup_routes_to_os_agent_using_prior_report_context(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("kendr.connector_registry.build_connector_catalog", return_value=[]),
+            patch("kendr.connector_registry.connector_catalog_prompt_block", return_value=""),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            with TemporaryDirectory() as tmpdir:
+                project_root = Path(tmpdir) / "project"
+                report_root = Path(tmpdir) / "runs" / "run-report-1"
+                pdf_path = report_root / "reports" / "deep_research_report.pdf"
+                project_root.mkdir(parents=True, exist_ok=True)
+                pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                pdf_path.write_bytes(b"%PDF-1.4")
+
+                state = runtime.build_initial_state(
+                    "Where is my report file?",
+                    incoming_channel="project_ui",
+                    project_root=str(project_root),
+                    working_directory=str(project_root),
+                    channel_session={
+                        "state": {
+                            "last_status": "completed",
+                            "last_run_id": "run-report-1",
+                            "last_workflow_id": "workflow-report-1",
+                            "last_report_run_id": "run-report-1",
+                            "last_report_workflow_id": "workflow-report-1",
+                            "last_report_run_output_dir": str(report_root),
+                            "deep_research_result_card": {
+                                "kind": "result",
+                                "pdf_path": "reports/deep_research_report.pdf",
+                            },
+                            "artifact_files": [
+                                {
+                                    "name": "deep_research_report.pdf",
+                                    "path": str(pdf_path),
+                                    "kind": "report",
+                                }
+                            ],
+                            "long_document_compiled_pdf_path": str(pdf_path),
+                        }
+                    },
+                )
+
+                self.assertFalse(state["deep_research_mode"])
+                self.assertEqual(state["artifact_lookup_run_id"], "run-report-1")
+
+                with patch("kendr.runtime.llm.invoke") as mock_invoke:
+                    routed_state = runtime.orchestrator_agent(state)
+
+        self.assertEqual(routed_state["next_agent"], "os_agent")
+        self.assertIn("local command execution workflow", routed_state["orchestrator_reason"].lower())
+        self.assertFalse(mock_invoke.called, "Report file lookup should bypass the generic orchestrator LLM.")
+        task = routed_state["a2a"]["tasks"][-1]
+        self.assertEqual(task["recipient"], "os_agent")
+        updates = task.get("state_updates", {})
+        self.assertEqual(updates.get("artifact_lookup_run_id"), "run-report-1")
+        self.assertIn("os_command", updates)
+        self.assertIn(str(pdf_path), str(updates.get("os_command", "")))
+
+    def test_write_channel_session_progress_persists_last_report_context(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("kendr.connector_registry.build_connector_catalog", return_value=[]),
+            patch("kendr.connector_registry.connector_catalog_prompt_block", return_value=""),
+        ):
+            runtime = AgentRuntime(build_registry())
+            with TemporaryDirectory() as tmpdir:
+                project_root = Path(tmpdir) / "project"
+                report_root = Path(tmpdir) / "runs" / "run-report-1"
+                pdf_path = report_root / "reports" / "deep_research_report.pdf"
+                project_root.mkdir(parents=True, exist_ok=True)
+                pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                pdf_path.write_bytes(b"%PDF-1.4")
+
+                state = runtime.build_initial_state(
+                    "Deep research on supply chain risks.",
+                    run_id="run-report-1",
+                    workflow_id="workflow-report-1",
+                    attempt_id="run-report-1",
+                    run_output_dir=str(report_root),
+                    incoming_channel="project_ui",
+                    incoming_chat_id="proj-1",
+                    incoming_sender_id="ui-user",
+                    incoming_workspace_id="proj-1",
+                    project_root=str(project_root),
+                    working_directory=str(project_root),
+                )
+                state["deep_research_result_card"] = {
+                    "kind": "result",
+                    "pdf_path": "reports/deep_research_report.pdf",
+                }
+                state["long_document_compiled_pdf_path"] = str(pdf_path)
+                state["final_output"] = "Report complete."
+
+                with (
+                    patch("kendr.runtime.get_channel_session", return_value={"state": {}}),
+                    patch("kendr.runtime.upsert_channel_session") as mock_upsert,
+                ):
+                    runtime._write_channel_session_progress(
+                        state,
+                        status="completed",
+                        active_agent="long_document_agent",
+                        completed_at="2026-04-19T00:00:00+00:00",
+                    )
+
+        saved_state = mock_upsert.call_args.args[1]["state"]
+        self.assertEqual(saved_state["last_report_run_id"], "run-report-1")
+        self.assertEqual(saved_state["last_report_workflow_id"], "workflow-report-1")
+        self.assertEqual(saved_state["last_report_run_output_dir"], str(report_root))
+        self.assertEqual(saved_state["deep_research_result_card"]["kind"], "result")
+        self.assertEqual(saved_state["long_document_compiled_pdf_path"], str(pdf_path))
+
     def test_direct_tool_mode_finishes_via_direct_tool_runtime(self):
         with (
             patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
@@ -661,11 +778,11 @@ class RuntimeRoutingTests(unittest.TestCase):
                 routed_state = runtime.orchestrator_agent(state)
 
         self.assertEqual(routed_state["next_agent"], "long_document_agent")
-        self.assertIn("deep research report objective", routed_state["orchestrator_reason"].lower())
+        self.assertIn("deep research", routed_state["orchestrator_reason"].lower())
         self.assertFalse(mock_invoke.called)
         task = routed_state["a2a"]["tasks"][-1]
         self.assertEqual(task["recipient"], "long_document_agent")
-        self.assertEqual(task["intent"], "long-document-dispatch")
+        self.assertEqual(task["intent"], "deep-research-dispatch")
         self.assertEqual(routed_state["workflow_type"], "deep_research")
 
     def test_deep_research_blocks_coding_and_blueprint_agents(self):

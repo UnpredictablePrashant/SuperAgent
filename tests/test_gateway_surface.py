@@ -326,6 +326,27 @@ class GatewaySurfaceSmokeTests(unittest.TestCase):
         self.assertEqual(audit_payload["count"], 1)
         self.assertEqual(audit_payload["items"][0]["action"], "capability.health")
 
+    def test_capability_health_and_audit_limit_clamp_allows_up_to_ten_thousand(self):
+        with (
+            patch.object(gateway.CAPABILITY_REGISTRY, "list_health_runs", return_value=[]) as mock_health,
+            patch.object(gateway.CAPABILITY_REGISTRY, "list_audit_events", return_value=[]) as mock_audit,
+        ):
+            with urllib.request.urlopen(
+                f"{self.base_url}/registry/capabilities/cap-1/health?workspace_id=default&limit=20000",
+                timeout=5,
+            ) as response:
+                health_payload = json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(
+                f"{self.base_url}/registry/capabilities/cap-1/audit?workspace_id=default&limit=20000",
+                timeout=5,
+            ) as response:
+                audit_payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(health_payload["count"], 0)
+        self.assertEqual(audit_payload["count"], 0)
+        self.assertEqual(mock_health.call_args.kwargs["limit"], 10_000)
+        self.assertEqual(mock_audit.call_args.kwargs["limit"], 10_000)
+
     def test_capability_health_check_endpoint(self):
         health_req = urllib.request.Request(
             f"{self.base_url}/registry/capabilities/cap-skill-1/health-check",

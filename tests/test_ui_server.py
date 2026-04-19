@@ -437,6 +437,13 @@ class TestChatHtmlExecutionLens(unittest.TestCase):
         self.assertIn("button.textContent = isStopping ? 'Wait...' : 'Stop';", ui_server._CHAT_HTML)
         self.assertIn("mainChatAttachBtn", ui_server._CHAT_HTML)
 
+    def test_chat_html_routes_file_locator_requests_through_runtime(self):
+        import kendr.ui_server as ui_server
+
+        self.assertIn("function _looksLikeFileLocatorRequest(text)", ui_server._CHAT_HTML)
+        self.assertIn("if (_looksLikeFileLocatorRequest(lower)) return null;", ui_server._CHAT_HTML)
+        self.assertIn("if (_looksLikeFileLocatorRequest(body)) return 'execute';", ui_server._PROJECTS_HTML)
+
     def test_chat_html_includes_smart_research_timeline_hooks(self):
         import kendr.ui_server as ui_server
 
@@ -2274,6 +2281,23 @@ class TestDeepResearchArtifactResolution(unittest.TestCase):
         self.assertEqual(doc_files[0]["name"], "report.pdf")
         self.assertEqual(doc_files[0]["path"], str(report_pdf))
         self.assertEqual(exports, [{"ext": "pdf", "label": "report.pdf", "name": "report.pdf"}])
+
+    def test_collect_artifacts_prefers_root_report_mirror_over_nested_copy(self):
+        import kendr.ui_server as ui_server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            root_report = run_dir / "reports" / "report.pdf"
+            nested_report = run_dir / "deep_research_runs" / "deep_research_run_1" / "report.pdf"
+            root_report.parent.mkdir(parents=True, exist_ok=True)
+            nested_report.parent.mkdir(parents=True, exist_ok=True)
+            root_report.write_bytes(b"%PDF-root")
+            nested_report.write_bytes(b"%PDF-nested")
+
+            _, file_list = ui_server._collect_artifacts("run-root-preferred", str(run_dir))
+
+        report_entry = next(item for item in file_list if item["name"] == "report.pdf")
+        self.assertEqual(report_entry["path"], str(root_report))
 
 
 class TestUICapabilitiesSurface(unittest.TestCase):

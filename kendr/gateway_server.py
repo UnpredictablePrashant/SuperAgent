@@ -58,6 +58,7 @@ RUNTIME = AgentRuntime(REGISTRY)
 CAPABILITY_REGISTRY = CapabilityRegistryService()
 # NOTE: Always use RUNTIME.agent_routing (not a cached reference) so refreshes
 # via _rebuild_skill_registry() / _refresh_mcp_agents() are reflected.
+MAX_REGISTRY_QUERY_LIMIT = 10_000
 
 
 def _rebuild_skill_registry() -> None:
@@ -320,7 +321,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             items = CAPABILITY_REGISTRY.list_auth_profiles(
                 workspace_id=workspace_id,
                 provider=provider,
-                limit=max(1, min(limit, 1000)),
+                limit=max(1, min(limit, MAX_REGISTRY_QUERY_LIMIT)),
             )
             self._send_json(200, {"workspace_id": workspace_id, "count": len(items), "items": items})
             return
@@ -330,7 +331,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             limit = int(str((params.get("limit") or ["200"])[0] or "200"))
             items = CAPABILITY_REGISTRY.list_policy_profiles(
                 workspace_id=workspace_id,
-                limit=max(1, min(limit, 1000)),
+                limit=max(1, min(limit, MAX_REGISTRY_QUERY_LIMIT)),
             )
             self._send_json(200, {"workspace_id": workspace_id, "count": len(items), "items": items})
             return
@@ -348,7 +349,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 status=status,
                 visibility=visibility,
                 search=search,
-                limit=max(1, min(limit, 5000)),
+                limit=max(1, min(limit, MAX_REGISTRY_QUERY_LIMIT)),
             )
             self._send_json(200, {"workspace_id": workspace_id, "count": len(items), "items": items})
             return
@@ -367,7 +368,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 runs = CAPABILITY_REGISTRY.list_health_runs(
                     workspace_id=workspace_id,
                     capability_id=capability_id,
-                    limit=max(1, min(limit, 1000)),
+                    limit=max(1, min(limit, MAX_REGISTRY_QUERY_LIMIT)),
                 )
                 self._send_json(200, {"workspace_id": workspace_id, "capability_id": capability_id, "count": len(runs), "items": runs})
                 return
@@ -377,7 +378,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     workspace_id=workspace_id,
                     capability_id=capability_id,
                     action=str((params.get("action") or [""])[0] or "").strip(),
-                    limit=max(1, min(limit, 2000)),
+                    limit=max(1, min(limit, MAX_REGISTRY_QUERY_LIMIT)),
                 )
                 self._send_json(200, {"workspace_id": workspace_id, "capability_id": capability_id, "count": len(events), "items": events})
                 return

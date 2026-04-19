@@ -12,7 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 import textwrap
 
 from openai import OpenAI
@@ -38,7 +38,9 @@ from tasks.research_infra import (
     llm_json,
     llm_text,
     normalize_research_search_backend,
+    openai_analyze_image,
     parse_documents,
+    strip_code_fences,
 )
 from tasks.research_output import render_artifact_lines
 from tasks.utils import OUTPUT_DIR, log_task_update, model_selection_for_agent, write_text_file, resolve_output_path
@@ -282,6 +284,59 @@ def _normalize_title(value: str, fallback: str) -> str:
     if title:
         return title
     return fallback
+
+
+def _objective_title_fallback(objective: str) -> str:
+    value = re.sub(r"\s+", " ", str(objective or "").strip())
+    if not value:
+        return "Deep Research Report"
+
+    patterns = [
+        r"^(?:create|draft|write|produce|generate|prepare|build)\s+(?:a|an|the)?\s*(?:deep\s+research\s+)?(?:report|study|analysis|brief|dossier|document)\s+(?:on|about|for)\s+",
+        r"^(?:what\s+is|explain|analyze|analyse|investigate|research|summarize|summarise)\s+",
+    ]
+    for pattern in patterns:
+        value = re.sub(pattern, "", value, flags=re.IGNORECASE).strip()
+
+    value = value.rstrip("?.! ")
+    if not value:
+        return "Deep Research Report"
+    trimmed = _trim_text(value, 90)
+    return trimmed[0].upper() + trimmed[1:] if trimmed else "Deep Research Report"
+
+
+def _generate_report_title(objective: str, *, fallback: str = "Deep Research Report") -> str:
+    heuristic = _objective_title_fallback(objective)
+    try:
+        payload = llm_json(
+            f"""
+You are naming a deep research report.
+
+Objective:
+{objective}
+
+Return ONLY valid JSON:
+{{
+  "title": "A concise professional report title in title case"
+}}
+
+Constraints:
+- 4 to 10 words
+- no quotes
+- no trailing punctuation
+- do not use the generic title "Deep Research Report"
+- reflect the actual topic
+""",
+            {"title": heuristic},
+        )
+        candidate = str(payload.get("title", "") or "").strip()
+    except Exception:
+        candidate = heuristic
+
+    candidate = re.sub(r"\s+", " ", candidate).strip().strip("\"'")
+    if not candidate or candidate.lower() == "deep research report":
+        candidate = heuristic
+    return _normalize_title(candidate, fallback)
 
 
 def _strip_heading_attributes(value: str) -> str:
@@ -543,6 +598,36 @@ def _copy_artifact_alias(source_path: str, destination_path: str) -> str:
         return str(dst)
     except Exception:
         return ""
+
+
+def _mirror_root_report_artifacts(
+    compiled_path: str,
+    export_paths: Mapping[str, Any] | None = None,
+    *,
+    root_report_dir: str = "reports",
+) -> dict[str, str]:
+    safe_exports = export_paths if isinstance(export_paths, Mapping) else {}
+    target_map = {
+        "md": _artifact_file(root_report_dir, "report.md"),
+        "html": _artifact_file(root_report_dir, "report.html"),
+        "pdf": _artifact_file(root_report_dir, "report.pdf"),
+        "docx": _artifact_file(root_report_dir, "report.docx"),
+    }
+    source_map = {
+        "md": compiled_path,
+        "html": str(safe_exports.get("html", "") or ""),
+        "pdf": str(safe_exports.get("pdf", "") or ""),
+        "docx": str(safe_exports.get("docx", "") or ""),
+    }
+    mirrored: dict[str, str] = {}
+    for fmt, destination in target_map.items():
+        source = str(source_map.get(fmt, "") or "").strip()
+        if not source:
+            continue
+        mirrored_path = _copy_artifact_alias(source, destination)
+        if mirrored_path:
+            mirrored[fmt] = mirrored_path
+    return mirrored
 
 
 def _normalize_reference_identity(reference: Mapping[str, Any], fallback_index: int) -> tuple[str, str, str]:
@@ -2266,6 +2351,336 @@ def _collect_google_search_evidence(query: str, *, num: int = 10, progress_callb
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp"}
 _IMAGE_MAX_BYTES = int(os.getenv("KENDR_IMAGE_MAX_BYTES", str(4 * 1024 * 1024)))  # 4 MB default
 _IMAGE_DOWNLOAD_TIMEOUT = int(os.getenv("KENDR_IMAGE_DOWNLOAD_TIMEOUT", "15"))
+_IMAGE_SOURCE_PAGE_LIMIT = max(1, min(int(os.getenv("KENDR_IMAGE_SOURCE_PAGE_LIMIT", "5") or 5), 10))
+_IMAGE_CANDIDATES_PER_PAGE = max(1, min(int(os.getenv("KENDR_IMAGE_CANDIDATES_PER_PAGE", "12") or 12), 40))
+_IMAGE_MIN_DIMENSION = max(64, int(os.getenv("KENDR_IMAGE_MIN_DIMENSION", "120") or 120))
+_IMAGE_RELEVANCE_THRESHOLD = float(os.getenv("KENDR_IMAGE_RELEVANCE_THRESHOLD", "5.0") or 5.0)
+_IMAGE_CONTEXT_STOPWORDS = {
+    "about", "after", "also", "among", "and", "are", "because", "been", "being", "between", "both",
+    "but", "chart", "could", "data", "does", "figure", "from", "have", "into", "just", "more", "most",
+    "over", "page", "report", "section", "should", "than", "that", "their", "them", "there", "these",
+    "they", "this", "those", "through", "under", "using", "very", "what", "when", "where", "which",
+    "with", "your",
+}
+_IMAGE_DECORATIVE_MARKERS = {
+    "logo", "logos", "icon", "icons", "avatar", "avatars", "banner", "banners", "hero", "heroes", "thumbnail",
+    "thumbnails", "thumb", "social", "footer", "header", "sprite", "badge", "placeholder", "promo", "advert",
+    "advertisement", "marketing", "tracking", "pixel", "brand", "navbar", "button",
+}
+_IMAGE_PRIORITY_MARKERS = {
+    "architecture", "diagram", "workflow", "process", "flow", "flowchart", "chart", "graph", "dashboard",
+    "screenshot", "figure", "infographic", "timeline", "matrix", "heatmap", "pipeline", "network", "topology",
+    "system", "interface", "console", "reference", "overview",
+}
+_IMAGE_CLASS_REJECTION_MARKERS = {"logo", "icon", "avatar", "badge", "hero", "banner", "social", "promo"}
+_IMAGE_REQUIRED_LOCAL_SIGNAL_FIELDS = ("alt_text", "figcaption", "nearby_text", "heading")
+
+
+def _normalize_image_term(token: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", "", str(token or "").lower())
+    if len(value) > 4 and value.endswith("ies"):
+        value = value[:-3] + "y"
+    elif len(value) > 4 and value.endswith("s") and not value.endswith("ss"):
+        value = value[:-1]
+    return value
+
+
+def _image_terms(*texts: Any, limit: int = 120) -> set[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw in texts:
+        for match in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", str(raw or "").lower()):
+            normalized = _normalize_image_term(match)
+            if (
+                not normalized
+                or normalized in seen
+                or normalized in _IMAGE_CONTEXT_STOPWORDS
+                or normalized.isdigit()
+            ):
+                continue
+            seen.add(normalized)
+            terms.append(normalized)
+            if len(terms) >= limit:
+                return set(terms)
+    return set(terms)
+
+
+def _extract_image_src(tag: Any) -> str:
+    for key in ("src", "data-src", "data-original", "data-lazy-src", "data-image", "data-url"):
+        value = str(tag.get(key, "") or "").strip()
+        if value:
+            return value
+    srcset = str(tag.get("srcset", "") or "").strip()
+    if srcset:
+        first_candidate = srcset.split(",")[0].strip().split(" ")[0].strip()
+        if first_candidate:
+            return first_candidate
+    return ""
+
+
+def _image_attr_int(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    match = re.search(r"\d+", text)
+    return int(match.group()) if match else 0
+
+
+def _truncate_context_text(value: Any, limit: int = 280) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    return _trim_text(text, limit) if text else ""
+
+
+def _source_image_urls(section_sources: list[dict], *, max_pages: int = _IMAGE_SOURCE_PAGE_LIMIT) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for item in section_sources or []:
+        if not isinstance(item, dict):
+            continue
+        candidate = str(item.get("source_page", "") or item.get("url", "") or "").strip()
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or candidate in seen:
+            continue
+        seen.add(candidate)
+        urls.append(candidate)
+        if len(urls) >= max_pages:
+            break
+    return urls
+
+
+def _extract_source_page_image_candidates(
+    page_url: str,
+    payload: Mapping[str, Any],
+    *,
+    limit: int = _IMAGE_CANDIDATES_PER_PAGE,
+) -> list[dict]:
+    content_type = str(payload.get("content_type", "") or "").lower()
+    raw_html = str(payload.get("raw_text", "") or "")
+    if "html" not in content_type or not raw_html.strip():
+        return []
+
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        BeautifulSoup = None
+
+    candidates: list[dict] = []
+    if BeautifulSoup is not None:
+        soup = BeautifulSoup(raw_html, "html.parser")
+        page_title = _truncate_context_text(soup.title.get_text(" ", strip=True) if soup.title else "", 180)
+        for img in soup.find_all("img"):
+            src = _extract_image_src(img)
+            if not src:
+                continue
+            resolved_url = urljoin(page_url, src)
+            parsed = urlparse(resolved_url)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            figure = img.find_parent("figure")
+            figcaption = ""
+            if figure is not None:
+                fig_node = figure.find("figcaption")
+                if fig_node is not None:
+                    figcaption = _truncate_context_text(fig_node.get_text(" ", strip=True), 220)
+            parent = figure or img.parent
+            nearby_text = ""
+            if parent is not None and hasattr(parent, "get_text"):
+                nearby_text = _truncate_context_text(parent.get_text(" ", strip=True), 260)
+            heading = ""
+            prev_heading = img.find_previous(["h1", "h2", "h3", "h4"])
+            if prev_heading is not None:
+                heading = _truncate_context_text(prev_heading.get_text(" ", strip=True), 160)
+            img_classes = img.get("class", [])
+            if isinstance(img_classes, str):
+                img_classes = [img_classes]
+            candidates.append(
+                {
+                    "url": resolved_url,
+                    "source_page": page_url,
+                    "source": urlparse(page_url).netloc,
+                    "page_title": page_title,
+                    "alt_text": _truncate_context_text(img.get("alt", ""), 180),
+                    "title": _truncate_context_text(img.get("title", ""), 180),
+                    "figcaption": figcaption,
+                    "nearby_text": nearby_text,
+                    "heading": heading,
+                    "img_class": " ".join(str(item).strip() for item in img_classes if str(item).strip()),
+                    "img_id": str(img.get("id", "") or "").strip(),
+                    "width": _image_attr_int(img.get("width")),
+                    "height": _image_attr_int(img.get("height")),
+                }
+            )
+            if len(candidates) >= limit:
+                break
+        return candidates
+
+    page_title_match = re.search(r"<title[^>]*>(.*?)</title>", raw_html, flags=re.IGNORECASE | re.DOTALL)
+    page_title = _truncate_context_text(re.sub(r"<[^>]+>", " ", page_title_match.group(1) if page_title_match else ""), 180)
+    for match in re.finditer(r"<img\b([^>]+)>", raw_html, flags=re.IGNORECASE | re.DOTALL):
+        attrs = match.group(1)
+        src_match = re.search(r'(?:src|data-src|data-original|data-lazy-src)=["\']([^"\']+)["\']', attrs, flags=re.IGNORECASE)
+        if not src_match:
+            continue
+        resolved_url = urljoin(page_url, src_match.group(1).strip())
+        parsed = urlparse(resolved_url)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        alt_match = re.search(r'alt=["\']([^"\']*)["\']', attrs, flags=re.IGNORECASE)
+        title_match = re.search(r'title=["\']([^"\']*)["\']', attrs, flags=re.IGNORECASE)
+        width_match = re.search(r'width=["\']?(\d+)', attrs, flags=re.IGNORECASE)
+        height_match = re.search(r'height=["\']?(\d+)', attrs, flags=re.IGNORECASE)
+        class_match = re.search(r'class=["\']([^"\']*)["\']', attrs, flags=re.IGNORECASE)
+        id_match = re.search(r'id=["\']([^"\']*)["\']', attrs, flags=re.IGNORECASE)
+        candidates.append(
+            {
+                "url": resolved_url,
+                "source_page": page_url,
+                "source": urlparse(page_url).netloc,
+                "page_title": page_title,
+                "alt_text": _truncate_context_text(alt_match.group(1) if alt_match else "", 180),
+                "title": _truncate_context_text(title_match.group(1) if title_match else "", 180),
+                "figcaption": "",
+                "nearby_text": "",
+                "heading": "",
+                "img_class": _truncate_context_text(class_match.group(1) if class_match else "", 120),
+                "img_id": _truncate_context_text(id_match.group(1) if id_match else "", 120),
+                "width": int(width_match.group(1)) if width_match else 0,
+                "height": int(height_match.group(1)) if height_match else 0,
+            }
+        )
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _score_source_image_candidate(
+    candidate: Mapping[str, Any],
+    *,
+    section_title: str,
+    section_objective: str,
+    section_text: str,
+) -> tuple[float, list[str], str]:
+    topic_terms = _image_terms(section_title, section_objective, _trim_text(section_text, 1800))
+    signal_sources = {
+        "alt": str(candidate.get("alt_text", "") or ""),
+        "caption": str(candidate.get("figcaption", "") or ""),
+        "heading": str(candidate.get("heading", "") or ""),
+        "nearby": str(candidate.get("nearby_text", "") or ""),
+        "page_title": str(candidate.get("page_title", "") or ""),
+        "title": str(candidate.get("title", "") or ""),
+        "url": str(urlparse(str(candidate.get("url", "") or "")).path or ""),
+    }
+    weights = {"alt": 5.0, "caption": 6.0, "heading": 4.0, "nearby": 2.0, "page_title": 2.0, "title": 3.0, "url": 1.0}
+    score = 0.0
+    reasons: list[str] = []
+    matched_terms: set[str] = set()
+    local_match_terms: set[str] = set()
+    for label, text in signal_sources.items():
+        terms = _image_terms(text, limit=40)
+        overlap = sorted(topic_terms & terms)
+        if not overlap:
+            continue
+        matched_terms.update(overlap)
+        if label in {"alt", "caption", "heading", "nearby"}:
+            local_match_terms.update(overlap)
+        score += weights.get(label, 1.0) * min(len(overlap), 3)
+        reasons.append(f"{label}:{', '.join(overlap[:2])}")
+
+    combined_terms = _image_terms(
+        candidate.get("alt_text", ""),
+        candidate.get("title", ""),
+        candidate.get("figcaption", ""),
+        candidate.get("heading", ""),
+        candidate.get("nearby_text", ""),
+        candidate.get("img_class", ""),
+        candidate.get("img_id", ""),
+        urlparse(str(candidate.get("url", "") or "")).path,
+    )
+    priority_hits = sorted(_IMAGE_PRIORITY_MARKERS & combined_terms)
+    if priority_hits:
+        score += 3.0 + min(len(priority_hits), 2)
+        reasons.append(f"visual:{', '.join(priority_hits[:2])}")
+
+    decorative_hits = sorted((_IMAGE_DECORATIVE_MARKERS | _IMAGE_CLASS_REJECTION_MARKERS) & combined_terms)
+    if decorative_hits:
+        score -= 8.0 + min(len(decorative_hits), 2)
+        reasons.append(f"decorative:{', '.join(decorative_hits[:2])}")
+
+    width = int(candidate.get("width", 0) or 0)
+    height = int(candidate.get("height", 0) or 0)
+    min_dimension = min(value for value in (width, height) if value > 0) if (width > 0 or height > 0) else 0
+    if min_dimension and min_dimension < _IMAGE_MIN_DIMENSION:
+        score -= 6.0
+        reasons.append(f"size:{width}x{height}")
+    elif min_dimension >= 200:
+        score += 1.0
+
+    alt_text = str(candidate.get("alt_text", "") or "").strip().lower()
+    if alt_text in {"image", "photo", "graphic", "illustration", "banner", "hero", "logo"}:
+        score -= 4.0
+        reasons.append("generic_alt")
+
+    rejection = ""
+    if decorative_hits:
+        rejection = "decorative"
+    elif min_dimension and min_dimension < 96:
+        rejection = "too_small"
+    elif not local_match_terms:
+        rejection = "weak_context"
+    elif score < _IMAGE_RELEVANCE_THRESHOLD:
+        rejection = "low_relevance"
+    return score, reasons, rejection
+
+
+def _parse_image_vision_verdict(text: str) -> tuple[bool | None, str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return None, ""
+    try:
+        payload = json.loads(strip_code_fences(raw))
+        if isinstance(payload, dict):
+            relevant_value = payload.get("relevant")
+            decorative_value = payload.get("decorative")
+            if decorative_value is True:
+                return False, str(payload.get("reason", "") or "vision_marked_decorative").strip()
+            if isinstance(relevant_value, bool):
+                return relevant_value, str(payload.get("reason", "") or "").strip()
+    except Exception:
+        pass
+    lowered = raw.lower()
+    if '"relevant": false' in lowered or "relevant: false" in lowered or '"decorative": true' in lowered:
+        return False, raw
+    if '"relevant": true' in lowered or "relevant: true" in lowered:
+        return True, raw
+    return None, raw
+
+
+def _verify_downloaded_image_with_vision(
+    abs_path: str,
+    *,
+    section_title: str,
+    section_objective: str,
+    section_text: str,
+) -> tuple[bool, str]:
+    try:
+        verdict = openai_analyze_image(
+            abs_path,
+            instruction=(
+                "You are validating whether an image belongs in a professional deep-research report section.\n"
+                f"Section title: {section_title}\n"
+                f"Section objective: {section_objective}\n"
+                f"Section preview: {_trim_text(section_text, 900)}\n\n"
+                "Reject decorative assets, logos, hero banners, generic stock photos, portraits, and unrelated branding.\n"
+                "Accept diagrams, dashboards, screenshots, charts, process visuals, system architecture, and figures that clearly support the section.\n"
+                'Return ONLY JSON like {"relevant": true|false, "decorative": true|false, "reason": "short reason"}.'
+            ),
+        )
+        relevant, reason = _parse_image_vision_verdict(str(verdict.get("analysis", "") or ""))
+        if relevant is None:
+            return True, "vision_inconclusive"
+        return bool(relevant), reason or ("vision_verified" if relevant else "vision_rejected")
+    except Exception as exc:
+        return True, f"vision_unavailable:{exc}"
 
 
 def _collect_image_search_results(query: str, *, num: int = 10) -> list[dict]:
@@ -2405,25 +2820,111 @@ def _collect_section_images(
     section_title: str,
     section_objective: str,
     section_text: str,
+    section_sources: list[dict],
     artifact_dir: str,
     section_index: int,
     max_images: int = 3,
     search_num: int = 12,
+    fallback_to_search: bool = False,
+    verify_with_vision: bool = True,
 ) -> list[dict]:
-    """Search, filter, and download images for a report section.
+    """Collect, rank, and download images for a report section.
 
     Returns a list of dicts with keys:
         relative_path, abs_path, title, source, source_page, alt_text, section_index, section_title
     """
-    query = f"{section_title} diagram chart architecture infographic"
-    log_task_update(DEEP_RESEARCH_LABEL, f"Searching for images for section {section_index}: '{section_title[:50]}'")
-    candidates = _collect_image_search_results(query, num=search_num)
-    if not candidates:
-        return []
+    source_urls = _source_image_urls(section_sources, max_pages=_IMAGE_SOURCE_PAGE_LIMIT)
+    ranked_candidates: list[dict] = []
+    rejection_counts = {"decorative": 0, "too_small": 0, "weak_context": 0, "low_relevance": 0, "vision_rejected": 0}
+    if source_urls:
+        for page_index, page_url in enumerate(source_urls, start=1):
+            page_label = _web_source_log_label(page_url)
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Reviewing source images [{page_index}/{len(source_urls)}]: {page_label}",
+            )
+            try:
+                payload = fetch_url_content(page_url, timeout=20)
+            except Exception as exc:
+                log_task_update(
+                    DEEP_RESEARCH_LABEL,
+                    f"Source image review failed [{page_index}/{len(source_urls)}]: {page_label} ({exc})",
+                )
+                continue
+            page_candidates = _extract_source_page_image_candidates(page_url, payload, limit=_IMAGE_CANDIDATES_PER_PAGE)
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Found {len(page_candidates)} source image candidate(s) on {page_label}",
+            )
+            accepted_on_page = 0
+            for candidate in page_candidates:
+                score, reasons, rejection = _score_source_image_candidate(
+                    candidate,
+                    section_title=section_title,
+                    section_objective=section_objective,
+                    section_text=section_text,
+                )
+                if rejection:
+                    rejection_counts[rejection] = rejection_counts.get(rejection, 0) + 1
+                    continue
+                accepted_on_page += 1
+                ranked_candidates.append(
+                    {
+                        **candidate,
+                        "candidate_kind": "source_page",
+                        "relevance_score": score,
+                        "selection_reason": "; ".join(reasons[:3]) if reasons else "context match",
+                    }
+                )
+            if accepted_on_page:
+                log_task_update(
+                    DEEP_RESEARCH_LABEL,
+                    f"Accepted {accepted_on_page} grounded image candidate(s) from {page_label}",
+                )
+        if any(rejection_counts.values()):
+            rejection_summary = ", ".join(
+                f"{label}={count}" for label, count in rejection_counts.items() if count
+            )
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Rejected grounded image candidates for section {section_index}: {rejection_summary}",
+            )
+    else:
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"No eligible web source pages for grounded image collection in section {section_index}: '{section_title[:50]}'",
+        )
 
-    selected = _filter_relevant_images(candidates, section_title=section_title, section_text=section_text, max_images=max_images)
+    ranked_candidates.sort(key=lambda item: (-float(item.get("relevance_score", 0.0) or 0.0), str(item.get("url", ""))))
+    selected = ranked_candidates[:max_images]
+
+    if not selected and fallback_to_search:
+        query = f"{section_title} diagram chart architecture infographic"
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"No grounded source images qualified for section {section_index}; falling back to external image search.",
+        )
+        candidates = _collect_image_search_results(query, num=search_num)
+        selected = _filter_relevant_images(
+            candidates,
+            section_title=section_title,
+            section_text=section_text,
+            max_images=max_images,
+        )
+        selected = [
+            {
+                **item,
+                "candidate_kind": "external_search",
+                "selection_reason": "external fallback search",
+            }
+            for item in selected
+        ]
+
     if not selected:
-        log_task_update(DEEP_RESEARCH_LABEL, f"No relevant images selected for section {section_index}: '{section_title[:50]}'")
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"No grounded images selected for section {section_index}: '{section_title[:50]}'",
+        )
         return []
 
     images_dir = _artifact_file(artifact_dir, f"section_{section_index:02d}/images")
@@ -2445,21 +2946,56 @@ def _collect_section_images(
         relative_path = f"section_{section_index:02d}/images/{filename}"
 
         if _download_image(img_url, abs_path):
-            alt_text = img.get("title", "") or f"{section_title} — visual {img_index}"
+            alt_text = (
+                str(img.get("alt_text", "") or "").strip()
+                or str(img.get("title", "") or "").strip()
+                or str(img.get("figcaption", "") or "").strip()
+                or f"{section_title} — visual {img_index}"
+            )
+            if verify_with_vision:
+                is_relevant, vision_reason = _verify_downloaded_image_with_vision(
+                    abs_path,
+                    section_title=section_title,
+                    section_objective=section_objective,
+                    section_text=section_text,
+                )
+                if not is_relevant:
+                    rejection_counts["vision_rejected"] = rejection_counts.get("vision_rejected", 0) + 1
+                    try:
+                        Path(abs_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    log_task_update(
+                        DEEP_RESEARCH_LABEL,
+                        f"Rejected downloaded image for section {section_index} via vision check: "
+                        f"{_web_source_log_label(str(img.get('source_page', '') or img_url))} ({vision_reason or 'vision_rejected'})",
+                    )
+                    continue
             saved.append({
                 "relative_path": relative_path,
                 "abs_path": abs_path,
                 "filename": filename,
-                "title": img.get("title", ""),
-                "source": img.get("source", ""),
-                "source_page": img.get("source_page", ""),
+                "title": str(img.get("title", "") or "").strip() or alt_text,
+                "source": str(img.get("source", "") or "").strip() or urlparse(str(img.get("source_page", "") or img_url)).netloc,
+                "source_page": str(img.get("source_page", "") or "").strip(),
                 "url": img_url,
                 "alt_text": alt_text,
                 "section_index": section_index,
                 "section_title": section_title,
-                "width": img.get("width", 0),
-                "height": img.get("height", 0),
+                "width": int(img.get("width", 0) or 0),
+                "height": int(img.get("height", 0) or 0),
+                "source_page_title": str(img.get("page_title", "") or "").strip(),
+                "figcaption": str(img.get("figcaption", "") or "").strip(),
+                "selection_reason": str(img.get("selection_reason", "") or "").strip(),
+                "relevance_score": float(img.get("relevance_score", 0.0) or 0.0),
+                "candidate_kind": str(img.get("candidate_kind", "") or "source_page").strip(),
             })
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Selected image [{len(saved)}/{len(selected)}] for section {section_index}: "
+                f"{_web_source_log_label(str(img.get('source_page', '') or img_url))} "
+                f"({str(img.get('selection_reason', '') or 'context match')})",
+            )
 
     log_task_update(
         DEEP_RESEARCH_LABEL,
@@ -4635,7 +5171,7 @@ def _markdown_to_plain_text(markdown_text: str) -> str:
     return cleaned_ascii
 
 
-def _markdown_to_html(markdown_text: str) -> str:
+def _markdown_to_html(markdown_text: str, *, base_path: str | Path | None = None) -> str:
     input_chars = len(markdown_text or "")
     log_task_update(DEEP_RESEARCH_LABEL, f"_markdown_to_html: converting {input_chars} chars of markdown to HTML.")
     from tasks.md_to_pdf import build_html_from_markdown
@@ -4643,7 +5179,7 @@ def _markdown_to_html(markdown_text: str) -> str:
     heading_count = len(re.findall(r"^#{1,6}\s+", markdown_text or "", flags=re.MULTILINE))
     list_item_count = len(re.findall(r"^(?:[-*]|\d+\.)\s+", markdown_text or "", flags=re.MULTILINE))
     table_count = len(re.findall(r"^\|.*\|\s*$", markdown_text or "", flags=re.MULTILINE))
-    html_result = build_html_from_markdown(markdown_text or "", for_pdf=False)
+    html_result = build_html_from_markdown(markdown_text or "", for_pdf=False, base_path=base_path)
     log_task_update(
         DEEP_RESEARCH_LABEL,
         f"_markdown_to_html: done — {heading_count} headings, {list_item_count} list items, "
@@ -5034,7 +5570,7 @@ def _export_long_document_formats(
     formats = set(_normalize_research_formats(requested_formats or DEFAULT_RESEARCH_FORMATS))
     export_errors: dict[str, str] = {}
 
-    html_text = _markdown_to_html(compiled_markdown)
+    html_text = _markdown_to_html(compiled_markdown, base_path=compiled_path.parent)
     log_task_update(DEEP_RESEARCH_LABEL, f"Document export starting. Requested formats: {', '.join(formats)}.")
     if "html" in formats or "pdf" in formats:
         log_task_update(DEEP_RESEARCH_LABEL, f"Rendering HTML ({len(html_text)} chars)...")
@@ -5112,7 +5648,6 @@ def _build_compiled_markdown(
 
     toc_entries = [
         ("executive-summary", "Executive Summary"),
-        ("methodology", "Methodology"),
         *[
             (_section_anchor(item), f"{item['index']}. {item['title']}")
             for item in section_outputs
@@ -5151,15 +5686,7 @@ def _build_compiled_markdown(
             "",
         ]
     )
-    lines.extend(
-        [
-        executive_summary.strip(),
-        "",
-            _heading_with_anchor(2, "Methodology", "methodology"),
-            methodology_text.strip(),
-            "",
-        ]
-    )
+    lines.extend([executive_summary.strip(), ""])
     for item in section_outputs:
         section_anchor = _section_anchor(item)
         lines.append(_heading_with_anchor(2, f"{item['index']}. {item['title']}", section_anchor))
@@ -5184,13 +5711,22 @@ def _build_compiled_markdown(
     else:
         lines.append("- No research log lines were captured.")
     lines.append("")
+    if methodology_text.strip():
+        lines.extend(
+            [
+                _heading_with_anchor(3, "Run Configuration", "appendix-c-run-configuration"),
+                "",
+                methodology_text.strip(),
+                "",
+            ]
+        )
     lines.append(_image_appendix_markdown(image_entries or []))
     lines.extend(
         [
             "",
             "---",
             "",
-            f"_Prepared with Kendr Deep Research on {generated_at}._",
+            f"_Generated by Kendr on {generated_at}. Visit at [Kendr.org](https://kendr.org)._",
             "",
         ]
     )
@@ -5220,7 +5756,13 @@ def long_document_agent(state):
     section_pages = _safe_int(state.get("long_document_section_pages"), 5, 2, 20)
     section_count_default = max(3, math.ceil(target_pages / max(1, section_pages)))
     section_count = _safe_int(state.get("long_document_sections"), section_count_default, 1, 40)
-    title = _normalize_title(state.get("long_document_title", ""), "Deep Research Report")
+    initial_outline = state.get("long_document_outline", {})
+    if not isinstance(initial_outline, dict):
+        initial_outline = {}
+    title = (
+        str(state.get("long_document_title", "") or initial_outline.get("title", "")).strip()
+        or _generate_report_title(objective)
+    )
     state["research_depth_mode"] = research_depth_mode
 
     draft_selection = model_selection_for_agent("long_document_agent")
@@ -5541,6 +6083,7 @@ def long_document_agent(state):
     approved_outline = state.get("long_document_outline", {})
     if not isinstance(approved_outline, dict):
         approved_outline = {}
+    title = _normalize_title(approved_outline.get("title", ""), title)
     needs_outline_approval = (
         state.get("long_document_plan_status") != "approved"
         or not approved_outline
@@ -5562,6 +6105,7 @@ def long_document_agent(state):
             section_pages=section_pages,
             subtopics=analysis.get("subtopics", []),
         )
+        title = _normalize_title(outline.get("title", ""), title)
         outline_md = _outline_markdown(outline, fallback_title=title)
         subplan_data = _long_document_subplan(outline, objective=objective, target_pages=target_pages, research_model=research_model)
         subplan_md = outline_md.rstrip() + "\n\n" + plan_as_markdown(subplan_data)
@@ -6043,9 +6587,26 @@ def long_document_agent(state):
     section_outputs: list[dict] = []
     section_packages: list[dict] = []
     all_section_images: list[dict] = []
-    image_collection_enabled = web_search_enabled and bool(os.getenv("SERP_API_KEY", "").strip())
-    if not image_collection_enabled:
-        log_task_update(DEEP_RESEARCH_LABEL, "Image collection disabled (requires web search + SERP_API_KEY).")
+    image_collection_enabled = not disable_visuals and bool(state.get("long_document_enable_source_images", True))
+    image_search_fallback_enabled = bool(state.get("long_document_image_search_fallback", False))
+    image_vision_verification_enabled = bool(state.get("long_document_verify_source_images", True))
+    if image_collection_enabled:
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            "Image collection enabled: preferring source-grounded images from reviewed web pages.",
+        )
+        if image_vision_verification_enabled:
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                "Vision verification is enabled for downloaded images when a vision backend is available.",
+            )
+        if image_search_fallback_enabled:
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                "External image-search fallback is enabled if no grounded page image qualifies.",
+            )
+    else:
+        log_task_update(DEEP_RESEARCH_LABEL, "Image collection disabled.")
     coherence_context_md = _coherence_base_context(state, objective)
     write_text_file(_artifact_file(artifact_dir, "deep_research_coherence_base.md"), coherence_context_md)
 
@@ -6705,10 +7266,13 @@ def long_document_agent(state):
                     section_title=section_title,
                     section_objective=str(package.get("objective", objective)),
                     section_text=section_text,
+                    section_sources=package.get("sources", []) if isinstance(package.get("sources"), list) else [],
                     artifact_dir=artifact_dir,
                     section_index=write_index,
                     max_images=int(state.get("long_document_max_images_per_section", 3)),
                     search_num=int(state.get("long_document_image_search_num", 12)),
+                    fallback_to_search=image_search_fallback_enabled,
+                    verify_with_vision=image_vision_verification_enabled,
                 )
                 all_section_images.extend(section_images)
                 _trace_research_event(
@@ -7128,14 +7692,24 @@ Section continuity notes:
     report_alias_html = _output_file_path(_artifact_file(artifact_dir, "report.html"))
     report_alias_pdf = _output_file_path(_artifact_file(artifact_dir, "report.pdf"))
     report_alias_docx = _output_file_path(_artifact_file(artifact_dir, "report.docx"))
-    alias_results = {
+    nested_alias_results = {
         "md": _copy_artifact_alias(compiled_path, report_alias_md),
         "html": _copy_artifact_alias(export_paths.get("html", ""), report_alias_html),
         "pdf": _copy_artifact_alias(export_paths.get("pdf", ""), report_alias_pdf),
         "docx": _copy_artifact_alias(export_paths.get("docx", ""), report_alias_docx),
     }
+    root_report_results = _mirror_root_report_artifacts(compiled_path, export_paths, root_report_dir="reports")
+    if root_report_results:
+        mirrored_formats = ", ".join(fmt.upper() for fmt in ("pdf", "docx", "html", "md") if root_report_results.get(fmt))
+        log_task_update(DEEP_RESEARCH_LABEL, f"Mirrored stable report downloads to run root reports/: {mirrored_formats}.")
+    report_results = {
+        "md": root_report_results.get("md", "") or nested_alias_results.get("md", "") or compiled_path,
+        "html": root_report_results.get("html", "") or nested_alias_results.get("html", "") or export_paths.get("html", ""),
+        "pdf": root_report_results.get("pdf", "") or nested_alias_results.get("pdf", "") or export_paths.get("pdf", ""),
+        "docx": root_report_results.get("docx", "") or nested_alias_results.get("docx", "") or export_paths.get("docx", ""),
+    }
     created_artifacts = [
-        {"name": "report.md", "path": alias_results.get("md", "") or compiled_path, "kind": "report"},
+        {"name": "report.md", "path": report_results.get("md", "") or compiled_path, "kind": "report"},
         {"name": "source_ledger.json", "path": _output_file_path(source_ledger_filename), "kind": "evidence"},
         {"name": "coverage_report.json", "path": _output_file_path(coverage_report_filename), "kind": "coverage"},
         {"name": "quality_report.json", "path": _output_file_path(quality_report_filename), "kind": "quality"},
@@ -7150,12 +7724,12 @@ Section continuity notes:
         created_artifacts.append(
             {"name": "source_manifest.json", "path": state.get("long_document_source_manifest_json_path", ""), "kind": "manifest"}
         )
-    if alias_results.get("pdf"):
-        created_artifacts.append({"name": "report.pdf", "path": alias_results["pdf"], "kind": "report"})
-    if alias_results.get("docx"):
-        created_artifacts.append({"name": "report.docx", "path": alias_results["docx"], "kind": "report"})
-    if alias_results.get("html"):
-        created_artifacts.append({"name": "report.html", "path": alias_results["html"], "kind": "report"})
+    if report_results.get("pdf"):
+        created_artifacts.append({"name": "report.pdf", "path": report_results["pdf"], "kind": "report"})
+    if report_results.get("docx"):
+        created_artifacts.append({"name": "report.docx", "path": report_results["docx"], "kind": "report"})
+    if report_results.get("html"):
+        created_artifacts.append({"name": "report.html", "path": report_results["html"], "kind": "report"})
     for artifact in created_artifacts:
         if not str(artifact.get("path", "")).strip():
             continue
@@ -7198,10 +7772,10 @@ Section continuity notes:
                 "target_pages": target_pages,
                 "section_count": len(section_outputs),
                 "compiled_markdown_file": compiled_path,
-                "report_markdown_file": alias_results.get("md", "") or compiled_path,
-                "report_html_file": alias_results.get("html", "") or export_paths.get("html", ""),
-                "report_docx_file": alias_results.get("docx", "") or export_paths.get("docx", ""),
-                "report_pdf_file": alias_results.get("pdf", "") or export_paths.get("pdf", ""),
+                "report_markdown_file": report_results.get("md", "") or compiled_path,
+                "report_html_file": report_results.get("html", "") or export_paths.get("html", ""),
+                "report_docx_file": report_results.get("docx", "") or export_paths.get("docx", ""),
+                "report_pdf_file": report_results.get("pdf", "") or export_paths.get("pdf", ""),
                 "outline_file": outline_json_path,
                 "outline_markdown_file": outline_md_path,
                 "coherence_base_file": coherence_base_path,
@@ -7274,21 +7848,21 @@ Section continuity notes:
         )
 
     downloadable_report_formats: list[str] = []
-    if alias_results.get("pdf"):
+    if report_results.get("pdf"):
         downloadable_report_formats.append("PDF")
-    if alias_results.get("docx"):
+    if report_results.get("docx"):
         downloadable_report_formats.append("DOCX")
-    if alias_results.get("html"):
+    if report_results.get("html"):
         downloadable_report_formats.append("HTML")
     downloadable_report_formats.append("MD")
     export_issue_line = f"- Export issues: {'; '.join(export_errors)}\n" if export_errors else ""
     artifact_summary_lines = render_artifact_lines(
         [
             ("Artifact bundle", _output_file_path(artifact_dir)),
-            ("Markdown report", alias_results.get("md", "") or compiled_path),
-            ("PDF report", alias_results.get("pdf", "")),
-            ("DOCX report", alias_results.get("docx", "")),
-            ("HTML report", alias_results.get("html", "")),
+            ("Markdown report", report_results.get("md", "") or compiled_path),
+            ("PDF report", report_results.get("pdf", "")),
+            ("DOCX report", report_results.get("docx", "")),
+            ("HTML report", report_results.get("html", "")),
             ("Source manifest", state.get("long_document_source_manifest_path", "")),
             ("Research manifest", manifest_path),
         ],
@@ -7350,6 +7924,8 @@ Section continuity notes:
     state["long_document_compiled_html_path"] = export_paths.get("html", "")
     state["long_document_compiled_docx_path"] = export_paths.get("docx", "")
     state["long_document_compiled_pdf_path"] = export_paths.get("pdf", "")
+    state["deep_research_root_report_dir"] = _output_file_path("reports")
+    state["deep_research_root_report_paths"] = dict(report_results)
     state["long_document_manifest_path"] = manifest_path
     state["long_document_source_manifest_path"] = str(state.get("long_document_source_manifest_path", "") or "")
     state["long_document_source_manifest_json_path"] = str(state.get("long_document_source_manifest_json_path", "") or "")
@@ -7377,6 +7953,8 @@ Section continuity notes:
     state["deep_research_artifacts_manifest"] = {
         "artifact_dir": _output_file_path(artifact_dir),
         "manifest_path": manifest_path,
+        "root_report_dir": _output_file_path("reports"),
+        "root_report_paths": dict(report_results),
         "created_artifacts": created_artifacts,
     }
     state["deep_research_result_card"] = {
@@ -7417,9 +7995,12 @@ Section continuity notes:
         "html_path": export_paths.get("html", ""),
         "docx_path": export_paths.get("docx", ""),
         "pdf_path": export_paths.get("pdf", ""),
-        "report_md_path": alias_results.get("md", "") or compiled_path,
-        "report_docx_path": alias_results.get("docx", "") or export_paths.get("docx", ""),
-        "report_pdf_path": alias_results.get("pdf", "") or export_paths.get("pdf", ""),
+        "report_md_path": report_results.get("md", "") or compiled_path,
+        "report_docx_path": report_results.get("docx", "") or export_paths.get("docx", ""),
+        "report_pdf_path": report_results.get("pdf", "") or export_paths.get("pdf", ""),
+        "report_html_path": report_results.get("html", "") or export_paths.get("html", ""),
+        "root_report_dir": _output_file_path("reports"),
+        "root_report_paths": dict(report_results),
         "knowledge_graph_path": knowledge_graph_path,
         "plagiarism_report_path": plagiarism_json_path,
         "raw_json_path": manifest_path,

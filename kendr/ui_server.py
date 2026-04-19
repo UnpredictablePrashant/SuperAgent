@@ -1003,7 +1003,7 @@ def _find_nested_run_artifact(output_dir: str, name: str) -> str:
             rel_path = os.path.relpath(full_path, base).replace("\\", "/")
             score = (
                 0 if lowered == requested else 1,
-                0 if "deep_research_runs/" in rel_path else 1,
+                0 if rel_path.startswith("reports/") else 1 if "deep_research_runs/" in rel_path else 2,
                 rel_path.count("/"),
                 len(rel_path),
             )
@@ -7040,10 +7040,19 @@ function handleSendButton() {
   sendMessage();
 }
 
+function _looksLikeFileLocatorRequest(text) {
+  const body = String(text || '').trim().toLowerCase();
+  if (!body) return false;
+  const locatorPattern = /\b(where is|where's|locate|path to|saved|stored|located|which folder|what folder|output folder|output path|report path|file path)\b/;
+  const artifactPattern = /\b(report|pdf|docx|doc|word|html|markdown|document|file|artifact|output|result)\b/;
+  return locatorPattern.test(body) && artifactPattern.test(body);
+}
+
 // Returns HTML string with download cards if the text looks like a file request and we have files,
 // otherwise returns null so the caller can fall through to the normal agent path.
 function _tryHandleFileRequest(text) {
   const lower = text.toLowerCase();
+  if (_looksLikeFileLocatorRequest(lower)) return null;
   const isAction = /\b(give\s+me|download|get|send\s+me|share|export|show\s+me|fetch|retrieve|provide)\b/.test(lower);
   const isFileRef = /\b(pdf|docx|doc|word|html|md|markdown|report|document|file|output|result)\b/.test(lower);
   if (!isAction && !/\b(download|report|file)\b/.test(lower)) return null;
@@ -9584,6 +9593,7 @@ function setProjectChatDestructive(enabled) {
 function _projectChatRequestIntent(text) {
   const body = String(text || '').trim().toLowerCase();
   if (!body) return 'ask';
+  if (_looksLikeFileLocatorRequest(body)) return 'execute';
   const actionPatterns = [
     /^\s*(please\s+)?(delete|remove|rename|move|create|add|update|change|edit|fix|refactor|implement|write|generate|scaffold|commit|push|pull|merge|install|run|start|stop|restart|build|test|deploy|ship)\b/,
     /\b(can you|could you|please|go ahead and|try to|help me)\s+(delete|remove|rename|move|create|add|update|change|edit|fix|refactor|implement|write|generate|scaffold|commit|push|pull|merge|install|run|start|stop|restart|build|test|deploy|ship)\b/,

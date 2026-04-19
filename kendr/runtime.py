@@ -1785,6 +1785,8 @@ class AgentRuntime:
     def _is_project_audit_request(self, state: dict) -> bool:
         if self._is_deep_research_workflow(state):
             return False
+        if self._is_local_command_request(state):
+            return False
         text = " ".join(
             [
                 str(state.get("user_query", "")),
@@ -2480,6 +2482,49 @@ class AgentRuntime:
         previous_state = previous.get("state", {}) if isinstance(previous, dict) else {}
         if not isinstance(previous_state, dict):
             previous_state = {}
+        report_artifacts = self._report_artifact_candidates(state)
+        has_report_context = bool(report_artifacts)
+        persisted_report_run_id = str(previous_state.get("last_report_run_id", "") or "")
+        persisted_report_workflow_id = str(previous_state.get("last_report_workflow_id", "") or "")
+        persisted_report_run_output_dir = str(previous_state.get("last_report_run_output_dir", "") or "")
+        persisted_result_card = (
+            previous_state.get("deep_research_result_card", {})
+            if isinstance(previous_state.get("deep_research_result_card", {}), dict)
+            else {}
+        )
+        persisted_artifact_files = (
+            previous_state.get("artifact_files", [])
+            if isinstance(previous_state.get("artifact_files", []), list)
+            else []
+        )
+        persisted_long_document_exports = (
+            previous_state.get("long_document_exports", [])
+            if isinstance(previous_state.get("long_document_exports", []), list)
+            else []
+        )
+        persisted_compiled_paths = {
+            key: str(previous_state.get(key, "") or "")
+            for key in (
+                "long_document_compiled_path",
+                "long_document_compiled_html_path",
+                "long_document_compiled_docx_path",
+                "long_document_compiled_pdf_path",
+            )
+        }
+        if has_report_context:
+            persisted_report_run_id = str(state.get("run_id", "") or "").strip()
+            persisted_report_workflow_id = str(state.get("workflow_id", state.get("run_id", "")) or "").strip()
+            persisted_report_run_output_dir = run_output_dir or persisted_report_run_output_dir
+            if isinstance(state.get("deep_research_result_card", {}), dict) and state.get("deep_research_result_card", {}):
+                persisted_result_card = dict(state.get("deep_research_result_card", {}))
+            if isinstance(state.get("artifact_files", []), list) and state.get("artifact_files", []):
+                persisted_artifact_files = list(state.get("artifact_files", []))
+            if isinstance(state.get("long_document_exports", []), list) and state.get("long_document_exports", []):
+                persisted_long_document_exports = list(state.get("long_document_exports", []))
+            for key in persisted_compiled_paths:
+                value = str(state.get(key, "") or "").strip()
+                if value:
+                    persisted_compiled_paths[key] = value
         history = previous_state.get("history", [])
         if not isinstance(history, list):
             history = []
@@ -2520,6 +2565,16 @@ class AgentRuntime:
                 "plan_revision_feedback": state.get("plan_revision_feedback", ""),
                 "plan_revision_count": int(state.get("plan_revision_count", 0) or 0),
                 "plan_version": int(state.get("plan_version", 0) or 0),
+                "last_report_run_id": persisted_report_run_id,
+                "last_report_workflow_id": persisted_report_workflow_id,
+                "last_report_run_output_dir": persisted_report_run_output_dir,
+                "deep_research_result_card": persisted_result_card,
+                "artifact_files": persisted_artifact_files,
+                "long_document_exports": persisted_long_document_exports,
+                "long_document_compiled_path": persisted_compiled_paths["long_document_compiled_path"],
+                "long_document_compiled_html_path": persisted_compiled_paths["long_document_compiled_html_path"],
+                "long_document_compiled_docx_path": persisted_compiled_paths["long_document_compiled_docx_path"],
+                "long_document_compiled_pdf_path": persisted_compiled_paths["long_document_compiled_pdf_path"],
                 "planning_notes": state.get("planning_notes", []),
                 "review_revision_counts": state.get("review_revision_counts", {}),
                 "blueprint_json": state.get("blueprint_json", {}),
@@ -2722,6 +2777,139 @@ class AgentRuntime:
         citation_markers = ("with citations", "cite sources", "source-backed", "source backed")
         research_markers = ("research", "investigate", "investigation", "literature review", "prior art")
         return any(marker in text for marker in citation_markers) and any(marker in text for marker in research_markers)
+
+    def _is_report_file_lookup_request(self, state: Mapping[str, Any]) -> bool:
+        text = " ".join(
+            [
+                str(state.get("user_query", "") or ""),
+                str(state.get("current_objective", "") or ""),
+            ]
+        ).strip().lower()
+        if not text:
+            return False
+        artifact_markers = (
+            "report",
+            "pdf",
+            "docx",
+            "doc",
+            "word",
+            "html",
+            "markdown",
+            "document",
+            "file",
+            "artifact",
+            "output",
+            "result",
+        )
+        if not any(marker in text for marker in artifact_markers):
+            return False
+        location_markers = (
+            "where is",
+            "where's",
+            "locate",
+            "path to",
+            "saved",
+            "stored",
+            "located",
+            "which folder",
+            "what folder",
+            "output folder",
+            "output path",
+            "report path",
+            "file path",
+            "open the folder",
+            "show the folder",
+        )
+        if any(marker in text for marker in location_markers):
+            return True
+        return bool(
+            re.search(
+                r"\b(find|locate|fetch|retrieve|show|open)\b.*\b(report|pdf|docx|doc|word|html|markdown|document|file|artifact|output|result)\b",
+                text,
+            )
+        )
+
+    def _report_lookup_requested_extensions(self, text: str) -> set[str]:
+        lowered = str(text or "").strip().lower()
+        requested: set[str] = set()
+        if re.search(r"\bpdf\b", lowered):
+            requested.add("pdf")
+        if re.search(r"\b(docx|doc|word)\b", lowered):
+            requested.add("docx")
+        if re.search(r"\bhtml\b", lowered):
+            requested.add("html")
+        if re.search(r"\b(md|markdown)\b", lowered):
+            requested.add("md")
+        return requested
+
+    def _resolve_report_artifact_path_for_hint(self, state: Mapping[str, Any], path_value: Any) -> str:
+        candidate = str(path_value or "").strip()
+        if not candidate:
+            return ""
+        if os.path.isabs(candidate):
+            return str(Path(candidate).expanduser())
+        base_dir = str(state.get("artifact_lookup_run_output_dir") or state.get("run_output_dir") or "").strip()
+        normalized = candidate.replace("\\", "/")
+        if normalized.startswith("output/"):
+            normalized = normalized[len("output/"):]
+        if not base_dir:
+            return normalized
+        return str((Path(base_dir).expanduser() / normalized).resolve())
+
+    def _report_artifact_candidates(self, state: Mapping[str, Any]) -> list[dict[str, str]]:
+        candidates: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _add(name: Any, path_value: Any, kind: str = "") -> None:
+            resolved_path = self._resolve_report_artifact_path_for_hint(state, path_value)
+            if not resolved_path:
+                return
+            safe_name = str(name or os.path.basename(resolved_path) or "").strip()
+            if not safe_name:
+                safe_name = os.path.basename(resolved_path)
+            ext = Path(safe_name).suffix.lower().lstrip(".")
+            key = (safe_name.lower(), resolved_path)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(
+                {
+                    "name": safe_name,
+                    "path": resolved_path,
+                    "ext": ext,
+                    "kind": str(kind or "").strip(),
+                }
+            )
+
+        result_card = state.get("deep_research_result_card", {})
+        if isinstance(result_card, dict):
+            for key in (
+                "report_pdf_path",
+                "pdf_path",
+                "report_docx_path",
+                "docx_path",
+                "report_html_path",
+                "html_path",
+                "report_path",
+            ):
+                _add("", result_card.get(key), key)
+
+        for key in (
+            "long_document_compiled_pdf_path",
+            "long_document_compiled_docx_path",
+            "long_document_compiled_html_path",
+            "long_document_compiled_path",
+        ):
+            _add("", state.get(key), key)
+
+        artifact_files = state.get("artifact_files", [])
+        if isinstance(artifact_files, list):
+            for item in artifact_files:
+                if not isinstance(item, dict):
+                    continue
+                _add(item.get("name"), item.get("path"), str(item.get("kind") or "").strip())
+
+        return candidates
 
     def _is_document_generation_request(self, state: dict) -> bool:
         """Return True when the user wants a researched document/report produced as a file.
@@ -2927,6 +3115,8 @@ class AgentRuntime:
             "cmd /c",
         )
         if any(marker in text for marker in markers):
+            return True
+        if self._is_report_file_lookup_request(state):
             return True
 
         software_presence_intent = bool(
@@ -3214,6 +3404,80 @@ class AgentRuntime:
                     "if command -v \"$app\" >/dev/null 2>&1; then echo \"$app|installed|$(command -v $app)\"; "
                     "else echo \"$app|missing|\"; fi; done"
                 )
+            }
+
+        if self._is_report_file_lookup_request(state):
+            requested_exts = self._report_lookup_requested_extensions(lowered)
+            artifacts = self._report_artifact_candidates(state)
+            if requested_exts:
+                artifacts = [item for item in artifacts if str(item.get("ext") or "").lower() in requested_exts]
+            if artifacts:
+                paths = [str(item.get("path") or "").strip() for item in artifacts if str(item.get("path") or "").strip()]
+                output_dir = str(state.get("artifact_lookup_run_output_dir") or state.get("run_output_dir") or "").strip()
+                if os.name == "nt":
+                    quoted_paths = []
+                    for path in paths[:8]:
+                        quoted_paths.append("'" + path.replace("'", "''") + "'")
+                    quoted = ", ".join(quoted_paths)
+                    hint: dict[str, Any] = {
+                        "os_command": f"@({quoted}) | ForEach-Object {{ Write-Output $_ }}",
+                        "shell": "powershell",
+                        "target_os": "windows",
+                    }
+                    if output_dir:
+                        hint["os_working_directory"] = output_dir
+                    if state.get("artifact_lookup_run_id"):
+                        hint["artifact_lookup_run_id"] = str(state.get("artifact_lookup_run_id"))
+                    return hint
+                hint = {
+                    "os_command": "printf '%s\\n' " + " ".join(shlex.quote(path) for path in paths[:8]),
+                }
+                if output_dir:
+                    hint["os_working_directory"] = output_dir
+                if state.get("artifact_lookup_run_id"):
+                    hint["artifact_lookup_run_id"] = str(state.get("artifact_lookup_run_id"))
+                return hint
+
+            search_root = str(
+                state.get("artifact_lookup_run_output_dir")
+                or state.get("run_output_dir")
+                or state.get("working_directory")
+                or "."
+            ).strip() or "."
+            if requested_exts:
+                patterns = [f"*.{ext}" for ext in sorted(requested_exts)]
+            else:
+                patterns = [
+                    "*report*.pdf",
+                    "*report*.docx",
+                    "*report*.html",
+                    "*report*.md",
+                    "*deep_research*.pdf",
+                    "*deep_research*.docx",
+                    "*deep_research*.html",
+                    "*deep_research*.md",
+                ]
+            if os.name == "nt":
+                safe_search_root = search_root.replace("'", "''")
+                quoted_patterns = []
+                for pattern in patterns:
+                    quoted_patterns.append("$_.Name -like '" + pattern.replace("'", "''") + "'")
+                where_clause = " -or ".join(quoted_patterns) or "$true"
+                return {
+                    "os_command": (
+                        f"Get-ChildItem -Path '{safe_search_root}' -File -Recurse -ErrorAction SilentlyContinue | "
+                        f"Where-Object {{ {where_clause} }} | Select-Object -First 20 -ExpandProperty FullName"
+                    ),
+                    "shell": "powershell",
+                    "target_os": "windows",
+                    "os_working_directory": search_root,
+                }
+            search_clause = " -o ".join(f"-iname {shlex.quote(pattern)}" for pattern in patterns)
+            return {
+                "os_command": (
+                    f"find {shlex.quote(search_root)} -type f \\( {search_clause} \\) 2>/dev/null | sort | head -n 20"
+                ),
+                "os_working_directory": search_root,
             }
 
         if largest_file_request:
@@ -5512,6 +5776,10 @@ Return ONLY valid JSON in this exact schema:
             "deep_research_source_strategy": {},
             "deep_research_execution_plan": {},
             "deep_research_result_card": {},
+            "artifact_files": [],
+            "artifact_lookup_run_id": "",
+            "artifact_lookup_workflow_id": "",
+            "artifact_lookup_run_output_dir": "",
             "deep_research_source_urls": [],
             "workflow_type": "",
             "multi_model_enabled": _truthy(overrides.get("multi_model_enabled"), False),
@@ -5531,6 +5799,11 @@ Return ONLY valid JSON in this exact schema:
             "research_kb_enabled": False,
             "research_kb_id": "",
             "research_kb_top_k": 8,
+            "long_document_compiled_path": "",
+            "long_document_compiled_html_path": "",
+            "long_document_compiled_docx_path": "",
+            "long_document_compiled_pdf_path": "",
+            "long_document_exports": [],
             "resume_requested": False,
             "resume_ready": False,
             "resume_blocked": False,
@@ -5821,6 +6094,44 @@ Return ONLY valid JSON in this exact schema:
                 initial_state["project_root"] = str(prior_channel_state.get("project_root", "") or "")
             if prior_channel_state.get("project_stack"):
                 initial_state["project_stack"] = str(prior_channel_state.get("project_stack", "") or "")
+            if prior_channel_state.get("deep_research_result_card"):
+                initial_state["deep_research_result_card"] = (
+                    prior_channel_state.get("deep_research_result_card", {})
+                    if isinstance(prior_channel_state.get("deep_research_result_card", {}), dict)
+                    else {}
+                )
+            if prior_channel_state.get("artifact_files"):
+                initial_state["artifact_files"] = (
+                    prior_channel_state.get("artifact_files", [])
+                    if isinstance(prior_channel_state.get("artifact_files", []), list)
+                    else []
+                )
+            if prior_channel_state.get("long_document_exports"):
+                initial_state["long_document_exports"] = (
+                    prior_channel_state.get("long_document_exports", [])
+                    if isinstance(prior_channel_state.get("long_document_exports", []), list)
+                    else []
+                )
+            for key in (
+                "long_document_compiled_path",
+                "long_document_compiled_html_path",
+                "long_document_compiled_docx_path",
+                "long_document_compiled_pdf_path",
+            ):
+                if prior_channel_state.get(key):
+                    initial_state[key] = str(prior_channel_state.get(key, "") or "")
+            if prior_channel_state.get("last_report_run_id"):
+                initial_state["artifact_lookup_run_id"] = str(prior_channel_state.get("last_report_run_id", "") or "")
+            elif prior_channel_state.get("last_run_id"):
+                initial_state["artifact_lookup_run_id"] = str(prior_channel_state.get("last_run_id", "") or "")
+            if prior_channel_state.get("last_report_workflow_id"):
+                initial_state["artifact_lookup_workflow_id"] = str(prior_channel_state.get("last_report_workflow_id", "") or "")
+            elif prior_channel_state.get("last_workflow_id"):
+                initial_state["artifact_lookup_workflow_id"] = str(prior_channel_state.get("last_workflow_id", "") or "")
+            if prior_channel_state.get("last_report_run_output_dir"):
+                initial_state["artifact_lookup_run_output_dir"] = str(prior_channel_state.get("last_report_run_output_dir", "") or "")
+            elif prior_channel_state.get("run_output_dir"):
+                initial_state["artifact_lookup_run_output_dir"] = str(prior_channel_state.get("run_output_dir", "") or "")
             if prior_channel_state.get("session_id"):
                 initial_state["session_id"] = str(prior_channel_state.get("session_id", "") or "").strip() or initial_state.get("session_id", "")
             if prior_channel_state.get("superrag_active_session_id"):
