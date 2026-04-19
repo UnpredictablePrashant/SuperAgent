@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 node_modules
 node_modules/*
+random_scripts_ind/*
 
 # Virtual environments and local dependency targets
 .venv/

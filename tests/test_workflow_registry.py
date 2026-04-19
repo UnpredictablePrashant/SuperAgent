@@ -163,6 +163,7 @@ class WorkflowRegistryTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.agent_name, "long_document_agent")
         self.assertEqual(plan.intent, "long-document-resume")
+        self.assertTrue(plan.state_mutations["deep_research_mode"])
         self.assertTrue(plan.state_mutations["long_document_mode"])
         self.assertTrue(plan.state_mutations["long_document_job_started"])
 
@@ -198,8 +199,11 @@ class WorkflowRegistryTests(unittest.TestCase):
 
         self.assertIsNotNone(plan)
         self.assertEqual(plan.agent_name, "long_document_agent")
-        self.assertEqual(plan.intent, "long-document-dispatch")
+        self.assertEqual(plan.intent, "deep-research-dispatch")
         self.assertEqual(plan.state_mutations["workflow_type"], "deep_research")
+        self.assertTrue(plan.state_mutations["deep_research_mode"])
+        self.assertTrue(plan.state_mutations["long_document_mode"])
+        self.assertTrue(plan.state_mutations["long_document_job_started"])
 
     def test_match_explicit_workflow_returns_drive_informed_long_document_plan(self):
         with (
@@ -221,7 +225,29 @@ class WorkflowRegistryTests(unittest.TestCase):
         self.assertEqual(plan.agent_name, "long_document_agent")
         self.assertEqual(plan.intent, "drive-informed-long-document")
         self.assertEqual(plan.state_updates["long_document_pages"], 50)
+        self.assertTrue(plan.state_mutations["long_document_mode"])
+        self.assertTrue(plan.state_mutations["long_document_job_started"])
         self.assertIn("Quarterly revenue and churn evidence", plan.content)
+
+    def test_match_explicit_workflow_blocks_drive_informed_long_document_after_completion(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Do deep research on this dataset and produce a full report.")
+            state["local_drive_force_long_document"] = True
+            state["local_drive_calls"] = 1
+            state["long_document_mode"] = True
+            state["local_drive_summary"] = "Quarterly revenue and churn evidence from uploaded spreadsheets."
+            state["long_document_compiled_path"] = "output/final_report.md"
+            state["last_agent"] = "reviewer_agent"
+            plan = match_explicit_workflow(runtime, state, stage="post_approval")
+
+        self.assertIsNone(plan)
 
     def test_match_explicit_workflow_returns_research_pipeline_continue_plan(self):
         with (
@@ -253,6 +279,7 @@ class WorkflowRegistryTests(unittest.TestCase):
             runtime = AgentRuntime(build_registry())
             state = runtime.build_initial_state("Tell me about the current state of sodium-ion batteries.")
             state["last_agent"] = "research_pipeline_agent"
+            state["last_agent_status"] = "success"
             state["research_pipeline_report"] = "Source A says X. Source B says Y."
             plan = match_explicit_workflow(runtime, state, stage="continuation")
 
@@ -261,3 +288,20 @@ class WorkflowRegistryTests(unittest.TestCase):
         self.assertEqual(plan.intent, "research-synthesis")
         self.assertTrue(plan.state_mutations["research_synthesis_done"])
         self.assertIn("Source A says X", plan.content)
+
+    def test_match_explicit_workflow_does_not_route_research_synthesis_from_stale_draft_response(self):
+        with (
+            patch("kendr.runtime.build_setup_snapshot", side_effect=self._fake_setup_snapshot),
+            patch("tasks.a2a_protocol.upsert_agent_card"),
+            patch("tasks.a2a_protocol.insert_message"),
+            patch("tasks.a2a_protocol.upsert_task"),
+            patch("tasks.a2a_protocol.insert_artifact"),
+        ):
+            runtime = AgentRuntime(build_registry())
+            state = runtime.build_initial_state("Tell me about the current state of sodium-ion batteries.")
+            state["last_agent"] = "deep_research_agent"
+            state["last_agent_status"] = "error"
+            state["draft_response"] = "Reply `approve` to continue."
+            plan = match_explicit_workflow(runtime, state, stage="continuation")
+
+        self.assertIsNone(plan)

@@ -75,7 +75,7 @@ CATALOG: tuple[CatalogSkill, ...] = (
         core=True,
         default_permissions={
             "requires_approval": False,
-            "network": {"allow": True, "domains": ["api.duckduckgo.com"]},
+            "network": {"allow": True, "domains": ["duckduckgo.com"]},
         },
     ),
     CatalogSkill(
@@ -356,6 +356,7 @@ CATALOG: tuple[CatalogSkill, ...] = (
                 "origin": {"type": "string"},
                 "destination": {"type": "string"},
                 "date": {"type": "string", "description": "Travel date if known"},
+                "provider": {"type": "string", "description": "Optional route data provider: planner or serpapi"},
             },
             "required": ["request"],
         },

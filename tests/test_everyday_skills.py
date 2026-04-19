@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,6 +88,26 @@ class EverydaySkillTests(unittest.TestCase):
         self.assertTrue(result["success"], result.get("error"))
         self.assertEqual(result["output"]["travel_data"]["source"], "planner")
         self.assertIn("morning train", result["output"]["summary"])
+
+    def test_travel_helper_uses_serpapi_only_when_requested(self):
+        with (
+            patch.dict(os.environ, {"SERP_API_KEY": "test-serp-key"}, clear=False),
+            patch("kendr.skill_manager.get_user_skill", return_value=None),
+            patch("kendr.skill_manager._llm_text", return_value="Take the express route."),
+            patch("tasks.travel_tasks._serpapi_request", return_value={"route": "express"}),
+        ):
+            result = execute_skill_by_slug(
+                "travel-helper",
+                {
+                    "request": "Plan a fast route from Boston to New York",
+                    "origin": "Boston",
+                    "destination": "New York",
+                    "provider": "serpapi",
+                },
+            )
+
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertEqual(result["output"]["travel_data"]["source"], "serpapi")
 
     def test_message_draft_returns_draft_text(self):
         with (

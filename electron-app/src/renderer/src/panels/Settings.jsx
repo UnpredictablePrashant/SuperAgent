@@ -10,6 +10,30 @@ const TABS = [
   { id: 'chat',     label: 'Chat' },
 ]
 
+function formatDateTime(value) {
+  if (!value) return 'Not checked yet'
+  const ts = new Date(value)
+  if (Number.isNaN(ts.getTime())) return 'Not checked yet'
+  return ts.toLocaleString()
+}
+
+function describeFeed(updateStatus, settings) {
+  const savedFeed = String(settings.updateBaseUrl || '').trim()
+  if (savedFeed) return savedFeed
+  if (updateStatus.feedSource === 'packaged') return 'Packaged release feed'
+  if (updateStatus.feedSource === 'env' && updateStatus.feedUrl) return updateStatus.feedUrl
+  return 'Not configured'
+}
+
+function describeUpdateStatus(updateStatus) {
+  if (!updateStatus) return 'Update status unavailable.'
+  if (updateStatus.status === 'downloading' && updateStatus.progress?.percent != null) {
+    const percent = Math.max(0, Math.min(100, Number(updateStatus.progress.percent || 0)))
+    return `Downloading update (${percent.toFixed(percent >= 10 ? 0 : 1)}%).`
+  }
+  return updateStatus.message || 'Update status unavailable.'
+}
+
 export default function Settings() {
   const { state, dispatch } = useApp()
   const [tab, setTab]       = useState('general')
@@ -90,6 +114,10 @@ export default function Settings() {
   }
 
   const s = settings
+  const updateStatus = state.updateStatus || {}
+  const updateFeed = describeFeed(updateStatus, s)
+  const updateSummary = describeUpdateStatus(updateStatus)
+  const updateVersion = updateStatus.downloadedVersion || updateStatus.availableVersion || updateStatus.currentVersion || 'unknown'
 
   return (
     <div className="st-root">
@@ -143,6 +171,68 @@ export default function Settings() {
               <Row label="Display Name"><input className="st-input" value={s.gitName || ''} onChange={e => update('gitName', e.target.value)} /></Row>
               <Row label="Email"><input className="st-input" value={s.gitEmail || ''} onChange={e => update('gitEmail', e.target.value)} /></Row>
               <Row label="GitHub PAT"><input className="st-input" type="password" value={s.githubPat || ''} onChange={e => update('githubPat', e.target.value)} placeholder="ghp_…" /></Row>
+            </Section>
+
+            <Section title="Application Updates">
+              <Row label="Enable Remote Updates">
+                <input type="checkbox" className="st-check" checked={s.updatesEnabled !== false} onChange={e => update('updatesEnabled', e.target.checked)} />
+              </Row>
+              <Row label="Update Feed URL">
+                <input
+                  className="st-input"
+                  value={s.updateBaseUrl || ''}
+                  onChange={e => update('updateBaseUrl', e.target.value)}
+                  placeholder="Use the packaged release feed when left blank"
+                />
+              </Row>
+              <Row label="Update Channel">
+                <input
+                  className="st-input st-input--sm"
+                  value={s.updateChannel || 'latest'}
+                  onChange={e => update('updateChannel', e.target.value)}
+                  placeholder="latest"
+                />
+              </Row>
+              <Row label="Check Every (minutes)">
+                <input
+                  className="st-input st-input--sm"
+                  type="number"
+                  min="15"
+                  max="1440"
+                  value={Number(s.updateCheckIntervalMinutes || 240)}
+                  onChange={e => update('updateCheckIntervalMinutes', Math.max(15, Math.min(1440, Number(e.target.value || 240))))}
+                />
+              </Row>
+              <Row label="Auto-download Releases">
+                <input type="checkbox" className="st-check" checked={s.autoDownloadUpdates !== false} onChange={e => update('autoDownloadUpdates', e.target.checked)} />
+              </Row>
+              <Row label="Install on Quit">
+                <input type="checkbox" className="st-check" checked={s.autoInstallOnQuit !== false} onChange={e => update('autoInstallOnQuit', e.target.checked)} />
+              </Row>
+              <Row label="Allow Pre-release Versions">
+                <input type="checkbox" className="st-check" checked={!!s.allowPrereleaseUpdates} onChange={e => update('allowPrereleaseUpdates', e.target.checked)} />
+              </Row>
+              <div className="st-info-banner">
+                {updateSummary}
+              </div>
+              <div className="st-info-banner" style={{ marginTop: 8 }}>
+                {`Current version: ${updateStatus.currentVersion || 'unknown'} · Target version: ${updateVersion} · Feed: ${updateFeed} · Last check: ${formatDateTime(updateStatus.checkedAt)}`}
+              </div>
+              <div className="st-actions">
+                <button className="st-btn" onClick={() => api?.updates?.check()} disabled={updateStatus.status === 'checking'}>
+                  {updateStatus.status === 'checking' ? 'Checking…' : 'Check for Updates'}
+                </button>
+                {updateStatus.status === 'available' && updateStatus.autoDownload === false && (
+                  <button className="st-btn-accent" onClick={() => api?.updates?.download()}>
+                    Download Update
+                  </button>
+                )}
+                {updateStatus.status === 'downloaded' && (
+                  <button className="st-btn-accent" onClick={() => api?.updates?.install()}>
+                    Restart to Update
+                  </button>
+                )}
+              </div>
             </Section>
 
             <Section title="Machine Sync">

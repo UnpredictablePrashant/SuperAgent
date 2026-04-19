@@ -9,7 +9,7 @@ vars are documented in kendr/setup/catalog.py.
 
 Supported providers
 -------------------
-openai          OpenAI API (default)
+openai          OpenAI API
 anthropic       Anthropic Claude API
 google          Google Gemini (GenerativeAI)
 xai             xAI Grok (OpenAI-compatible)
@@ -23,7 +23,7 @@ custom          Any OpenAI-compatible endpoint
 Backward compatibility
 ----------------------
 All existing OPENAI_MODEL_GENERAL / OPENAI_MODEL_CODING / OPENAI_API_KEY env
-vars still work when provider == "openai" (or not set).
+vars still work when provider == "openai" (or when OpenAI is inferred).
 """
 
 from __future__ import annotations
@@ -242,29 +242,124 @@ def get_context_window(model: str) -> int:
     return 128000
 
 
-def get_model_capabilities(model: str) -> dict[str, bool]:
+def supports_native_web_search(model: str, provider: str = "") -> bool:
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider != PROVIDER_OPENAI:
+        return False
+    name = str(model or "").strip().lower()
+    if not name:
+        return False
+    if "gpt-4.1-nano" in name:
+        return False
+    if "deep-research" in name:
+        return True
+    return any(token in name for token in ("gpt-5", "gpt-4o", "gpt-4.1", "o3", "o4-"))
+
+
+def get_model_capabilities(model: str, provider: str = "") -> dict[str, bool]:
     name = str(model or "").strip().lower()
     default = {
         "tool_calling": False,
         "vision": False,
         "structured_output": False,
         "reasoning": False,
+        "native_web_search": False,
     }
     for needle, capabilities in _MODEL_CAPABILITY_RULES:
         if needle in name:
-            return {**default, **capabilities}
-    return default
+            return {
+                **default,
+                **capabilities,
+                "native_web_search": supports_native_web_search(model, provider),
+            }
+    return {
+        **default,
+        "native_web_search": supports_native_web_search(model, provider),
+    }
 
 
 def is_agent_capable_model(model: str, provider: str = "") -> bool:
     normalized_provider = str(provider or "").strip().lower()
     if normalized_provider == PROVIDER_OLLAMA:
         return False
-    capabilities = get_model_capabilities(model)
+    capabilities = get_model_capabilities(model, provider)
     return bool(capabilities.get("tool_calling"))
 
 
 # ── provider detection ────────────────────────────────────────────────────────
+
+def _provider_has_explicit_model_selection(provider: str) -> bool:
+    normalized_provider = str(provider or "").strip().lower()
+    return bool(configured_models_for_provider(normalized_provider))
+
+
+def _provider_is_configured(provider: str) -> bool:
+    normalized_provider = str(provider or "").strip().lower()
+    if not normalized_provider:
+        return False
+    if normalized_provider == PROVIDER_CUSTOM:
+        return bool(os.getenv("CUSTOM_LLM_BASE_URL", "").strip())
+    if normalized_provider == PROVIDER_OLLAMA:
+        return _provider_has_explicit_model_selection(normalized_provider)
+    return bool(get_api_key(normalized_provider))
+
+
+def _provider_autoselect_score(provider: str, *, inferred_family: str = "") -> float:
+    normalized_provider = str(provider or "").strip().lower()
+    if not normalized_provider:
+        return float("-inf")
+    score = 0.0
+    if normalized_provider == inferred_family:
+        score += 120.0
+    if _provider_has_explicit_model_selection(normalized_provider):
+        score += 80.0
+    if _provider_is_configured(normalized_provider):
+        score += 40.0
+    model = get_model_for_provider(normalized_provider)
+    capabilities = get_model_capabilities(model, normalized_provider)
+    if capabilities.get("tool_calling"):
+        score += 12.0
+    if capabilities.get("reasoning"):
+        score += 10.0
+    if capabilities.get("structured_output"):
+        score += 8.0
+    score += min(get_context_window(model), 400000) / 100000.0
+    return score
+
+
+def _auto_detect_active_provider() -> str:
+    global_model = os.getenv("KENDR_MODEL", "").strip()
+    inferred_family = infer_model_family(global_model)
+    if inferred_family in ALL_PROVIDERS and (
+        _provider_is_configured(inferred_family) or _provider_has_explicit_model_selection(inferred_family)
+    ):
+        return inferred_family
+
+    explicit_model_providers = [provider for provider in ALL_PROVIDERS if _provider_has_explicit_model_selection(provider)]
+    ready_explicit_model_providers = [provider for provider in explicit_model_providers if _provider_is_configured(provider)]
+    if ready_explicit_model_providers:
+        return max(
+            ready_explicit_model_providers,
+            key=lambda provider: (_provider_autoselect_score(provider, inferred_family=inferred_family), -ALL_PROVIDERS.index(provider)),
+        )
+
+    configured_providers = [provider for provider in ALL_PROVIDERS if _provider_is_configured(provider)]
+    if configured_providers:
+        return max(
+            configured_providers,
+            key=lambda provider: (_provider_autoselect_score(provider, inferred_family=inferred_family), -ALL_PROVIDERS.index(provider)),
+        )
+
+    if explicit_model_providers:
+        return max(
+            explicit_model_providers,
+            key=lambda provider: (_provider_autoselect_score(provider, inferred_family=inferred_family), -ALL_PROVIDERS.index(provider)),
+        )
+
+    if inferred_family in ALL_PROVIDERS:
+        return inferred_family
+    return PROVIDER_OPENAI
+
 
 def get_active_provider() -> str:
     """Return the active provider name (lower-cased)."""
@@ -272,7 +367,7 @@ def get_active_provider() -> str:
         os.getenv("KENDR_LLM_PROVIDER", "")
         or os.getenv("KENDR_PROVIDER", "")
     ).strip().lower()
-    return val if val in ALL_PROVIDERS else PROVIDER_OPENAI
+    return val if val in ALL_PROVIDERS else _auto_detect_active_provider()
 
 
 def get_api_key(provider: str) -> str:
@@ -547,7 +642,7 @@ def provider_status(provider: str) -> dict:
                     "name": name,
                     "family": infer_model_family(name, provider),
                     "context_window": get_context_window(name),
-                    "capabilities": get_model_capabilities(name),
+                    "capabilities": get_model_capabilities(name, provider),
                     "agent_capable": False,
                 }
                 for name in selectable
@@ -578,7 +673,7 @@ def provider_status(provider: str) -> dict:
                     "name": item,
                     "family": infer_model_family(item, provider),
                     "context_window": get_context_window(item),
-                    "capabilities": get_model_capabilities(item),
+                    "capabilities": get_model_capabilities(item, provider),
                     "agent_capable": is_agent_capable_model(item, infer_model_family(item, provider)),
                 }
                 for item in selectable
@@ -603,7 +698,7 @@ def provider_status(provider: str) -> dict:
         "model": model,
         "model_family": infer_model_family(model, provider),
         "configured_models": configured,
-        "model_capabilities": get_model_capabilities(model),
+        "model_capabilities": get_model_capabilities(model, provider),
         "agent_capable": is_agent_capable_model(model, provider),
         "selectable_models": selectable,
         "selectable_model_details": [
@@ -611,7 +706,7 @@ def provider_status(provider: str) -> dict:
                 "name": item,
                 "family": infer_model_family(item, provider),
                 "context_window": get_context_window(item),
-                "capabilities": get_model_capabilities(item),
+                "capabilities": get_model_capabilities(item, provider),
                 "agent_capable": is_agent_capable_model(item, infer_model_family(item, provider)),
             }
             for item in selectable
@@ -643,7 +738,7 @@ def build_llm(
     """
     Build and return a LangChain chat client for the given provider.
 
-    Falls back to OpenAI if the requested provider cannot be initialised.
+    Falls back to the active provider when none is supplied.
     """
     p = (provider or get_active_provider()).lower()
     m = model or get_model_for_provider(p, role)

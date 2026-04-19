@@ -92,7 +92,7 @@ def default_permission_manifest(*, skill_type: str = "", catalog_id: str = "", c
         manifest["requires_approval"] = True
     elif kind == "catalog" and catalog == "web-search":
         manifest["network"]["allow"] = True
-        manifest["network"]["domains"] = ["api.duckduckgo.com"]
+        manifest["network"]["domains"] = ["duckduckgo.com"]
     elif kind == "catalog" and catalog == "desktop-automation":
         manifest["desktop"] = {
             "allow": True,

@@ -2,11 +2,12 @@ import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import { randomUUID } from 'crypto'
 import { join } from 'path'
 import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs'
-import { exec, execSync } from 'child_process'
+import { exec } from 'child_process'
 import { Store } from './store.js'
 import os from 'os'
 import path from 'path'
 import { BackendManager } from './backend.js'
+import { UpdateManager } from './updater.js'
 
 let pty
 try {
@@ -30,6 +31,13 @@ const store = new Store({
     gitEmail:        '',
     githubPat:       '',
     autoStartBackend: true,
+    updatesEnabled:  true,
+    updateBaseUrl:   '',
+    updateChannel:   'latest',
+    autoDownloadUpdates: true,
+    autoInstallOnQuit: true,
+    allowPrereleaseUpdates: false,
+    updateCheckIntervalMinutes: 240,
     windowBounds:    { width: 1400, height: 900 },
     sidebarWidth:    260,
     chatPanelWidth:  380,
@@ -43,8 +51,28 @@ const store = new Store({
 })
 
 const backend = new BackendManager(store)
+const updates = new UpdateManager(store, { getMainWindow: () => mainWindow })
 const ptyProcesses = new Map()
 let mainWindow = null
+let rendererRecoveryAttempts = 0
+let rendererRecoveryResetTimer = null
+
+function resetRendererRecoveryBudgetSoon() {
+  if (rendererRecoveryResetTimer) clearTimeout(rendererRecoveryResetTimer)
+  rendererRecoveryResetTimer = setTimeout(() => {
+    rendererRecoveryAttempts = 0
+    rendererRecoveryResetTimer = null
+  }, 30000)
+}
+
+function reloadMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (process.env.ELECTRON_RENDERER_URL) {
+    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+  } else {
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+}
 
 function createWindow() {
   const bounds = store.get('windowBounds')
@@ -83,6 +111,16 @@ function createWindow() {
     ptyProcesses.clear()
   })
 
+  mainWindow.webContents.on('render-process-gone', (_, details) => {
+    console.error('[renderer] process gone', details)
+    if (rendererRecoveryAttempts >= 2) return
+    rendererRecoveryAttempts += 1
+    resetRendererRecoveryBudgetSoon()
+    setTimeout(() => {
+      reloadMainWindow()
+    }, 300)
+  })
+
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
@@ -97,6 +135,10 @@ app.whenReady().then(async () => {
   backend.onChange((status) => {
     mainWindow?.webContents.send('backend:status-push', status)
   })
+  updates.onChange((status) => {
+    mainWindow?.webContents.send('updates:status-push', status)
+  })
+  updates.init()
 
   // Auto-start gateway + UI server
   if (store.get('autoStartBackend')) {
@@ -130,9 +172,18 @@ ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false)
 ipcMain.handle('settings:get', (_, key) => key ? store.get(key) : store.store)
 ipcMain.handle('settings:set', (_, key, value) => {
   store.set(key, value)
+  if (updates.isUpdateSettingKey(key)) {
+    updates.refreshConfig()
+  }
   return true
 })
 ipcMain.handle('settings:getAll', () => store.store)
+
+// ─── Application Updates ─────────────────────────────────────────────────────
+ipcMain.handle('updates:status', () => updates.status())
+ipcMain.handle('updates:check', () => updates.checkForUpdates({ manual: true }))
+ipcMain.handle('updates:download', () => updates.downloadUpdate())
+ipcMain.handle('updates:install', () => ({ ok: updates.quitAndInstall() }))
 
 // ─── Backend Management ───────────────────────────────────────────────────────
 ipcMain.handle('backend:status',  () => backend.status())

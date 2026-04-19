@@ -70,6 +70,27 @@ const initialState = {
 
   // Settings (loaded from electron-store)
   settings: {},
+  updateStatus: {
+    supported: false,
+    enabled: true,
+    configured: false,
+    invalidFeedUrl: false,
+    status: 'idle',
+    currentVersion: null,
+    availableVersion: null,
+    downloadedVersion: null,
+    checkedAt: null,
+    progress: null,
+    channel: 'latest',
+    feedUrl: '',
+    feedSource: 'none',
+    autoDownload: true,
+    autoInstallOnQuit: true,
+    allowPrerelease: false,
+    intervalMinutes: 240,
+    error: null,
+    message: '',
+  },
 
   // Shared model/provider inventory cache
   modelInventory: null,
@@ -169,6 +190,8 @@ function reducer(state, action) {
     case 'TOGGLE_COMMAND_PALETTE': return { ...state, commandPaletteOpen: !state.commandPaletteOpen }
     case 'SET_COMMAND_PALETTE': return { ...state, commandPaletteOpen: action.open }
     case 'SET_SETTINGS': return { ...state, settings: { ...state.settings, ...action.settings } }
+    case 'SET_UPDATE_STATUS':
+      return { ...state, updateStatus: { ...state.updateStatus, ...action.status } }
     case 'SET_MODEL_INVENTORY_LOADING':
       return { ...state, modelInventoryLoading: action.loading, modelInventoryError: action.loading ? false : state.modelInventoryError }
     case 'SET_MODEL_INVENTORY':
@@ -291,6 +314,18 @@ export function AppProvider({ children }) {
     // Live updates via IPC
     const unsub = api.backend.onStatusChange((status) => {
       dispatch({ type: 'SET_BACKEND_SERVICES', services: status })
+    })
+    return () => { try { unsub?.() } catch (_) {} }
+  }, [])
+
+  useEffect(() => {
+    const api = window.kendrAPI
+    if (!api?.updates) return
+    api.updates.status().then((status) => {
+      if (status) dispatch({ type: 'SET_UPDATE_STATUS', status })
+    })
+    const unsub = api.updates.onStatusChange((status) => {
+      dispatch({ type: 'SET_UPDATE_STATUS', status })
     })
     return () => { try { unsub?.() } catch (_) {} }
   }, [])

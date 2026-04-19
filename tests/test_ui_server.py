@@ -405,6 +405,8 @@ class TestChatHtmlExecutionLens(unittest.TestCase):
         self.assertIn("deepResearchPanelBody", ui_server._CHAT_HTML)
         self.assertIn("toggleDeepResearchPanel()", ui_server._CHAT_HTML)
         self.assertIn("updateDeepResearchPanelSummary()", ui_server._CHAT_HTML)
+        self.assertIn("drSearchBackend", ui_server._CHAT_HTML)
+        self.assertIn("refreshDeepResearchSearchProviders", ui_server._CHAT_HTML)
 
     def test_chat_html_includes_approval_modal(self):
         import kendr.ui_server as ui_server
@@ -434,6 +436,13 @@ class TestChatHtmlExecutionLens(unittest.TestCase):
         self.assertIn("chatComposerState", ui_server._CHAT_HTML)
         self.assertIn("button.textContent = isStopping ? 'Wait...' : 'Stop';", ui_server._CHAT_HTML)
         self.assertIn("mainChatAttachBtn", ui_server._CHAT_HTML)
+
+    def test_chat_html_routes_file_locator_requests_through_runtime(self):
+        import kendr.ui_server as ui_server
+
+        self.assertIn("function _looksLikeFileLocatorRequest(text)", ui_server._CHAT_HTML)
+        self.assertIn("if (_looksLikeFileLocatorRequest(lower)) return null;", ui_server._CHAT_HTML)
+        self.assertIn("if (_looksLikeFileLocatorRequest(body)) return 'execute';", ui_server._PROJECTS_HTML)
 
     def test_chat_html_includes_smart_research_timeline_hooks(self):
         import kendr.ui_server as ui_server
@@ -1332,6 +1341,11 @@ class TestUIModelInventory(unittest.TestCase):
                 {"provider": "ollama", "ready": False, "model": "llama3.2", "note": "Not running"},
                 {"provider": "openai", "ready": True, "model": "gpt-5.1", "note": "API key configured"},
             ]),
+            patch("kendr.ui_server._research_search_provider_statuses", return_value=[
+                {"id": "auto", "label": "Auto", "enabled": True},
+                {"id": "duckduckgo", "label": "DuckDuckGo (DDGS)", "enabled": True, "warning": "rate limit"},
+                {"id": "serpapi", "label": "SerpAPI", "enabled": False},
+            ]),
         ):
             srv = ThreadingHTTPServer(("127.0.0.1", 0), KendrUIHandler)
             _, port = srv.server_address
@@ -1352,6 +1366,9 @@ class TestUIModelInventory(unittest.TestCase):
         self.assertFalse(body.get("configured_provider_ready"))
         self.assertEqual(body.get("active_provider"), "openai")
         self.assertEqual(body.get("active_model"), "gpt-5.1")
+        self.assertIn("workflow_recommendations", body)
+        self.assertIsInstance(body.get("workflow_recommendations", {}).get("workflows"), list)
+        self.assertEqual(body.get("search_providers", [])[1]["id"], "duckduckgo")
 
     def test_comparison_rows_expand_per_model_and_family(self):
         from kendr.ui_server import _comparison_rows_from_provider_statuses
@@ -2175,6 +2192,112 @@ class TestDeepResearchChatPayload(unittest.TestCase):
         )
         persist_user.assert_called_once()
         persist_result.assert_called_once()
+
+
+class TestDeepResearchArtifactResolution(unittest.TestCase):
+    def test_normalise_project_chat_message_keeps_artifact_files(self):
+        import kendr.ui_server as ui_server
+
+        normalised = ui_server._normalise_project_chat_message(
+            {
+                "role": "agent",
+                "content": "Deep research finished.",
+                "artifact_files": [
+                    {
+                        "name": "report.pdf",
+                        "path": r"D:\runs\demo\report.pdf",
+                        "download_url": "/api/artifacts/download?run_id=demo&name=report.pdf",
+                    }
+                ],
+            }
+        )
+
+        self.assertIsNotNone(normalised)
+        self.assertEqual(normalised["artifact_files"][0]["name"], "report.pdf")
+
+    def test_resolve_run_artifact_path_uses_created_artifacts_from_result_card(self):
+        import kendr.ui_server as ui_server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            artifact = run_dir / "deep_research_runs" / "deep_research_run_2" / "source_manifest.md"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("# Source Manifest\n", encoding="utf-8")
+
+            with patch("kendr.ui_server._db_get_run", return_value={"run_output_dir": str(run_dir)}):
+                with ui_server._pending_lock:
+                    previous = ui_server._pending_runs.get("run-1")
+                    ui_server._pending_runs["run-1"] = {
+                        "result": {
+                            "deep_research_result_card": {
+                                "created_artifacts": [
+                                    {
+                                        "name": "source_manifest.md",
+                                        "path": "output/deep_research_runs/deep_research_run_2/source_manifest.md",
+                                        "kind": "manifest",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                try:
+                    resolved = ui_server._resolve_run_artifact_path("run-1", "source_manifest.md")
+                finally:
+                    with ui_server._pending_lock:
+                        if previous is None:
+                            ui_server._pending_runs.pop("run-1", None)
+                        else:
+                            ui_server._pending_runs["run-1"] = previous
+
+        self.assertEqual(resolved, str(artifact))
+
+    def test_augment_result_artifact_files_includes_nested_deep_research_reports(self):
+        import kendr.ui_server as ui_server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            report_pdf = run_dir / "deep_research_runs" / "deep_research_run_2" / "report.pdf"
+            report_pdf.parent.mkdir(parents=True, exist_ok=True)
+            report_pdf.write_bytes(b"%PDF-1.4")
+
+            doc_files, exports = ui_server._augment_result_artifact_files(
+                "run-2",
+                {
+                    "artifact_files": [],
+                    "deep_research_result_card": {
+                        "created_artifacts": [
+                            {
+                                "name": "report.pdf",
+                                "path": "output/deep_research_runs/deep_research_run_2/report.pdf",
+                                "kind": "report",
+                            }
+                        ]
+                    },
+                },
+                output_dir=str(run_dir),
+            )
+
+        self.assertEqual(len(doc_files), 1)
+        self.assertEqual(doc_files[0]["name"], "report.pdf")
+        self.assertEqual(doc_files[0]["path"], str(report_pdf))
+        self.assertEqual(exports, [{"ext": "pdf", "label": "report.pdf", "name": "report.pdf"}])
+
+    def test_collect_artifacts_prefers_root_report_mirror_over_nested_copy(self):
+        import kendr.ui_server as ui_server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            root_report = run_dir / "reports" / "report.pdf"
+            nested_report = run_dir / "deep_research_runs" / "deep_research_run_1" / "report.pdf"
+            root_report.parent.mkdir(parents=True, exist_ok=True)
+            nested_report.parent.mkdir(parents=True, exist_ok=True)
+            root_report.write_bytes(b"%PDF-root")
+            nested_report.write_bytes(b"%PDF-nested")
+
+            _, file_list = ui_server._collect_artifacts("run-root-preferred", str(run_dir))
+
+        report_entry = next(item for item in file_list if item["name"] == "report.pdf")
+        self.assertEqual(report_entry["path"], str(root_report))
 
 
 class TestUICapabilitiesSurface(unittest.TestCase):

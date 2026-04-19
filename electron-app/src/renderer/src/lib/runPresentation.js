@@ -17,7 +17,15 @@ function pushUniqueItem(list, item, limit = 4) {
   const path = String(item?.path || '').trim()
   if (!label || list.length >= limit) return
   if (list.some((entry) => entry.label === label && String(entry.path || '').trim() === path)) return
-  list.push({ label, path })
+  list.push({
+    label,
+    path,
+    name: String(item?.name || label).trim(),
+    kind: String(item?.kind || '').trim(),
+    ext: String(item?.ext || '').trim(),
+    downloadUrl: String(item?.downloadUrl || '').trim(),
+    viewUrl: String(item?.viewUrl || '').trim(),
+  })
 }
 
 function normalizeArtifactItem(artifact) {
@@ -27,7 +35,12 @@ function normalizeArtifactItem(artifact) {
     if (!raw) return null
     return {
       label: basename(raw),
+      name: basename(raw),
       path: raw,
+      kind: '',
+      ext: raw.includes('.') ? raw.split('.').pop().toLowerCase() : '',
+      downloadUrl: '',
+      viewUrl: '',
     }
   }
   if (typeof artifact !== 'object') return null
@@ -35,9 +48,15 @@ function normalizeArtifactItem(artifact) {
   const name = String(artifact.name || artifact.label || '').trim()
   const label = name || basename(path)
   if (!label) return null
+  const ext = String(artifact.ext || (label.includes('.') ? label.split('.').pop() : '')).trim().toLowerCase()
   return {
     label,
+    name: label,
     path,
+    kind: String(artifact.kind || '').trim().toLowerCase(),
+    ext,
+    downloadUrl: String(artifact.download_url || artifact.downloadUrl || '').trim(),
+    viewUrl: String(artifact.view_url || artifact.viewUrl || '').trim(),
   }
 }
 
@@ -215,11 +234,30 @@ export function summarizeRunArtifacts(progress = [], artifacts = []) {
     }
   }
 
-  for (const artifact of Array.isArray(artifacts) ? artifacts : []) {
+  const artifactList = [...(Array.isArray(artifacts) ? artifacts : [])].sort((left, right) => {
+    const normalize = (item) => normalizeArtifactItem(item) || {}
+    const priority = (item) => {
+      const normalized = normalize(item)
+      const name = String(normalized.name || normalized.label || '').toLowerCase()
+      const ext = String(normalized.ext || '').toLowerCase()
+      if (/^report\.(pdf|docx|html|md)$/.test(name)) {
+        return { pdf: 0, docx: 1, html: 2, md: 3 }[ext] ?? 4
+      }
+      return 10
+    }
+    return priority(left) - priority(right)
+  })
+
+  const reportItems = []
+  for (const artifact of artifactList) {
     const normalized = normalizeArtifactItem(artifact)
     if (!normalized) continue
     counts.artifact += 1
-    pushUniqueItem(samples.artifact, normalized, 6)
+    if (/^report\.(pdf|docx|html|md)$/i.test(String(normalized.name || normalized.label || ''))) {
+      pushUniqueItem(reportItems, normalized, 6)
+    } else {
+      pushUniqueItem(samples.artifact, normalized, 6)
+    }
   }
 
   const makeCard = (kind, title) => ({
@@ -229,10 +267,18 @@ export function summarizeRunArtifacts(progress = [], artifacts = []) {
   })
 
   const cards = []
+  const nonReportArtifactCount = Math.max(0, counts.artifact - reportItems.length)
+  if (reportItems.length > 0) {
+    cards.push({
+      kind: 'artifact',
+      title: 'Report downloads',
+      items: reportItems,
+    })
+  }
   if (counts.search > 0) cards.push(makeCard('search', `Searched ${counts.search} source${counts.search === 1 ? '' : 's'}`))
   if (counts.read > 0) cards.push(makeCard('read', `Read ${counts.read} file${counts.read === 1 ? '' : 's'}`))
   if (counts.edit > 0) cards.push(makeCard('edit', `Changed ${counts.edit} file${counts.edit === 1 ? '' : 's'}`))
-  if (counts.artifact > 0) cards.push(makeCard('artifact', `Created ${counts.artifact} artifact${counts.artifact === 1 ? '' : 's'}`))
+  if (nonReportArtifactCount > 0) cards.push(makeCard('artifact', `Created ${nonReportArtifactCount} artifact${nonReportArtifactCount === 1 ? '' : 's'}`))
   if (counts.command > 0) cards.push(makeCard('command', `Ran ${counts.command} command${counts.command === 1 ? '' : 's'}`))
   if (counts.review > 0) cards.push(makeCard('review', `Checked ${counts.review} task${counts.review === 1 ? '' : 's'}`))
   return cards.slice(0, 4)

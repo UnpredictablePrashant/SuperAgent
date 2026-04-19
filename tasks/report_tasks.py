@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
+from tasks.research_output import render_artifact_lines
 from tasks.utils import OUTPUT_DIR, llm, log_task_update, normalize_llm_text, resolve_output_path, write_text_file
 
 
@@ -60,6 +61,12 @@ def _collect_report_context(state: dict) -> dict:
         "final_output": state.get("final_output", ""),
         "search_summary": state.get("search_summary", ""),
         "research_result": state.get("research_result", ""),
+        "research_source_summary": state.get("research_source_summary", []),
+        "research_kb_used": state.get("research_kb_used", False),
+        "research_kb_name": state.get("research_kb_name", ""),
+        "research_kb_hit_count": state.get("research_kb_hit_count", 0),
+        "research_kb_warning": state.get("research_kb_warning", ""),
+        "deep_research_result_card": state.get("deep_research_result_card", {}),
         "excel_analysis": state.get("excel_analysis", ""),
         "report_target_pages": state.get("report_target_pages", 0),
         "review_reason": state.get("review_reason", ""),
@@ -87,6 +94,41 @@ def _collect_report_context(state: dict) -> dict:
     }
 
 
+def _result_card_section_body(card: dict) -> str:
+    if not isinstance(card, dict) or not card:
+        return ""
+
+    ordered_lines: list[str] = []
+    preferred_keys = [
+        ("kind", "Kind"),
+        ("title", "Title"),
+        ("query", "Query"),
+        ("mode", "Mode"),
+        ("web_search_enabled", "Web search enabled"),
+        ("local_sources", "Local sources"),
+        ("provided_urls", "Provided URLs"),
+        ("research_kb_used", "Knowledge base used"),
+        ("research_kb_name", "Knowledge base name"),
+        ("research_kb_hit_count", "Knowledge base hits"),
+        ("research_kb_warning", "Knowledge base warning"),
+    ]
+
+    for key, label in preferred_keys:
+        value = card.get(key)
+        if value in ("", None, [], {}):
+            continue
+        ordered_lines.append(f"- {label}: {value}")
+
+    for key, value in card.items():
+        if any(existing_key == key for existing_key, _ in preferred_keys):
+            continue
+        if value in ("", None, [], {}):
+            continue
+        ordered_lines.append(f"- {key}: {value}")
+
+    return "\n".join(ordered_lines)
+
+
 def _manual_report_fallback(title: str, context: dict) -> dict:
     summary = (
         context.get("final_output")
@@ -110,6 +152,12 @@ def _manual_report_fallback(title: str, context: dict) -> dict:
         sections.append({"heading": "Plan", "body": context["plan"]})
     if context.get("review_reason"):
         sections.append({"heading": "Review Notes", "body": context["review_reason"]})
+    result_card_body = _result_card_section_body(context.get("deep_research_result_card", {}))
+    if result_card_body:
+        sections.append({"heading": "Research Brief Card", "body": result_card_body})
+    source_summary = context.get("research_source_summary", [])
+    if isinstance(source_summary, list) and source_summary:
+        sections.append({"heading": "Research Sources", "body": "\n".join(str(item) for item in source_summary if str(item).strip())})
     return {
         "title": title,
         "summary": summary,
@@ -599,13 +647,27 @@ def report_agent(state):
     write_text_file(manifest_filename, json.dumps(manifest, indent=2, ensure_ascii=False))
     write_text_file(summary_filename, report_text)
 
+    artifact_lines = render_artifact_lines(
+        [
+            ("HTML report", output_paths.get("html", "")),
+            ("PDF report", output_paths.get("pdf", "")),
+            ("XLSX workbook", output_paths.get("xlsx", "")),
+            ("Manifest", resolve_output_path(manifest_filename)),
+            ("Plain-text summary", resolve_output_path(summary_filename)),
+        ],
+        output_root=OUTPUT_DIR,
+    )
+
     state["report_data"] = report_data
     state["report_summary"] = report_text
     state["report_files"] = output_paths
     state["report_manifest"] = manifest
+    state["report_artifact_lines"] = artifact_lines
     state["draft_response"] = (
-        f"Generated report '{report_data['title']}' in formats: {', '.join(report_formats)}.\n"
-        + "\n".join(f"- {fmt}: {path}" for fmt, path in output_paths.items())
+        "Report export complete.\n"
+        f"- Generated report '{report_data['title']}'\n"
+        f"- Formats: {', '.join(report_formats)}\n"
+        + "\n".join(artifact_lines)
     )
 
     log_task_update(

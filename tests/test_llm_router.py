@@ -28,6 +28,40 @@ class LlmRouterTests(unittest.TestCase):
 
         self.assertEqual(model, "claude-sonnet-4-6")
 
+    def test_active_provider_prefers_explicit_model_selection_over_openai_key_only(self):
+        from kendr.llm_router import get_active_provider
+
+        with patch.dict(os.environ, {
+            "OPENAI_API_KEY": "test-openai-key",
+            "OLLAMA_MODEL": "lfm2.5-thinking:latest",
+        }, clear=True):
+            provider = get_active_provider()
+
+        self.assertEqual(provider, "ollama")
+
+    def test_active_provider_infers_provider_from_global_model_family(self):
+        from kendr.llm_router import get_active_provider
+
+        with patch.dict(os.environ, {
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "KENDR_MODEL": "claude-sonnet-4-6",
+        }, clear=True):
+            provider = get_active_provider()
+
+        self.assertEqual(provider, "anthropic")
+
+    def test_active_provider_prefers_ready_provider_over_unready_explicit_model_hint(self):
+        from kendr.llm_router import get_active_provider
+
+        with patch.dict(os.environ, {
+            "OPENAI_MODEL_GENERAL": "gpt-5.1",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "ANTHROPIC_MODEL": "claude-sonnet-4-6",
+        }, clear=True):
+            provider = get_active_provider()
+
+        self.assertEqual(provider, "anthropic")
+
     def test_provider_status_keeps_current_model_in_selectable_choices(self):
         from kendr.llm_router import provider_status
 
@@ -192,6 +226,15 @@ class LlmRouterTests(unittest.TestCase):
         self.assertTrue(status["model_capabilities"]["tool_calling"])
         self.assertTrue(status["model_capabilities"]["vision"])
         self.assertTrue(status["model_capabilities"]["structured_output"])
+        self.assertTrue(status["model_capabilities"]["native_web_search"])
+
+    def test_native_web_search_requires_openai_provider(self):
+        from kendr.llm_router import supports_native_web_search
+
+        self.assertTrue(supports_native_web_search("gpt-4o-mini", "openai"))
+        self.assertTrue(supports_native_web_search("o4-mini-deep-research", "openai"))
+        self.assertFalse(supports_native_web_search("gpt-4o-mini", "custom"))
+        self.assertFalse(supports_native_web_search("llama3.2", "ollama"))
 
 
 if __name__ == "__main__":

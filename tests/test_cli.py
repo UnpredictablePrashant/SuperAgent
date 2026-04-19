@@ -548,7 +548,7 @@ class CliSmokeTests(unittest.TestCase):
             patch("kendr.cli._http_json_get", return_value=[]),
             patch(
                 "kendr.cli._workflow_setup_snapshot",
-                return_value={"available_agents": ["coding_agent", "master_coding_agent", "deep_research_agent"], "agents": {}},
+                return_value={"available_agents": ["coding_agent", "master_coding_agent", "deep_research_agent", "long_document_agent"], "agents": {}},
             ),
             patch("kendr.cli.urllib.request.urlopen", side_effect=_fake_urlopen),
         ):
@@ -617,7 +617,7 @@ class CliSmokeTests(unittest.TestCase):
                 patch("kendr.cli._http_json_get", return_value=[]),
                 patch(
                     "kendr.cli._workflow_setup_snapshot",
-                    return_value={"available_agents": ["deep_research_agent", "coding_agent"], "agents": {}},
+                    return_value={"available_agents": ["deep_research_agent", "long_document_agent", "coding_agent"], "agents": {}},
                 ),
                 patch("kendr.cli.urllib.request.urlopen", side_effect=_fake_urlopen),
             ):

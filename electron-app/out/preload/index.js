@@ -2,8 +2,9 @@
 const electron = require("electron");
 const invoke = (channel, ...args) => electron.ipcRenderer.invoke(channel, ...args);
 const on = (channel, fn) => {
-  electron.ipcRenderer.on(channel, (_, ...args) => fn(...args));
-  return () => electron.ipcRenderer.removeListener(channel, fn);
+  const listener = (_, ...args) => fn(...args);
+  electron.ipcRenderer.on(channel, listener);
+  return () => electron.ipcRenderer.removeListener(channel, listener);
 };
 electron.contextBridge.exposeInMainWorld("kendrAPI", {
   // Window
@@ -28,6 +29,13 @@ electron.contextBridge.exposeInMainWorld("kendrAPI", {
     getLogs: () => invoke("backend:getLogs"),
     /** Subscribe to live status pushes from the main process. Returns unsubscribe fn. */
     onStatusChange: (fn) => on("backend:status-push", fn)
+  },
+  updates: {
+    status: () => invoke("updates:status"),
+    check: () => invoke("updates:check"),
+    download: () => invoke("updates:download"),
+    install: () => invoke("updates:install"),
+    onStatusChange: (fn) => on("updates:status-push", fn)
   },
   // File system
   fs: {

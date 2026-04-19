@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import sys
 import urllib.request
@@ -41,13 +42,75 @@ class VectorBackend(ABC):
         ...
 
 
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    return dot / (left_norm * right_norm)
+
+
+class _InMemoryChromaCollection:
+    def __init__(self) -> None:
+        self._rows: dict[str, dict] = {}
+
+    def upsert(self, *, ids: list[str], embeddings: list[list[float]], documents: list[str], metadatas: list[dict]) -> None:
+        for row_id, embedding, document, metadata in zip(ids, embeddings, documents, metadatas):
+            self._rows[str(row_id)] = {
+                "embedding": list(embedding),
+                "document": document,
+                "metadata": dict(metadata or {}),
+            }
+
+    def count(self) -> int:
+        return len(self._rows)
+
+    def query(self, *, query_embeddings: list[list[float]], n_results: int, include: list[str] | None = None) -> dict:
+        include = include or []
+        query = list(query_embeddings[0] if query_embeddings else [])
+        ranked = sorted(
+            self._rows.values(),
+            key=lambda item: 1.0 - _cosine_similarity(query, item.get("embedding", [])),
+        )[: max(0, int(n_results))]
+        distances = [1.0 - _cosine_similarity(query, item.get("embedding", [])) for item in ranked]
+        documents = [item.get("document", "") for item in ranked]
+        metadatas = [item.get("metadata", {}) for item in ranked]
+        result: dict[str, list[list[object]]] = {}
+        if "documents" in include:
+            result["documents"] = [documents]
+        if "metadatas" in include:
+            result["metadatas"] = [metadatas]
+        if "distances" in include:
+            result["distances"] = [distances]
+        return result
+
+
+class _InMemoryChromaClient:
+    def __init__(self) -> None:
+        self._collections: dict[str, _InMemoryChromaCollection] = {}
+
+    def get_or_create_collection(self, *, name: str, metadata: dict | None = None) -> _InMemoryChromaCollection:
+        _ = metadata
+        if name not in self._collections:
+            self._collections[name] = _InMemoryChromaCollection()
+        return self._collections[name]
+
+
 class ChromaBackend(VectorBackend):
     def __init__(self) -> None:
-        import chromadb
-
-        persist_path = _default_chroma_path()
-        os.makedirs(persist_path, exist_ok=True)
-        self._client = chromadb.PersistentClient(path=persist_path)
+        self._using_memory_fallback = False
+        try:
+            import chromadb
+        except ImportError:
+            self._using_memory_fallback = True
+            self._client = _InMemoryChromaClient()
+        else:
+            persist_path = _default_chroma_path()
+            os.makedirs(persist_path, exist_ok=True)
+            self._client = chromadb.PersistentClient(path=persist_path)
         self._collections: dict[str, object] = {}
 
     def _get_collection(self, collection_name: str, vector_size: int = 1536):

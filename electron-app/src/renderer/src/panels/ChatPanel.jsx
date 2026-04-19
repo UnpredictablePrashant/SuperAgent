@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo, useReducer } 
 import { useApp } from '../contexts/AppContext'
 import GitDiffPreview from '../components/GitDiffPreview'
 import { basename, resolveAgentCapability, resolveContextWindow, resolveSelectedModel } from '../lib/modelSelection'
+import { normalizeWorkflowCombo, normalizeWorkflowStageOptions, resolveWorkflowRecommendation } from '../lib/workflowRecommendations'
 import { buildActivityEntry, isPlanApprovalScope, isSkillApproval, shouldMirrorActivityMessage, summarizeRunArtifacts } from '../lib/runPresentation'
 
 // ─── Chat history persistence ────────────────────────────────────────────────
@@ -64,6 +65,279 @@ function formatRelTime(dateStr) {
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function logTimestampMs(value = '') {
+  const raw = String(value || '').trim()
+  if (!raw) return Number.NaN
+  const direct = Date.parse(raw)
+  if (Number.isFinite(direct)) return direct
+  const normalized = raw.replace(' ', 'T').replace(',', '.')
+  const parsed = Date.parse(normalized)
+  return Number.isFinite(parsed) ? parsed : Number.NaN
+}
+
+function providerDisplayLabel(provider = '') {
+  const normalized = String(provider || '').trim().toLowerCase()
+  if (!normalized) return 'Model'
+  if (normalized === 'ollama') return 'Local'
+  if (normalized === 'xai') return 'xAI'
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1)
+}
+
+function hasNativeWebSearchCapability(provider = '', model = '', capabilities = null) {
+  if (capabilities && Object.prototype.hasOwnProperty.call(capabilities, 'native_web_search')) {
+    return !!capabilities.native_web_search
+  }
+  const normalizedProvider = String(provider || '').trim().toLowerCase()
+  if (normalizedProvider !== 'openai') return false
+  const name = String(model || '').trim().toLowerCase()
+  if (!name || name.includes('gpt-4.1-nano')) return false
+  if (name.includes('deep-research')) return true
+  return ['gpt-5', 'gpt-4o', 'gpt-4.1', 'o3', 'o4-'].some((needle) => name.includes(needle))
+}
+
+function synthesizeDeepResearchOption(rawValue, modelInventory) {
+  const resolved = resolveSelectedModel(rawValue)
+  if (!resolved.provider || !resolved.model) return null
+  const capabilities = {
+    native_web_search: hasNativeWebSearchCapability(resolved.provider, resolved.model),
+  }
+  return {
+    value: `${resolved.provider}/${resolved.model}`,
+    provider: resolved.provider,
+    model: resolved.model,
+    label: resolved.label,
+    shortLabel: `${providerDisplayLabel(resolved.provider)} · ${resolved.model}`,
+    isLocal: resolved.isLocal,
+    ready: true,
+    contextWindow: resolveContextWindow(rawValue, modelInventory),
+    capabilities,
+    note: '',
+  }
+}
+
+function buildDeepResearchModelOptions(modelInventory, inheritedModel = '') {
+  const providers = Array.isArray(modelInventory?.providers) ? modelInventory.providers : []
+  const options = []
+  const seen = new Set()
+  for (const providerEntry of providers) {
+    const provider = String(providerEntry?.provider || '').trim().toLowerCase()
+    if (!provider) continue
+    const ready = provider === 'ollama' ? !!providerEntry?.ready : providerEntry?.ready !== false
+    const details = Array.isArray(providerEntry?.selectable_model_details) && providerEntry.selectable_model_details.length
+      ? providerEntry.selectable_model_details
+      : (String(providerEntry?.model || '').trim()
+        ? [{
+            name: String(providerEntry.model).trim(),
+            context_window: Number(providerEntry?.context_window || 0),
+            capabilities: providerEntry?.model_capabilities || {},
+          }]
+        : [])
+    for (const detail of details) {
+      const model = String(detail?.name || '').trim()
+      if (!model) continue
+      const value = `${provider}/${model}`
+      if (seen.has(value)) continue
+      seen.add(value)
+      const detailCapabilities = (detail?.capabilities && typeof detail.capabilities === 'object')
+        ? detail.capabilities
+        : {}
+      options.push({
+        value,
+        provider,
+        model,
+        label: `${providerDisplayLabel(provider)} · ${model}`,
+        shortLabel: `${providerDisplayLabel(provider)} · ${model}`,
+        isLocal: provider === 'ollama',
+        ready,
+        contextWindow: Number(detail?.context_window || providerEntry?.context_window || 0),
+        capabilities: {
+          ...detailCapabilities,
+          native_web_search: hasNativeWebSearchCapability(provider, model, detailCapabilities),
+        },
+        note: String(providerEntry?.note || '').trim(),
+      })
+    }
+  }
+  const inheritedOption = synthesizeDeepResearchOption(inheritedModel, modelInventory)
+  if (inheritedOption && !seen.has(inheritedOption.value)) options.unshift(inheritedOption)
+  return options
+}
+
+function deepResearchModelDisabledReason(option, webSearchEnabled) {
+  if (!option) return 'Choose a model.'
+  if (!option.ready) {
+    if (option.provider === 'ollama') return 'Local model runtime is not ready.'
+    return option.note || `${providerDisplayLabel(option.provider)} is not configured.`
+  }
+  const modelName = String(option.model || '').trim().toLowerCase()
+  if (modelName.includes('image-')) return 'Image-only models are not supported for report writing.'
+  if (Number(option.contextWindow || 0) > 0 && Number(option.contextWindow || 0) < 32000) {
+    return 'Context window is too small for long-form deep research.'
+  }
+  return ''
+}
+
+function scoreDeepResearchOption(option, { webSearchEnabled = true, preferredValue = '' } = {}) {
+  if (!option) return Number.NEGATIVE_INFINITY
+  let score = 0
+  const capabilities = option.capabilities && typeof option.capabilities === 'object'
+    ? option.capabilities
+    : {}
+  const contextWindow = Number(option.contextWindow || 0)
+  if (option.value === preferredValue) score += 1000
+  if (!webSearchEnabled && option.isLocal) score += 240
+  if (webSearchEnabled && hasNativeWebSearchCapability(option.provider, option.model, capabilities)) score += 220
+  else if (webSearchEnabled && capabilities.tool_calling) score += 90
+  if (capabilities.reasoning) score += 140
+  if (capabilities.structured_output) score += 80
+  if (capabilities.tool_calling) score += 70
+  if (!option.isLocal) score += 20
+  const name = String(option.model || '').trim().toLowerCase()
+  if (name.includes('gpt-5')) score += 160
+  else if (name.includes('o3')) score += 145
+  else if (name.includes('gpt-4.1')) score += 135
+  else if (name.includes('gpt-4o')) score += 125
+  else if (name.includes('claude')) score += 110
+  else if (name.includes('gemini')) score += 100
+  else if (name.includes('grok')) score += 95
+  else if (name.includes('llama') || name.includes('qwen') || name.includes('mistral')) score += 80
+  if (contextWindow >= 200_000) score += 55
+  else if (contextWindow >= 128_000) score += 35
+  else if (contextWindow >= 64_000) score += 15
+  else if (contextWindow > 0 && contextWindow < 32_000) score -= 180
+  score += Math.min(contextWindow, 2_000_000) / 24_000
+  return score
+}
+
+function resolveDeepResearchModelSelection({ requestedValue = '', inheritedValue = '', modelInventory = null, webSearchEnabled = true }) {
+  const options = buildDeepResearchModelOptions(modelInventory, inheritedValue)
+  const optionByValue = new Map(options.map((option) => [option.value, option]))
+  const requestedOption = requestedValue
+    ? (optionByValue.get(requestedValue) || synthesizeDeepResearchOption(requestedValue, modelInventory))
+    : null
+  const inheritedOption = inheritedValue
+    ? (optionByValue.get(inheritedValue) || synthesizeDeepResearchOption(inheritedValue, modelInventory))
+    : null
+  const optionsWithState = options.map((option) => ({
+    ...option,
+    disabledReason: deepResearchModelDisabledReason(option, webSearchEnabled),
+  }))
+  const enabledOptions = optionsWithState.filter((option) => !option.disabledReason)
+  const requestedReason = deepResearchModelDisabledReason(requestedOption, webSearchEnabled)
+  const inheritedReason = deepResearchModelDisabledReason(inheritedOption, webSearchEnabled)
+  const recommendedOption = enabledOptions.length
+    ? [...enabledOptions].sort((left, right) => (
+      scoreDeepResearchOption(right, { webSearchEnabled, preferredValue: inheritedValue })
+      - scoreDeepResearchOption(left, { webSearchEnabled, preferredValue: inheritedValue })
+    ))[0]
+    : null
+  const effectiveOption = requestedOption && !requestedReason
+    ? requestedOption
+    : inheritedOption && !inheritedReason
+      ? inheritedOption
+      : recommendedOption
+  const effectiveSource = requestedOption && !requestedReason
+    ? 'explicit'
+    : inheritedOption && !inheritedReason
+      ? 'header'
+      : recommendedOption
+        ? 'recommended'
+        : 'none'
+  return {
+    options: optionsWithState,
+    requestedOption,
+    requestedReason,
+    inheritedOption,
+    inheritedReason,
+    recommendedOption,
+    effectiveOption,
+    effectiveSource,
+  }
+}
+
+const DEFAULT_SEARCH_PROVIDER_OPTIONS = [
+  {
+    id: 'auto',
+    label: 'Auto',
+    enabled: true,
+    authenticated: false,
+    rate_limited: false,
+    note: 'Prefer the strongest configured backend, then fall back automatically.',
+    warning: '',
+  },
+  {
+    id: 'duckduckgo',
+    label: 'DuckDuckGo (DDGS)',
+    enabled: false,
+    authenticated: false,
+    rate_limited: true,
+    note: 'No API key required.',
+    warning: 'Unauthenticated DDGS search can hit rate limits on heavier runs.',
+  },
+  {
+    id: 'serpapi',
+    label: 'SerpAPI',
+    enabled: false,
+    authenticated: true,
+    rate_limited: false,
+    note: 'Requires SERP_API_KEY.',
+    warning: '',
+  },
+  {
+    id: 'browser_use_mcp',
+    label: 'Browser-Use MCP',
+    enabled: false,
+    authenticated: false,
+    rate_limited: false,
+    note: 'Requires a running browser-use MCP server.',
+    warning: '',
+  },
+  {
+    id: 'playwright_browser',
+    label: 'Playwright Browser',
+    enabled: false,
+    authenticated: false,
+    rate_limited: false,
+    note: 'Requires Playwright plus an installed browser runtime.',
+    warning: '',
+  },
+]
+
+function buildDeepResearchSearchProviders(modelInventory) {
+  const rows = Array.isArray(modelInventory?.search_providers) && modelInventory.search_providers.length
+    ? modelInventory.search_providers
+    : DEFAULT_SEARCH_PROVIDER_OPTIONS
+  const seen = new Set()
+  const options = []
+  for (const row of rows) {
+    const id = String(row?.id || '').trim().toLowerCase()
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    options.push({
+      id,
+      label: String(row?.label || id).trim() || id,
+      enabled: row?.enabled !== false || id === 'auto',
+      authenticated: !!row?.authenticated,
+      rateLimited: !!row?.rate_limited,
+      note: String(row?.note || row?.description || '').trim(),
+      warning: String(row?.warning || '').trim(),
+    })
+  }
+  if (!seen.has('auto')) options.unshift({ ...DEFAULT_SEARCH_PROVIDER_OPTIONS[0] })
+  return options
+}
+
+function resolveDeepResearchSearchProviderSelection(searchProviders, requestedId = '') {
+  const options = Array.isArray(searchProviders) ? searchProviders : DEFAULT_SEARCH_PROVIDER_OPTIONS
+  const normalized = String(requestedId || 'auto').trim().toLowerCase() || 'auto'
+  const optionById = new Map(options.map((option) => [option.id, option]))
+  const requested = optionById.get(normalized) || optionById.get('auto') || options[0] || null
+  const effective = requested && requested.enabled
+    ? requested
+    : (options.find((option) => option.id === 'auto') || options.find((option) => option.enabled) || requested)
+  return { options, requested, effective }
 }
 
 // ─── Chat-local state ────────────────────────────────────────────────────────
@@ -150,9 +424,17 @@ function chatReducer(s, a) {
         }
         if (!item.text) return m
         const prev = Array.isArray(m.logs) ? m.logs : []
-        const last = prev[0]
-        if (last && last.text === item.text && last.ts === item.ts) return m
-        return { ...m, logs: [item, ...prev].slice(0, 40) }
+        if (prev.some((entry) => entry && entry.text === item.text && entry.ts === item.ts)) return m
+        const next = [...prev, item]
+          .sort((left, right) => {
+            const leftMs = logTimestampMs(left?.ts || left?.timestamp || '')
+            const rightMs = logTimestampMs(right?.ts || right?.timestamp || '')
+            if (Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs !== rightMs) return leftMs - rightMs
+            if (Number.isFinite(leftMs) !== Number.isFinite(rightMs)) return Number.isFinite(leftMs) ? -1 : 1
+            return String(left?.ts || left?.timestamp || '').localeCompare(String(right?.ts || right?.timestamp || ''))
+          })
+          .slice(-1000)
+        return { ...m, logs: next }
       })
       return { ...s, messages: msgs }
     }
@@ -213,17 +495,20 @@ function buildPayload(text, chatId, runId, projectRoot, mode, dr, attachments = 
   const allSources = mergedLocalPaths.length
     ? Array.from(new Set([...remoteSources, 'local']))
     : remoteSources
+  const depthPreset = resolveDeepResearchDepthPreset(dr.depthMode, dr.pages)
 
   const payload = {
     ...base,
     deep_research_mode:              true,
     long_document_mode:              true,
     workflow_type:                   'deep_research',
-    long_document_pages:             dr.pages,
+    long_document_pages:             depthPreset.pages,
+    research_depth_mode:             depthPreset.id,
     research_output_formats:         dr.outputFormats,
     research_citation_style:         dr.citationStyle,
     research_enable_plagiarism_check: dr.plagiarismCheck,
     research_web_search_enabled:     dr.webSearchEnabled,
+    research_search_backend:         dr.searchBackend || 'auto',
     research_date_range:             dr.dateRange,
     research_sources:                allSources,
     research_max_sources:            dr.maxSources || 0,
@@ -232,6 +517,26 @@ function buildPayload(text, chatId, runId, projectRoot, mode, dr, attachments = 
     research_kb_id:                  dr.kbEnabled ? (dr.kbId || '') : '',
     research_kb_top_k:               dr.kbTopK || 8,
     deep_research_source_urls:       webLinks,
+  }
+  if (dr.multiModelEnabled) {
+    payload.multi_model_enabled = true
+    payload.multi_model_strategy = dr.multiModelStrategy === 'cheapest' ? 'cheapest' : 'best'
+    const stageOverrides = Object.fromEntries(
+      Object.entries((dr.multiModelStageOverrides && typeof dr.multiModelStageOverrides === 'object') ? dr.multiModelStageOverrides : {})
+        .map(([stageName, value]) => {
+          const resolved = resolveSelectedModel(value)
+          if (!resolved.provider || !resolved.model) return null
+          return [
+            String(stageName || '').trim(),
+            {
+              provider: resolved.provider,
+              model: resolved.model,
+            },
+          ]
+        })
+        .filter(Boolean),
+    )
+    if (Object.keys(stageOverrides).length) payload.multi_model_stage_overrides = stageOverrides
   }
   if (mergedLocalPaths.length) {
     payload.local_drive_paths              = mergedLocalPaths
@@ -365,7 +670,7 @@ function formatDuration(totalSeconds) {
 function summarizeLogFeed(logs = []) {
   const items = Array.isArray(logs) ? logs : []
   if (!items.length) return 'Waiting for execution log output...'
-  const latest = String(items[0]?.text || '').trim()
+  const latest = String(items[items.length - 1]?.text || '').trim()
   if (!latest) return `${items.length} log update${items.length === 1 ? '' : 's'} captured`
   const clipped = latest.length > 120 ? `${latest.slice(0, 117)}...` : latest
   return `${items.length} log update${items.length === 1 ? '' : 's'} captured. Latest: ${clipped}`
@@ -430,6 +735,10 @@ function liveProgressLabel(item = null) {
 
 function isPendingRunStatus(status) {
   return ['thinking', 'streaming', 'awaiting'].includes(String(status || '').trim().toLowerCase())
+}
+
+function isStreamingRunStatus(status) {
+  return ['thinking', 'streaming'].includes(String(status || '').trim().toLowerCase())
 }
 
 function failureMessageForRecoveredRun(runId, status = '') {
@@ -613,9 +922,20 @@ function hasConcreteAwaitingRequest(request = null) {
 const ACTIVE_RUN_STATUSES = new Set(['running', 'started', 'cancelling'])
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled'])
 
-function runSnapshotResult(snapshot) {
+function runSnapshotState(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
-  return data.result && typeof data.result === 'object' ? data.result : {}
+  const directResult = data.result && typeof data.result === 'object' ? data.result : {}
+  const directState = data.state_snapshot && typeof data.state_snapshot === 'object' ? data.state_snapshot : {}
+  const resultState = directResult.state_snapshot && typeof directResult.state_snapshot === 'object' ? directResult.state_snapshot : {}
+  return {
+    ...directState,
+    ...resultState,
+    ...directResult,
+  }
+}
+
+function runSnapshotResult(snapshot) {
+  return runSnapshotState(snapshot)
 }
 
 function runSnapshotStatus(snapshot, fallbackStatus = '') {
@@ -700,10 +1020,15 @@ function normalizeAwaitingRequest(request = null, prompt = '', scope = '', kind 
 
 function resolveRunSnapshotLogPath(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  const result = runSnapshotResult(data)
   const logPaths = data.log_paths && typeof data.log_paths === 'object' ? data.log_paths : {}
   const direct = String(logPaths.execution_log || '').trim()
   if (direct) return direct
-  const runDir = String(data.run_output_dir || data.output_dir || data.resume_output_dir || '').trim()
+  const runDir = String(
+    data.run_output_dir || data.output_dir || data.resume_output_dir
+    || result.run_output_dir || result.output_dir || result.resume_output_dir
+    || '',
+  ).trim()
   if (!runDir) return ''
   const normalized = runDir.replace(/[\\/]+$/, '')
   const separator = normalized.includes('\\') ? '\\' : '/'
@@ -712,7 +1037,7 @@ function resolveRunSnapshotLogPath(snapshot) {
 
 function runSnapshotOutputText(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
-  const result = data.result && typeof data.result === 'object' ? data.result : {}
+  const result = runSnapshotResult(data)
   return String(
     result.final_output || result.output || result.draft_response || result.response
     || data.final_output || data.output || data.response || '',
@@ -733,23 +1058,159 @@ function runSnapshotErrorText(snapshot, runId, fallbackStatus = '') {
 
 function runSnapshotArtifacts(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
-  const result = data.result && typeof data.result === 'object' ? data.result : {}
-  return result.artifact_files || data.artifact_files || []
+  const result = runSnapshotResult(data)
+  const artifacts = []
+  const seen = new Set()
+
+  const appendArtifact = (artifact) => {
+    const normalized = normalizeArtifactItem(artifact)
+    if (!normalized) return
+    const key = [
+      String(normalized.name || '').trim(),
+      String(normalized.path || '').trim(),
+      String(normalized.downloadUrl || '').trim(),
+      String(normalized.viewUrl || '').trim(),
+    ].join('::')
+    if (seen.has(key)) return
+    seen.add(key)
+    artifacts.push(normalized)
+  }
+
+  const appendArtifactList = (items) => {
+    if (!Array.isArray(items)) return
+    for (const item of items) appendArtifact(item)
+  }
+
+  const appendCardArtifacts = (card) => {
+    const safeCard = card && typeof card === 'object' ? card : {}
+    appendArtifactList(safeCard.created_artifacts)
+    appendArtifactList(safeCard.downloadable_reports)
+  }
+
+  appendArtifactList(result.artifact_files)
+  appendArtifactList(data.artifact_files)
+  appendCardArtifacts(result.deep_research_result_card)
+  appendCardArtifacts(data.deep_research_result_card)
+
+  const appendManifestArtifacts = (manifest) => {
+    if (!manifest || typeof manifest !== 'object') return
+    appendArtifactList(manifest.created_artifacts)
+  }
+
+  appendManifestArtifacts(result.deep_research_artifacts_manifest)
+  appendManifestArtifacts(data.deep_research_artifacts_manifest)
+
+  const appendExportHints = (items) => {
+    if (!Array.isArray(items)) return
+    for (const item of items) {
+      const safe = item && typeof item === 'object' ? item : {}
+      const ext = String(safe.ext || '').trim().toLowerCase()
+      const name = String(safe.name || safe.label || (ext ? `report.${ext}` : '')).trim()
+      if (!name) continue
+      appendArtifact({
+        name,
+        label: String(safe.label || name).trim(),
+        ext,
+        kind: 'report',
+        download_url: safe.download_url || safe.downloadUrl || '',
+        view_url: safe.view_url || safe.viewUrl || '',
+      })
+    }
+  }
+
+  appendExportHints(result.long_document_exports)
+  appendExportHints(data.long_document_exports)
+
+  for (const key of [
+    'long_document_compiled_path',
+    'long_document_compiled_html_path',
+    'long_document_compiled_pdf_path',
+    'long_document_compiled_docx_path',
+  ]) {
+    const candidate = String(result[key] || data[key] || '').trim()
+    if (!candidate) continue
+    appendArtifact({
+      name: basename(candidate),
+      path: candidate,
+      kind: 'report',
+    })
+  }
+
+  return artifacts
+}
+
+const REPORT_ARTIFACT_NAMES = new Set([
+  'report.md',
+  'report.html',
+  'report.pdf',
+  'report.docx',
+  'deep_research_report.md',
+  'deep_research_report.html',
+  'deep_research_report.pdf',
+  'deep_research_report.docx',
+])
+
+function isReportArtifactItem(item) {
+  const safe = item && typeof item === 'object' ? item : {}
+  const name = String(safe.name || safe.label || safe.path || '').trim().toLowerCase()
+  if (!name) return false
+  const base = basename(name).toLowerCase()
+  if (REPORT_ARTIFACT_NAMES.has(base)) return true
+  const ext = String(safe.ext || '').trim().toLowerCase()
+  return !!ext && ['md', 'html', 'pdf', 'docx'].includes(ext) && (base.startsWith('report.') || base.startsWith('deep_research_report.'))
+}
+
+function hasReportArtifacts(items) {
+  if (!Array.isArray(items) || !items.length) return false
+  return items.some((item) => isReportArtifactItem(item))
+}
+
+function stripReportArtifacts(items) {
+  if (!Array.isArray(items) || !items.length) return []
+  return items.filter((item) => !isReportArtifactItem(item))
+}
+
+function snapshotOwnsReportArtifacts(snapshot) {
+  const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  const result = runSnapshotResult(data)
+  const card = (result.deep_research_result_card && typeof result.deep_research_result_card === 'object')
+    ? result.deep_research_result_card
+    : ((data.deep_research_result_card && typeof data.deep_research_result_card === 'object') ? data.deep_research_result_card : {})
+  const kind = String(card.kind || '').trim().toLowerCase()
+  if (kind === 'result') return true
+  for (const key of [
+    'long_document_compiled_path',
+    'long_document_compiled_html_path',
+    'long_document_compiled_pdf_path',
+    'long_document_compiled_docx_path',
+  ]) {
+    if (String(result[key] || data[key] || '').trim()) return true
+  }
+  const manifest = (result.deep_research_artifacts_manifest && typeof result.deep_research_artifacts_manifest === 'object')
+    ? result.deep_research_artifacts_manifest
+    : ((data.deep_research_artifacts_manifest && typeof data.deep_research_artifacts_manifest === 'object') ? data.deep_research_artifacts_manifest : {})
+  const createdArtifacts = Array.isArray(manifest.created_artifacts) ? manifest.created_artifacts : []
+  return createdArtifacts.some((item) => isReportArtifactItem(item))
 }
 
 function runSnapshotChecklist(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
-  const result = data.result && typeof data.result === 'object' ? data.result : {}
+  const result = runSnapshotResult(data)
   return extractChecklist(Object.keys(result).length ? result : data)
 }
 
 function runSnapshotMessageMeta(snapshot) {
   const data = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  const result = runSnapshotResult(data)
   const status = runSnapshotStatus(data)
   const logPath = resolveRunSnapshotLogPath(data)
   return {
     runStartedAt: data.started_at || data.created_at || '',
-    runOutputDir: String(data.run_output_dir || data.output_dir || data.resume_output_dir || '').trim(),
+    runOutputDir: String(
+      data.run_output_dir || data.output_dir || data.resume_output_dir
+      || result.run_output_dir || result.output_dir || result.resume_output_dir
+      || '',
+    ).trim(),
     executionLogPath: logPath,
     lastKnownRunStatus: status,
     lastError: runSnapshotErrorText(data, String(data.run_id || '').trim(), status),
@@ -903,6 +1364,18 @@ function buildRunningMessagePatch(snapshot, fallback = {}) {
   })
 }
 
+function snapshotArtifactsOrFallback(snapshot, fallback = {}) {
+  const artifacts = runSnapshotArtifacts(snapshot)
+  if (artifacts.length > 0) return artifacts
+  return Array.isArray(fallback?.artifacts) ? fallback.artifacts : []
+}
+
+function snapshotChecklistOrFallback(snapshot, fallback = {}) {
+  const checklist = runSnapshotChecklist(snapshot)
+  if (checklist.length > 0) return checklist
+  return Array.isArray(fallback?.checklist) ? fallback.checklist : []
+}
+
 function buildCompletedMessagePatch(snapshot, fallback = {}) {
   const fallbackWasAwaiting = String(fallback?.status || '').trim().toLowerCase() === 'awaiting'
   return clearAwaitingMessageFields({
@@ -910,8 +1383,8 @@ function buildCompletedMessagePatch(snapshot, fallback = {}) {
     content: runSnapshotOutputText(snapshot) || (fallbackWasAwaiting ? '' : String(fallback?.content || '').trim()),
     status: 'done',
     statusText: '',
-    artifacts: runSnapshotArtifacts(snapshot),
-    checklist: runSnapshotChecklist(snapshot),
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback),
   })
 }
 
@@ -921,8 +1394,8 @@ function buildFailedMessagePatch(snapshot, runId, fallbackStatus = '', fallback 
     content: runSnapshotErrorText(snapshot, runId, fallbackStatus) || invalidAwaitingMessage(snapshot, runId, fallback),
     status: 'error',
     statusText: '',
-    artifacts: runSnapshotArtifacts(snapshot),
-    checklist: runSnapshotChecklist(snapshot),
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback),
   })
 }
 
@@ -932,8 +1405,8 @@ function buildInvalidAwaitingErrorPatch(snapshot, runId, fallback = {}) {
     content: invalidAwaitingMessage(snapshot, runId, fallback),
     status: 'error',
     statusText: '',
-    artifacts: runSnapshotArtifacts(snapshot),
-    checklist: runSnapshotChecklist(snapshot),
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback),
   })
 }
 
@@ -941,8 +1414,8 @@ function buildInvalidAwaitingRunningPatch(snapshot, fallback = {}, statusText = 
   return {
     ...buildRunningMessagePatch(snapshot, fallback),
     statusText,
-    artifacts: runSnapshotArtifacts(snapshot),
-    checklist: runSnapshotChecklist(snapshot),
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback),
   }
 }
 
@@ -1100,7 +1573,10 @@ function attachmentPreviewSrc(item) {
 
 // ─── Deep Research default settings ─────────────────────────────────────────
 const DR_DEFAULTS = {
+  depthMode: 'standard',
   pages: 25,
+  researchModel: '',
+  searchBackend: 'auto',
   citationStyle: 'apa',
   dateRange: 'all_time',
   maxSources: 0,
@@ -1114,7 +1590,56 @@ const DR_DEFAULTS = {
   kbEnabled: false,
   kbId: '',
   kbTopK: 8,
+  multiModelEnabled: false,
+  multiModelStrategy: 'best',
+  multiModelStageOverrides: {},
   collapsed: false,
+}
+
+const DEEP_RESEARCH_DEPTH_PRESETS = [
+  {
+    id: 'brief',
+    pages: 10,
+    label: 'Focused Brief',
+    summary: 'Focused',
+    hint: 'Fastest run for a narrower scope and the most important findings.',
+  },
+  {
+    id: 'standard',
+    pages: 25,
+    label: 'Standard Report',
+    summary: 'Standard',
+    hint: 'Balanced depth for most multi-section research tasks.',
+  },
+  {
+    id: 'comprehensive',
+    pages: 50,
+    label: 'Comprehensive Study',
+    summary: 'Comprehensive',
+    hint: 'Broader source sweep and deeper synthesis across sections.',
+  },
+  {
+    id: 'exhaustive',
+    pages: 100,
+    label: 'Exhaustive Dossier',
+    summary: 'Exhaustive',
+    hint: 'Maximum breadth and depth; slower and more resource-intensive.',
+  },
+]
+
+function normalizeDeepResearchDepthMode(value, pages) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (DEEP_RESEARCH_DEPTH_PRESETS.some((item) => item.id === normalized)) return normalized
+  const numericPages = Number(pages || 0)
+  if (numericPages >= 100) return 'exhaustive'
+  if (numericPages >= 50) return 'comprehensive'
+  if (numericPages >= 20) return 'standard'
+  return 'brief'
+}
+
+function resolveDeepResearchDepthPreset(value, pages) {
+  const mode = normalizeDeepResearchDepthMode(value, pages)
+  return DEEP_RESEARCH_DEPTH_PRESETS.find((item) => item.id === mode) || DEEP_RESEARCH_DEPTH_PRESETS[1]
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -1144,14 +1669,38 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
   const esRef = useRef(null)
   const resumeAttemptedRunRef = useRef('')
   const staleRunRecoveryRef = useRef('')
+  const artifactRecoveryRef = useRef(new Set())
   const mirroredActivityIdsRef = useRef([])
   const apiBase = appState.backendUrl || 'http://127.0.0.1:2151'
   const updateDr = (patch) => setDr(s => ({ ...s, ...patch }))
+  const deepResearchDepthPreset = resolveDeepResearchDepthPreset(dr.depthMode, dr.pages)
   const selectedModelMeta = resolveSelectedModel(appState.selectedModel)
   const isSimpleStudioChat = studioMode && chat.mode === 'chat'
   const modelInventory = appState.modelInventory
+  const deepResearchModelState = useMemo(() => resolveDeepResearchModelSelection({
+    requestedValue: dr.researchModel,
+    inheritedValue: appState.selectedModel || '',
+    modelInventory,
+    webSearchEnabled: !!dr.webSearchEnabled,
+  }), [dr.researchModel, dr.webSearchEnabled, appState.selectedModel, modelInventory])
+  const deepResearchSearchProviderState = useMemo(() => resolveDeepResearchSearchProviderSelection(
+    buildDeepResearchSearchProviders(modelInventory),
+    dr.searchBackend,
+  ), [dr.searchBackend, modelInventory])
+  const effectiveDeepResearchModel = deepResearchModelState.effectiveOption
+  const recommendedDeepResearchModel = deepResearchModelState.recommendedOption
+  const effectiveDeepResearchSearchProvider = deepResearchSearchProviderState.effective
+  useEffect(() => {
+    const effectiveId = effectiveDeepResearchSearchProvider?.id || 'auto'
+    const requestedId = dr.searchBackend || 'auto'
+    if (requestedId !== effectiveId) updateDr({ searchBackend: effectiveId })
+  }, [dr.searchBackend, effectiveDeepResearchSearchProvider?.id])
+  const composerModelRaw = chat.mode === 'research'
+    ? (effectiveDeepResearchModel?.value || appState.selectedModel || '')
+    : (appState.selectedModel || '')
+  const composerModelMeta = resolveSelectedModel(composerModelRaw)
   const selectedModelAgentCapable = resolveAgentCapability(appState.selectedModel, modelInventory)
-  const contextLimit = resolveContextWindow(appState.selectedModel, modelInventory)
+  const contextLimit = resolveContextWindow(composerModelRaw, modelInventory)
   const payloadPreview = useMemo(() => {
     const draftText = String(input || '').trim()
     const body = buildPayload(
@@ -1166,19 +1715,36 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       mcpEnabled,
     )
     body.history = buildSimpleHistory(chat.messages, 14)
-    if (appState.selectedModel) {
-      const selected = resolveSelectedModel(appState.selectedModel)
+    const activePayloadModel = chat.mode === 'research'
+      ? effectiveDeepResearchModel
+      : (appState.selectedModel ? resolveSelectedModel(appState.selectedModel) : null)
+    if (activePayloadModel) {
+      const selected = activePayloadModel
       if (selected.provider) body.provider = selected.provider
       if (selected.model) body.model = selected.model
+    }
+    if (chat.mode === 'research' && effectiveDeepResearchModel?.model) {
+      body.research_model = effectiveDeepResearchModel.model
     }
     body.context_limit = contextLimit
     if (isSimpleStudioChat) body.stream = true
     return body
-  }, [input, chatId, appState.projectRoot, chat.mode, dr, attachments, studioMode, mcpEnabled, chat.messages, appState.selectedModel, isSimpleStudioChat, contextLimit])
+  }, [input, chatId, appState.projectRoot, chat.mode, dr, attachments, studioMode, mcpEnabled, chat.messages, appState.selectedModel, isSimpleStudioChat, contextLimit, effectiveDeepResearchModel])
   const estimatedContextTokens = estimateObjectTokens(payloadPreview)
   const contextPct = Math.min(100, Math.round((estimatedContextTokens / Math.max(contextLimit, 1)) * 100))
   const stickyChecklistMsg = useMemo(() => latestChecklistMessage(chat.messages), [chat.messages])
   const stickyChecklist = Array.isArray(stickyChecklistMsg?.checklist) ? stickyChecklistMsg.checklist : []
+  const latestStreamingRunMsg = useMemo(() => (
+    [...(chat.messages || [])].reverse().find((msg) => (
+      msg?.role === 'assistant'
+      && String(msg?.runId || '').trim()
+      && isStreamingRunStatus(msg?.status)
+    )) || null
+  ), [chat.messages])
+  const activeRunId = String(chat.activeRunId || appState.activeRunId || latestStreamingRunMsg?.runId || '').trim()
+  const awaitingRunId = String(chat.awaitingContext?.runId || '').trim()
+  const stopTargetRunId = activeRunId || awaitingRunId
+  const composerRunActive = !chat.awaitingContext && !!activeRunId
   const inlineAwaiting = shouldInlineAwaitingContext(chat.awaitingContext)
   const displayableAwaitingContext = hasDisplayableAwaitingContext(chat.awaitingContext)
   const hasMessages = chat.messages.length > 0
@@ -1198,6 +1764,33 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     if (dr.kbId) return indexedResearchKbs.find(kb => kb.id === dr.kbId) || null
     return activeResearchKb
   }, [dr.kbEnabled, dr.kbId, indexedResearchKbs, activeResearchKb])
+  const deepResearchWorkflowRecommendation = useMemo(() => {
+    return resolveWorkflowRecommendation(modelInventory, 'deep_research_report')
+  }, [modelInventory])
+  const deepResearchWorkflowStageOptions = useMemo(() => (
+    normalizeWorkflowStageOptions(deepResearchWorkflowRecommendation?.stage_options)
+  ), [deepResearchWorkflowRecommendation])
+  const activeDeepResearchWorkflowCombo = useMemo(() => {
+    if (!dr.multiModelEnabled || !deepResearchWorkflowRecommendation) return null
+    const rawCombo = dr.multiModelStrategy === 'cheapest'
+      ? deepResearchWorkflowRecommendation.cheapest
+      : deepResearchWorkflowRecommendation.best
+    return normalizeWorkflowCombo(rawCombo)
+  }, [dr.multiModelEnabled, dr.multiModelStrategy, deepResearchWorkflowRecommendation])
+  const recommendedDeepResearchEvidenceStage = useMemo(() => {
+    if (!activeDeepResearchWorkflowCombo) return null
+    return activeDeepResearchWorkflowCombo.stages.find((stage) => stage?.stage === 'evidence') || null
+  }, [activeDeepResearchWorkflowCombo])
+
+  useEffect(() => {
+    if (!dr.researchModel) return
+    if (!deepResearchModelState.requestedReason) return
+    setDr((current) => (
+      current.researchModel === dr.researchModel
+        ? { ...current, researchModel: '' }
+        : current
+    ))
+  }, [dr.researchModel, deepResearchModelState.requestedReason])
 
   const loadResearchKbs = useCallback(async () => {
     try {
@@ -1227,19 +1820,56 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     return () => { cancelled = true }
   }, [apiBase])
   const planKeywordsDetected = /\b(plan|roadmap|outline|steps|milestones|strategy)\b/i.test(input)
-  const showPlanSuggestion = minimalStudio && selectedModelAgentCapable && !chat.streaming && chat.mode === 'chat' && planKeywordsDetected
+  const showPlanSuggestion = minimalStudio && selectedModelAgentCapable && !composerRunActive && chat.mode === 'chat' && planKeywordsDetected
   const showActiveWorkflowChip = minimalStudio && chat.mode !== 'chat'
+  const resolveArtifactActionUrl = useCallback((item, runId, action = 'download') => {
+    const direct = String(
+      action === 'view'
+        ? (item?.viewUrl || item?.view_url || '')
+        : (item?.downloadUrl || item?.download_url || ''),
+    ).trim()
+    if (direct) {
+      try {
+        return new URL(direct, apiBase || window.location.origin).toString()
+      } catch (_) {
+        return direct
+      }
+    }
+    const resolvedRunId = String(runId || '').trim()
+    const artifactName = String(item?.name || item?.label || basename(item?.path || '')).trim()
+    if (!resolvedRunId || !artifactName) return ''
+    const base = String(apiBase || '').replace(/\/$/, '')
+    return `${base}/api/artifacts/${action}?run_id=${encodeURIComponent(resolvedRunId)}&name=${encodeURIComponent(artifactName)}`
+  }, [apiBase])
   const openArtifact = useCallback(async (item) => {
     const filePath = String(item?.path || '').trim()
     if (!filePath) return
     appDispatch({ type: 'SET_VIEW', view: 'developer' })
     await openFile(filePath)
   }, [appDispatch, openFile])
+  const downloadArtifact = useCallback((item, runId) => {
+    const url = resolveArtifactActionUrl(item, runId, 'download')
+    if (!url) return
+    const link = document.createElement('a')
+    link.href = url
+    const artifactName = String(item?.name || item?.label || '').trim()
+    if (artifactName) link.setAttribute('download', artifactName)
+    link.rel = 'noopener'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  }, [resolveArtifactActionUrl])
   const reviewArtifact = useCallback((item) => {
     const filePath = String(item?.path || '').trim()
     if (!filePath) return
     setDiffPreviewPath(filePath)
   }, [])
+  const clearActiveRunState = useCallback(() => {
+    dispatch({ type: 'SET_STREAMING', val: false })
+    dispatch({ type: 'SET_RUN', id: null })
+    appDispatch({ type: 'SET_STREAMING', streaming: false })
+    appDispatch({ type: 'SET_ACTIVE_RUN', runId: null })
+  }, [appDispatch])
 
   // Close the SSE stream when the panel unmounts (e.g. explicit new-chat remount)
   useEffect(() => {
@@ -1254,6 +1884,60 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     if (!chat.awaitingContext || displayableAwaitingContext) return
     dispatch({ type: 'CLEAR_AWAITING' })
   }, [chat.awaitingContext, displayableAwaitingContext])
+
+  useEffect(() => {
+    const candidates = (chat.messages || []).filter((msg) => (
+      msg?.role === 'assistant'
+      && String(msg?.runId || '').trim()
+      && !isPendingRunStatus(msg?.status)
+      && (!Array.isArray(msg?.artifacts) || !hasReportArtifacts(msg.artifacts))
+    ))
+    if (!candidates.length) return
+
+    let cancelled = false
+    ;(async () => {
+      for (const msg of candidates.slice(-8)) {
+        const runId = String(msg.runId || '').trim()
+        if (!runId || artifactRecoveryRef.current.has(runId)) continue
+        try {
+          let recoveredArtifacts = []
+          let runSnapshot = {}
+
+          const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}`)
+          runSnapshot = await resp.json().catch(() => ({}))
+          if (cancelled) return
+          if (resp.ok) recoveredArtifacts = runSnapshotArtifacts(runSnapshot)
+
+          if (!recoveredArtifacts.length && snapshotOwnsReportArtifacts(runSnapshot)) {
+            const artifactResp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}/artifacts`)
+            const artifactData = await artifactResp.json().catch(() => ({}))
+            if (cancelled) return
+            if (artifactResp.ok && Array.isArray(artifactData?.files)) {
+              recoveredArtifacts = artifactData.files
+            }
+          }
+
+          if (!recoveredArtifacts.length) continue
+          if (Array.isArray(msg?.artifacts) && msg.artifacts.length) {
+            recoveredArtifacts = [...msg.artifacts, ...recoveredArtifacts]
+          }
+          artifactRecoveryRef.current.add(runId)
+          dispatch({
+            type: 'UPD_MSG',
+            id: msg.id,
+            patch: {
+              ...runSnapshotMessageMeta(runSnapshot),
+              artifacts: recoveredArtifacts,
+            },
+          })
+        } catch (_) {
+          continue
+        }
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [chat.messages, apiBase])
 
   useEffect(() => {
     const staleAwaiting = (chat.messages || []).filter((msg) => (
@@ -1319,6 +2003,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
               content: pendingMsg.lastError || failureMessageForRecoveredRun(runId),
             },
           })
+          clearActiveRunState()
           return
         }
 
@@ -1377,6 +2062,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
             : buildFailedMessagePatch(data, runId, status, pendingMsg),
         })
         dispatch({ type: 'CLEAR_AWAITING' })
+        clearActiveRunState()
       } catch (_) {
         if (cancelled) return
         dispatch({
@@ -1389,11 +2075,12 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
           },
         })
         dispatch({ type: 'CLEAR_AWAITING' })
+        clearActiveRunState()
       }
     })()
 
     return () => { cancelled = true }
-  }, [chat.messages, chat.streaming, appState.activeRunId, apiBase, appDispatch])
+  }, [chat.messages, chat.streaming, appState.activeRunId, apiBase, appDispatch, clearActiveRunState])
 
   useEffect(() => {
     if ((chat.mode === 'agent' || chat.mode === 'plan') && !selectedModelAgentCapable) {
@@ -1415,8 +2102,8 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
   }, [composerMenuOpen])
 
   useEffect(() => {
-    if (chat.streaming) setComposerMenuOpen(false)
-  }, [chat.streaming])
+    if (composerRunActive) setComposerMenuOpen(false)
+  }, [composerRunActive])
 
   useEffect(() => {
     const entries = chat.messages
@@ -1482,7 +2169,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
   }, [saveCurrentSession])
 
   const compactContext = useCallback(async () => {
-    if (!chat.messages.length || chat.streaming) return
+    if (!chat.messages.length || composerRunActive) return
     saveCurrentSession()
     try {
       const resp = await fetch(`${apiBase}/api/chat/compact`, {
@@ -1523,7 +2210,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       dispatch({ type: 'ADD_MSG', msg: note })
       saveHistory([...chat.messages, note])
     }
-  }, [apiBase, chat.messages, chat.streaming, chatId, contextLimit, saveCurrentSession])
+  }, [apiBase, chat.messages, composerRunActive, chatId, contextLimit, saveCurrentSession])
 
   const loadSession = useCallback((session) => {
     esRef.current?.close()
@@ -1638,7 +2325,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
   // ── Send message ────────────────────────────────────────────────────────────
   const send = useCallback(async (text, isResume = false) => {
     const msg = (typeof text === 'string' ? text.trim() : '') || input.trim()
-    if (!msg || chat.streaming) return
+    if (!msg || composerRunActive) return
     if (!isResume && chat.mode === 'research' && dr.kbEnabled) {
       if (!researchKbs.length) {
         window.alert('No knowledge bases found. Create and index one in Super-RAG or `kendr rag` first.')
@@ -1661,8 +2348,11 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     const userMsgId = `u-${runId}`
     const currentAwaitingContext = chat.awaitingContext || null
     const resumeMessageId = String(currentAwaitingContext?.messageId || '').trim()
+    const resumeMessage = resumeMessageId
+      ? (chat.messages || []).find((item) => item?.id === resumeMessageId) || null
+      : null
     const preserveAwaitingBubble = isResume && resumeMessageId && shouldInlineAwaitingContext(currentAwaitingContext)
-    const asstMsgId = isResume && resumeMessageId && !preserveAwaitingBubble ? resumeMessageId : `a-${runId}`
+    const asstMsgId = `a-${runId}`
 
     const currentMode = chat.mode
     const currentModeLabel = modeLabel(currentMode)
@@ -1685,7 +2375,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     dispatch({ type: 'CLEAR_AWAITING' })
     setAttachments([])
 
-    if (preserveAwaitingBubble && resumeMessageId) {
+    if (isResume && resumeMessageId) {
       const normalizedReply = msg.toLowerCase()
       const approvalState = normalizedReply === 'approve'
         ? 'approved'
@@ -1698,55 +2388,35 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
         patch: {
           status: 'done',
           approvalState,
+          artifacts: stripReportArtifacts(resumeMessage?.artifacts),
         },
       })
     }
 
-    if (isResume && resumeMessageId && !preserveAwaitingBubble) {
-      dispatch({
-        type: 'UPD_MSG',
+    dispatch({
+      type: 'ADD_MSG',
+      msg: {
         id: asstMsgId,
-        patch: {
-          content: '',
-          status: 'thinking',
-          runId: isSimpleStudioChat ? null : runId,
-          runStartedAt: new Date().toISOString(),
-          logs: [],
-          mode: currentMode,
-          modeLabel: currentModeLabel,
-          statusText: 'Continuing approved plan...',
-          approvalScope: '',
-          approvalKind: '',
-          approvalRequest: null,
-          awaitingDecision: '',
-          approvalState: '',
-        },
-      })
-    } else {
-      dispatch({
-        type: 'ADD_MSG',
-        msg: {
-          id: asstMsgId,
-          role: 'assistant',
-          content: '',
-          steps: [],
-          progress: [],
-          logs: [],
-          checklist: [],
-          status: 'thinking',
-          runId: isSimpleStudioChat ? null : runId,
-          runStartedAt: new Date().toISOString(),
-          mode: currentMode,
-          modeLabel: currentModeLabel,
-          approvalScope: '',
-          approvalKind: '',
-          approvalRequest: null,
-          awaitingDecision: '',
-          approvalState: '',
-          ts: new Date(),
-        }
-      })
-    }
+        role: 'assistant',
+        content: '',
+        steps: [],
+        progress: [],
+        logs: [],
+        checklist: [],
+        status: 'thinking',
+        runId: isSimpleStudioChat ? null : runId,
+        runStartedAt: new Date().toISOString(),
+        mode: currentMode,
+        modeLabel: currentModeLabel,
+        statusText: isResume ? 'Continuing approved plan...' : '',
+        approvalScope: '',
+        approvalKind: '',
+        approvalRequest: null,
+        awaitingDecision: '',
+        approvalState: '',
+        ts: new Date(),
+      }
+    })
 
     appDispatch({ type: 'SET_STREAMING', streaming: true })
 
@@ -1765,10 +2435,18 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
             channel:     'webchat',
           }
         : buildPayload(msg, chatId, runId, appState.projectRoot, chat.mode, dr, sentAttachments, studioMode, mcpEnabled)
-      if (!isResume && appState.selectedModel) {
-        const selected = resolveSelectedModel(appState.selectedModel)
+      const activePayloadModel = !isResume
+        ? (chat.mode === 'research'
+          ? effectiveDeepResearchModel
+          : (appState.selectedModel ? resolveSelectedModel(appState.selectedModel) : null))
+        : null
+      if (!isResume && activePayloadModel) {
+        const selected = activePayloadModel
         if (selected.provider) body.provider = selected.provider
         if (selected.model) body.model = selected.model
+      }
+      if (!isResume && chat.mode === 'research' && effectiveDeepResearchModel?.model) {
+        body.research_model = effectiveDeepResearchModel.model
       }
       if (!isResume) {
         body.history = buildSimpleHistory(chat.messages, 14)
@@ -1786,8 +2464,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
         if (!resp.ok) {
           refreshModelInventory(true)
           dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { content: data.error || data.detail || resp.statusText, status: 'error', runId: null } })
-          dispatch({ type: 'SET_STREAMING', val: false })
-          appDispatch({ type: 'SET_STREAMING', streaming: false })
+          clearActiveRunState()
           return
         }
 
@@ -1800,8 +2477,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
           return
         } else {
           dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { content: data.answer || '', status: 'done', runId: null, artifacts: [] } })
-          dispatch({ type: 'SET_STREAMING', val: false })
-          appDispatch({ type: 'SET_STREAMING', streaming: false })
+          clearActiveRunState()
           return
         }
       }
@@ -1816,8 +2492,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
         const err = await resp.json().catch(() => ({}))
         refreshModelInventory(true)
         dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { content: err.error || err.detail || resp.statusText, status: 'error' } })
-        dispatch({ type: 'SET_STREAMING', val: false })
-        appDispatch({ type: 'SET_STREAMING', streaming: false })
+        clearActiveRunState()
         return
       }
 
@@ -1832,10 +2507,9 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     } catch (err) {
       refreshModelInventory(true)
       dispatch({ type: 'UPD_MSG', id: asstMsgId, patch: { content: `Cannot reach backend: ${err.message}`, status: 'error' } })
-      dispatch({ type: 'SET_STREAMING', val: false })
-      appDispatch({ type: 'SET_STREAMING', streaming: false })
+      clearActiveRunState()
     }
-  }, [input, chat.streaming, chat.awaitingContext, chat.mode, apiBase, appState.projectRoot, appState.selectedModel, chatId, dr, attachments, studioMode, isSimpleStudioChat, mcpEnabled, appDispatch, refreshModelInventory, contextLimit, researchKbs, activeResearchKb])
+  }, [input, composerRunActive, chat.awaitingContext, chat.mode, apiBase, appState.projectRoot, appState.selectedModel, chatId, dr, attachments, studioMode, isSimpleStudioChat, mcpEnabled, appDispatch, refreshModelInventory, contextLimit, researchKbs, activeResearchKb, clearActiveRunState])
 
   // ── SSE stream ──────────────────────────────────────────────────────────────
   const openStream = useCallback((runId, asstMsgId) => {
@@ -1873,9 +2547,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
 
     const finishStream = () => {
       closeClean()
-      dispatch({ type: 'SET_STREAMING', val: false })
-      appDispatch({ type: 'SET_STREAMING', streaming: false })
-      appDispatch({ type: 'SET_ACTIVE_RUN', runId: null })
+      clearActiveRunState()
     }
 
     const pushLogEntry = (item) => {
@@ -2009,7 +2681,17 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       try {
         const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}`)
         const data = await resp.json().catch(() => ({}))
-        if (!resp.ok || closed) return
+        if (closed) return
+        if (!resp.ok) {
+          dispatch({
+            type: 'UPD_MSG',
+            id: asstMsgId,
+            patch: buildFailedMessagePatch(data, runId, 'failed', existingMsg || {}),
+          })
+          dispatch({ type: 'CLEAR_AWAITING' })
+          finishStream()
+          return
+        }
         dispatch({
           type: 'UPD_MSG',
           id: asstMsgId,
@@ -2294,7 +2976,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       })
       refreshRunSnapshot()
     }
-  }, [apiBase, appDispatch, refreshModelInventory, chat.messages])
+  }, [apiBase, appDispatch, refreshModelInventory, chat.messages, clearActiveRunState])
 
   // Re-attach to an active background run when returning to chat view.
   useEffect(() => {
@@ -2306,13 +2988,24 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     let cancelled = false
     ;(async () => {
       try {
+        const existing = (chat.messages || []).find(m => String(m.runId || '') === activeRunId)
         const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(activeRunId)}`)
         const data = await resp.json().catch(() => ({}))
         if (cancelled) return
-        if (!resp.ok) return
+        if (!resp.ok) {
+          if (existing?.id) {
+            dispatch({
+              type: 'UPD_MSG',
+              id: existing.id,
+              patch: buildFailedMessagePatch(data, activeRunId, 'failed', existing),
+            })
+          }
+          dispatch({ type: 'CLEAR_AWAITING' })
+          clearActiveRunState()
+          return
+        }
         const status = runSnapshotStatus(data)
         if (TERMINAL_RUN_STATUSES.has(status)) {
-          const existing = (chat.messages || []).find(m => String(m.runId || '') === activeRunId)
           if (existing?.id) {
             dispatch({
               type: 'UPD_MSG',
@@ -2323,13 +3016,11 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
             })
           }
           dispatch({ type: 'CLEAR_AWAITING' })
-          appDispatch({ type: 'SET_STREAMING', streaming: false })
-          appDispatch({ type: 'SET_ACTIVE_RUN', runId: null })
+          clearActiveRunState()
           return
         }
 
         let asstMsgId = ''
-        const existing = (chat.messages || []).find(m => String(m.runId || '') === activeRunId)
         if (status === 'awaiting_user_input' && !buildAwaitingState(data, existing || {})) {
           if (existing?.id) {
             dispatch({
@@ -2339,8 +3030,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
             })
           }
           dispatch({ type: 'CLEAR_AWAITING' })
-          appDispatch({ type: 'SET_STREAMING', streaming: false })
-          appDispatch({ type: 'SET_ACTIVE_RUN', runId: null })
+          clearActiveRunState()
           return
         }
         if (existing?.id) {
@@ -2413,27 +3103,29 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     })()
 
     return () => { cancelled = true }
-  }, [appState.activeRunId, apiBase, openStream, chat.messages, chat.mode, appDispatch])
+  }, [appState.activeRunId, apiBase, openStream, chat.messages, chat.mode, appDispatch, clearActiveRunState])
 
   // ── Stop run ────────────────────────────────────────────────────────────────
   const stopRun = useCallback(async () => {
+    const runId = String(stopTargetRunId || '').trim()
+    if (!runId) return
     esRef.current?.close()
-    // Mark the in-progress bubble as done so it doesn't stay stuck in "Running"
-    const activeMsg = chat.messages.find(m => m.status === 'streaming' || m.status === 'thinking')
+    // Mark the matching in-progress bubble as done so it doesn't stay stuck in "Running"
+    const activeMsg = [...(chat.messages || [])].reverse().find((msg) => (
+      String(msg?.runId || '').trim() === runId && isPendingRunStatus(msg?.status)
+    ))
     if (activeMsg) {
       dispatch({ type: 'UPD_MSG', id: activeMsg.id, patch: { status: 'done' } })
     }
     dispatch({ type: 'CLEAR_AWAITING' })
-    if (chat.activeRunId) {
+    if (runId) {
       await fetch(`${apiBase}/api/runs/stop`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ run_id: chat.activeRunId })
+        body: JSON.stringify({ run_id: runId })
       }).catch(() => {})
     }
-    dispatch({ type: 'SET_STREAMING', val: false })
-    appDispatch({ type: 'SET_STREAMING', streaming: false })
-    appDispatch({ type: 'SET_ACTIVE_RUN', runId: null })
-  }, [chat.activeRunId, chat.messages, apiBase, appDispatch])
+    clearActiveRunState()
+  }, [stopTargetRunId, chat.messages, apiBase, clearActiveRunState])
 
   const submitSkillApproval = useCallback(async (scope, note = '') => {
     const ctx = chat.awaitingContext || {}
@@ -2471,6 +3163,9 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
 
   const isOnline = appState.backendStatus === 'running'
   const studioModelLabel = (() => {
+    if (chat.mode === 'research' && effectiveDeepResearchModel?.model) {
+      return `Research · ${effectiveDeepResearchModel.shortLabel || composerModelMeta.label}`
+    }
     if (selectedModelMeta.model) return `Selected · ${selectedModelMeta.label}`
     const provider = String(modelInventory?.configured_provider || '').trim()
     const model = String(modelInventory?.configured_model || '').trim()
@@ -2545,7 +3240,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
     { id: 'research', label: '🔬 Deep Research' },
   ]
   const showLandingLayout = minimalStudio && !hasMessages
-  const composerBanner = chat.streaming
+  const composerBanner = composerRunActive
     ? 'Run active. Live execution log updates are streaming in the current run bubble. Stop the run before sending another message.'
     : displayableAwaitingContext
       ? 'Run paused for your input. Reply here to continue the same workflow.'
@@ -2557,7 +3252,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       {!hideHeader && <div className="kc-header">
         <div className="kc-logo">K<span>endr</span></div>
         <div className="kc-header-model" title={studioModelLabel}>
-          <span className={`kc-header-model-dot ${selectedModelMeta.isLocal || String(modelInventory?.configured_provider || '').toLowerCase() === 'ollama' ? 'local' : ''}`} />
+          <span className={`kc-header-model-dot ${composerModelMeta.isLocal || String(modelInventory?.configured_provider || '').toLowerCase() === 'ollama' ? 'local' : ''}`} />
           <span>{studioModelLabel}</span>
           {!studioMode && appState.projectRoot && <span className="kc-header-model-project">{basename(appState.projectRoot)}</span>}
         </div>
@@ -2615,7 +3310,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
           {chat.messages.map(msg =>
             msg.role === 'user'
               ? <UserMessage key={msg.id} msg={msg} />
-              : <AssistantMessage key={msg.id} msg={msg} onQuickReply={(reply) => send(reply, true)} onSendSuggestion={(reply) => send(reply, true)} onOpenArtifact={openArtifact} onReviewArtifact={reviewArtifact} />
+              : <AssistantMessage key={msg.id} msg={msg} onQuickReply={(reply) => send(reply, true)} onSendSuggestion={(reply) => send(reply, true)} onOpenArtifact={openArtifact} onDownloadArtifact={downloadArtifact} onReviewArtifact={reviewArtifact} />
           )}
           <div ref={messagesEndRef} />
         </div>
@@ -2625,12 +3320,23 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
             dr={dr}
             updateDr={updateDr}
             collapsed={dr.collapsed}
+            modelOptions={deepResearchModelState.options}
+            inheritedModel={deepResearchModelState.inheritedOption}
+            inheritedReason={deepResearchModelState.inheritedReason}
+            effectiveModel={deepResearchModelState.effectiveOption}
+            effectiveModelSource={deepResearchModelState.effectiveSource}
+            recommendedDeepResearchModel={recommendedDeepResearchModel}
+            recommendedDeepResearchEvidenceStage={recommendedDeepResearchEvidenceStage}
+            searchProviderState={deepResearchSearchProviderState}
+            effectiveSearchProvider={effectiveDeepResearchSearchProvider}
             indexedKbs={indexedResearchKbs}
             activeKb={activeResearchKb}
             selectedKb={selectedResearchKb}
             projectRoot={appState.projectRoot}
             apiBase={apiBase}
             refreshKbs={loadResearchKbs}
+            activeDeepResearchWorkflowCombo={activeDeepResearchWorkflowCombo}
+            workflowStageOptions={deepResearchWorkflowStageOptions}
           />
         )}
       </div>
@@ -2688,7 +3394,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
       {/* ── Input area ── */}
       <div className="kc-input-area">
         {!!composerBanner && (
-          <div className={`kc-composer-state${chat.streaming ? ' kc-composer-state--running' : ' kc-composer-state--awaiting'}`}>
+          <div className={`kc-composer-state${composerRunActive ? ' kc-composer-state--running' : ' kc-composer-state--awaiting'}`}>
             {composerBanner}
           </div>
         )}
@@ -2696,8 +3402,8 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
           <div className="kc-attach-bar">
             {showInlineAttachmentTools && (
               <div className="kc-attach-actions">
-                <button className="kc-attach-btn" onClick={attachFiles} disabled={chat.streaming}>+ Files</button>
-                {studioMode && <button className="kc-attach-btn" onClick={attachFolder} disabled={chat.streaming}>+ Folder</button>}
+                <button className="kc-attach-btn" onClick={attachFiles} disabled={composerRunActive}>+ Files</button>
+                {studioMode && <button className="kc-attach-btn" onClick={attachFolder} disabled={composerRunActive}>+ Folder</button>}
                 {chat.mode === 'agent' || chat.mode === 'plan' ? (
                   <span
                     className={`kc-mcp-indicator${mcpEnabled && mcpUndiscovered > 0 ? ' kc-mcp-indicator--warn' : ''}`}
@@ -2711,7 +3417,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
                   <button
                     className={`kc-attach-btn kc-mcp-toggle${mcpEnabled ? ' kc-mcp-toggle--on' : ''}${mcpEnabled && mcpUndiscovered > 0 ? ' kc-mcp-toggle--warn' : ''}`}
                     onClick={() => setMcpEnabled(v => !v)}
-                    disabled={chat.streaming}
+                    disabled={composerRunActive}
                     title={
                       mcpEnabled && mcpUndiscovered > 0
                         ? `${mcpUndiscovered} server${mcpUndiscovered !== 1 ? 's have' : ' has'} no tools discovered — open MCP Settings to run discovery`
@@ -2754,7 +3460,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
                 />
               </div>
             </div>
-            <button className="kc-attach-btn" onClick={compactContext} title="Compact context and continue in a fresh backend session" disabled={chat.streaming}>
+            <button className="kc-attach-btn" onClick={compactContext} title="Compact context and continue in a fresh backend session" disabled={composerRunActive}>
               Compact
             </button>
           </div>
@@ -2779,7 +3485,7 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
         <div className="kc-input-row">
           {minimalStudio && (
             <div className="kc-composer-menu" ref={composerMenuRef}>
-              <button className="kc-composer-plus" onClick={() => setComposerMenuOpen((value) => !value)} title="Add files or tools" disabled={chat.streaming}>
+              <button className="kc-composer-plus" onClick={() => setComposerMenuOpen((value) => !value)} title="Add files or tools" disabled={composerRunActive}>
                 +
               </button>
               {composerMenuOpen && (
@@ -2861,22 +3567,22 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
             onPaste={handlePaste}
             onKeyDown={handleKey}
             rows={minimalStudio ? 1 : 3}
-            disabled={chat.streaming}
+            disabled={composerRunActive}
           />
           <button
-            className={`kc-send-btn ${chat.streaming ? 'kc-send-btn--stop' : ''}`}
-            onClick={chat.streaming ? () => stopRun() : () => send()}
-            disabled={!chat.streaming && !input.trim()}
-            title={chat.streaming ? 'Stop (sends cancellation)' : 'Send (Ctrl+Enter)'}
+            className={`kc-send-btn ${composerRunActive ? 'kc-send-btn--stop' : ''}`}
+            onClick={composerRunActive ? () => stopRun() : () => send()}
+            disabled={!composerRunActive && !input.trim()}
+            title={composerRunActive ? 'Stop active run' : 'Send (Ctrl+Enter)'}
           >
-            {chat.streaming ? 'Stop' : <SendIcon />}
+            {composerRunActive ? 'Stop' : <SendIcon />}
           </button>
         </div>
         {showInlineFlowStrip && (
           <div className="kc-flow-strip">
             <span className={`kc-flow-chip kc-flow-chip--${chat.mode}`}>{chat.mode === 'plan' ? 'Plan first' : chat.mode === 'agent' ? 'Agent run' : chat.mode === 'research' ? 'Research flow' : 'Quick answer'}</span>
             {!studioMode && appState.projectRoot && <span className="kc-flow-chip">Workspace · {basename(appState.projectRoot)}</span>}
-            <span className="kc-flow-chip">{selectedModelMeta.model ? selectedModelMeta.label : 'Backend auto'}</span>
+            <span className="kc-flow-chip">{composerModelMeta.model ? composerModelMeta.label : 'Backend auto'}</span>
             {chat.mode === 'plan' && <span className="kc-flow-chip kc-flow-chip--muted">waits before implement</span>}
           </div>
         )}
@@ -2886,9 +3592,62 @@ export default function ChatPanel({ fullWidth = false, hideHeader = false, studi
 }
 
 // ─── Deep Research Panel ──────────────────────────────────────────────────────
-function DeepResearchPanel({ dr, updateDr, collapsed = false, indexedKbs = [], activeKb = null, selectedKb = null, projectRoot = '', apiBase = '', refreshKbs = null }) {
+function DeepResearchPanel({
+  dr,
+  updateDr,
+  collapsed = false,
+  modelOptions = [],
+  inheritedModel = null,
+  inheritedReason = '',
+  effectiveModel = null,
+  effectiveModelSource = 'none',
+  recommendedDeepResearchModel = null,
+  recommendedDeepResearchEvidenceStage = null,
+  searchProviderState = { options: [] },
+  effectiveSearchProvider = null,
+  indexedKbs = [],
+  activeKb = null,
+  selectedKb = null,
+  projectRoot = '',
+  apiBase = '',
+  refreshKbs = null,
+  activeDeepResearchWorkflowCombo = null,
+  workflowStageOptions = [],
+}) {
   const api = window.kendrAPI
   const [kbSetupState, setKbSetupState] = useState({ status: 'idle', message: '' })
+  const depthPreset = resolveDeepResearchDepthPreset(dr.depthMode, dr.pages)
+  const recommendedStageSelections = useMemo(() => {
+    const next = {}
+    const stages = Array.isArray(activeDeepResearchWorkflowCombo?.stages) ? activeDeepResearchWorkflowCombo.stages : []
+    for (const stage of stages) {
+      const stageName = String(stage?.stage || '').trim()
+      const provider = String(stage?.provider || '').trim()
+      const model = String(stage?.model || '').trim()
+      if (stageName && provider && model) next[stageName] = `${provider}/${model}`
+    }
+    return next
+  }, [activeDeepResearchWorkflowCombo])
+  const actionableWorkflowStageOptions = useMemo(() => (
+    (Array.isArray(workflowStageOptions) ? workflowStageOptions : [])
+      .filter((stageOption) => ['router', 'merge', 'verify'].includes(String(stageOption?.stage || '').trim()))
+  ), [workflowStageOptions])
+  const stageOverrideSelections = (dr.multiModelStageOverrides && typeof dr.multiModelStageOverrides === 'object')
+    ? dr.multiModelStageOverrides
+    : {}
+
+  const updateStageOverride = (stageName, value) => {
+    const normalizedStage = String(stageName || '').trim()
+    if (!normalizedStage) return
+    const normalizedValue = String(value || '').trim()
+    const recommendedValue = String(recommendedStageSelections[normalizedStage] || '').trim()
+    const nextOverrides = { ...stageOverrideSelections }
+    if (!normalizedValue || normalizedValue === recommendedValue) delete nextOverrides[normalizedStage]
+    else nextOverrides[normalizedStage] = normalizedValue
+    updateDr({ multiModelStageOverrides: nextOverrides })
+  }
+
+  const clearStageOverrides = () => updateDr({ multiModelStageOverrides: {} })
 
   const toggleFormat = (fmt) => {
     const cur = dr.outputFormats
@@ -3045,9 +3804,25 @@ function DeepResearchPanel({ dr, updateDr, collapsed = false, indexedKbs = [], a
         <div className="dr-panel-header" onClick={() => updateDr({ collapsed: !dr.collapsed })}>
           <span className="dr-panel-title">🔬 Deep Research Settings</span>
           <div className="dr-summary">
-            <span className="dr-sum-pill">~{dr.pages}p</span>
+            <span className="dr-sum-pill">{depthPreset.summary}</span>
+            {effectiveModel?.model && <span className="dr-sum-pill">{effectiveModel.model}</span>}
+            {dr.webSearchEnabled && effectiveSearchProvider?.label && (
+              <span className="dr-sum-pill">{effectiveSearchProvider.label}</span>
+            )}
+            {dr.multiModelEnabled && (
+              <span className="dr-sum-pill">
+                {dr.multiModelStrategy === 'cheapest' ? 'Cheapest combo' : 'Best combo'}
+              </span>
+            )}
             <span className="dr-sum-pill">{dr.citationStyle.toUpperCase()}</span>
             <span className="dr-sum-pill">{dr.outputFormats.join('·')}</span>
+            {dr.webSearchEnabled && effectiveModel?.model && (
+              <span className="dr-sum-pill">
+                {hasNativeWebSearchCapability(effectiveModel.provider, effectiveModel.model, effectiveModel.capabilities)
+                  ? 'Native web'
+                  : 'Kendr search'}
+              </span>
+            )}
             {!dr.webSearchEnabled && <span className="dr-sum-pill dr-sum-warn">Local only</span>}
           </div>
           <span className="dr-collapse-btn">{dr.collapsed ? '▸' : '▾'}</span>
@@ -3058,14 +3833,80 @@ function DeepResearchPanel({ dr, updateDr, collapsed = false, indexedKbs = [], a
             {/* Row 1 */}
             <div className="dr-grid">
               <div className="dr-field">
-                <label className="dr-label">Approx. Length</label>
-                <select className="dr-select" value={dr.pages} onChange={e => updateDr({ pages: +e.target.value })}>
-                  <option value={10}>~10 pages</option>
-                  <option value={25}>~25 pages</option>
-                  <option value={50}>~50 pages</option>
-                  <option value={100}>~100 pages</option>
+                <label className="dr-label">Research Depth</label>
+                <select
+                  className="dr-select"
+                  value={depthPreset.id}
+                  onChange={e => {
+                    const preset = resolveDeepResearchDepthPreset(e.target.value, 0)
+                    updateDr({ depthMode: preset.id, pages: preset.pages })
+                  }}
+                >
+                  {DEEP_RESEARCH_DEPTH_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id}>{preset.label}</option>
+                  ))}
                 </select>
-                <div className="dr-note">Aiming near this length; citations and formatting can shift the final page count.</div>
+                <div className="dr-note">{depthPreset.hint}</div>
+                <div className="dr-note">Kendr uses this as an execution-depth hint. The final exports are sized automatically from source density, citations, and structure instead of targeting an exact page count.</div>
+              </div>
+              <div className="dr-field">
+                <label className="dr-label">Deep Research Model</label>
+                <select
+                  className="dr-select"
+                  value={dr.researchModel || ''}
+                  onChange={e => updateDr({ researchModel: e.target.value })}
+                >
+                  <option value="">
+                    {inheritedModel?.shortLabel
+                      ? `Use selected chat model · ${inheritedModel.shortLabel}`
+                      : 'Use the chat header model'}
+                  </option>
+                  {modelOptions.map(option => (
+                    <option
+                      key={option.value}
+                      value={option.value}
+                      disabled={!!option.disabledReason}
+                    >
+                      {option.disabledReason
+                        ? `${option.shortLabel} — ${option.disabledReason}`
+                        : option.shortLabel}
+                    </option>
+                  ))}
+                </select>
+                <div className="dr-note">
+                  {effectiveModel
+                    ? `Active for Deep Research: ${effectiveModel.shortLabel}${effectiveModelSource === 'recommended' ? ' (recommended)' : effectiveModelSource === 'header' ? ' (from header model)' : ''}.`
+                    : 'No compatible Deep Research model is available with the current settings.'}
+                </div>
+                {recommendedDeepResearchModel && (
+                  <div className="dr-note">
+                    {effectiveModel && recommendedDeepResearchModel.value === effectiveModel.value
+                      ? `Best-fit suggestion: ${recommendedDeepResearchModel.shortLabel}.`
+                      : `Best-fit suggestion: ${recommendedDeepResearchModel.shortLabel}${effectiveModel ? `, while this run is currently using ${effectiveModel.shortLabel}.` : '.'}`}
+                  </div>
+                )}
+                {dr.webSearchEnabled ? (
+                  <div className="dr-note">
+                    {effectiveModel && hasNativeWebSearchCapability(effectiveModel.provider, effectiveModel.model, effectiveModel.capabilities)
+                      ? 'This model can use native web search for Deep Research.'
+                      : 'This model will use Kendr web search fallback: Kendr gathers sources, then the selected model synthesizes the report.'}
+                  </div>
+                ) : (
+                  <div className="dr-note">Local-only runs can use local models or any configured provider with enough context.</div>
+                )}
+                {dr.multiModelEnabled && recommendedDeepResearchEvidenceStage?.provider && recommendedDeepResearchEvidenceStage?.model && (
+                  <div className="dr-note">
+                    Multi-model evidence-stage suggestion: {providerDisplayLabel(recommendedDeepResearchEvidenceStage.provider)} · {recommendedDeepResearchEvidenceStage.model}.
+                  </div>
+                )}
+                {!dr.researchModel && inheritedReason && effectiveModel && (
+                  <div className="dr-note">The current chat-header model is incompatible here, so this run will fall back to {effectiveModel.shortLabel}.</div>
+                )}
+                {dr.multiModelEnabled && (
+                  <div className="dr-note">
+                    The selected Deep Research model remains the base fallback. Route, evidence, draft, merge, and verification stages can be overridden by the multi-model workflow plan for this task.
+                  </div>
+                )}
               </div>
               <div className="dr-field">
                 <label className="dr-label">Citation Style</label>
@@ -3089,6 +3930,31 @@ function DeepResearchPanel({ dr, updateDr, collapsed = false, indexedKbs = [], a
                 <label className="dr-label">Max Sources</label>
                 <input className="dr-input-sm" type="number" min={0} step={10} value={dr.maxSources}
                   onChange={e => updateDr({ maxSources: +e.target.value })} placeholder="0 = auto" />
+              </div>
+              <div className="dr-field">
+                <label className="dr-label">Search Backend</label>
+                <select
+                  className="dr-select"
+                  value={effectiveSearchProvider?.id || 'auto'}
+                  onChange={e => updateDr({ searchBackend: e.target.value })}
+                  disabled={!dr.webSearchEnabled}
+                >
+                  {searchProviderState.options.map((option) => (
+                    <option key={option.id} value={option.id} disabled={!option.enabled}>
+                      {option.enabled ? option.label : `${option.label} — not configured`}
+                    </option>
+                  ))}
+                </select>
+                <div className="dr-note">
+                  {!dr.webSearchEnabled
+                    ? 'Search backend selection is disabled while web search is off.'
+                    : (effectiveSearchProvider?.note || 'Choose which backend Kendr should prefer while gathering external sources.')}
+                </div>
+                {dr.webSearchEnabled && effectiveSearchProvider?.warning && (
+                  <div className="dr-note" style={{ color: 'var(--warn)' }}>
+                    {effectiveSearchProvider.warning}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -3134,6 +4000,104 @@ function DeepResearchPanel({ dr, updateDr, collapsed = false, indexedKbs = [], a
                     Checkpointing
                   </label>
                 </div>
+              </div>
+              <div className="dr-field">
+                <label className="dr-label">Model Allocation</label>
+                <div className="dr-checks">
+                  <label className="dr-check">
+                    <input
+                      type="checkbox"
+                      checked={!!dr.multiModelEnabled}
+                      onChange={e => updateDr({ multiModelEnabled: e.target.checked })}
+                    />
+                    Use multi-model workflow
+                  </label>
+                </div>
+                {dr.multiModelEnabled ? (
+                  <>
+                    <select
+                      className="dr-select"
+                      value={dr.multiModelStrategy || 'best'}
+                      onChange={e => updateDr({ multiModelStrategy: e.target.value === 'cheapest' ? 'cheapest' : 'best' })}
+                      style={{ marginTop: 8 }}
+                    >
+                      <option value="best">Best combination</option>
+                      <option value="cheapest">Cheapest combination</option>
+                    </select>
+                    <div className="dr-note">
+                      Deep Research can split route, evidence, draft, merge, and verification across different models when the current task enables it.
+                    </div>
+                    <div className="dr-note">
+                      {activeDeepResearchWorkflowCombo?.available
+                        ? `${dr.multiModelStrategy === 'cheapest' ? 'Cheapest' : 'Best'} combo: ${activeDeepResearchWorkflowCombo.summary || 'Stage recommendations are available.'}`
+                        : 'No compatible multi-model Deep Research combination is currently available from the connected providers.'}
+                    </div>
+                    {activeDeepResearchWorkflowCombo?.available && (
+                      <div className="dr-note">
+                        Estimated cost band: {String(activeDeepResearchWorkflowCombo.estimated_cost_band || 'unknown')}.
+                      </div>
+                    )}
+                    {activeDeepResearchWorkflowCombo?.available && actionableWorkflowStageOptions.length > 0 && (
+                      <>
+                        <div className="dr-note" style={{ marginTop: 8 }}>
+                          The recommendation preset seeds the stage picks below. Change a stage only when you want to pin a different model for that part of the workflow.
+                        </div>
+                        {actionableWorkflowStageOptions.map((stageOption) => {
+                          const stageName = String(stageOption.stage || '').trim()
+                          const selectedValue = String(stageOverrideSelections[stageName] || '').trim()
+                          const recommendedValue = String(recommendedStageSelections[stageName] || '').trim()
+                          const recommendedCandidate = (Array.isArray(stageOption.candidates) ? stageOption.candidates : [])
+                            .find((candidate) => String(candidate?.value || '').trim() === recommendedValue) || null
+                          const manualCandidate = (Array.isArray(stageOption.candidates) ? stageOption.candidates : [])
+                            .find((candidate) => String(candidate?.value || '').trim() === selectedValue) || null
+                          return (
+                            <div key={stageName} style={{ marginTop: 10 }}>
+                              <label className="dr-label">{stageOption.label} Model</label>
+                              <select
+                                className="dr-select"
+                                value={selectedValue}
+                                onChange={e => updateStageOverride(stageName, e.target.value)}
+                              >
+                                <option value="">
+                                  {recommendedCandidate
+                                    ? `Use ${dr.multiModelStrategy === 'cheapest' ? 'cheapest' : 'best'} recommendation · ${recommendedCandidate.labelFull || recommendedCandidate.value}`
+                                    : 'Use the recommendation preset'}
+                                </option>
+                                {(Array.isArray(stageOption.candidates) ? stageOption.candidates : []).map((candidate) => (
+                                  <option key={candidate.value} value={candidate.value}>
+                                    {candidate.labelFull || candidate.value}
+                                  </option>
+                                ))}
+                              </select>
+                              <div className="dr-note">
+                                {manualCandidate
+                                  ? `Pinned manually: ${manualCandidate.labelFull || manualCandidate.value}. ${manualCandidate.reason || ''}`.trim()
+                                  : recommendedCandidate
+                                    ? `Recommended: ${recommendedCandidate.labelFull || recommendedCandidate.value}. ${recommendedCandidate.reason || ''}`.trim()
+                                    : 'No compatible model candidates are available for this stage.'}
+                              </div>
+                            </div>
+                          )
+                        })}
+                        {Object.keys(stageOverrideSelections).length > 0 && (
+                          <button
+                            type="button"
+                            className="dr-action-btn"
+                            style={{ marginTop: 10 }}
+                            onClick={clearStageOverrides}
+                          >
+                            Reset Stage Overrides
+                          </button>
+                        )}
+                        <div className="dr-note" style={{ marginTop: 8 }}>
+                          The Deep Research model above controls evidence collection. Section drafting currently follows the merge-stage model during long-document execution.
+                        </div>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <div className="dr-note">Single-model mode keeps the whole task on the selected Deep Research model.</div>
+                )}
               </div>
             </div>
 
@@ -3344,7 +4308,7 @@ function UserMessage({ msg }) {
 }
 
 // ─── Assistant message ────────────────────────────────────────────────────────
-function AssistantMessage({ msg, onQuickReply, onSendSuggestion, onOpenArtifact, onReviewArtifact }) {
+function AssistantMessage({ msg, onQuickReply, onSendSuggestion, onOpenArtifact, onDownloadArtifact, onReviewArtifact }) {
   const [copied, setCopied] = useState(false)
   const [nowMs, setNowMs] = useState(Date.now())
   const [logsExpanded, setLogsExpanded] = useState(true)
@@ -3446,7 +4410,7 @@ function AssistantMessage({ msg, onQuickReply, onSendSuggestion, onOpenArtifact,
         )}
 
         {showActivityCards && (
-          <RunArtifactCards cards={activityCards} onOpenItem={onOpenArtifact} onReviewItem={onReviewArtifact} />
+          <RunArtifactCards cards={activityCards} runId={msg.runId} onOpenItem={onOpenArtifact} onDownloadItem={onDownloadArtifact} onReviewItem={onReviewArtifact} />
         )}
 
         {msg.runId && ['thinking', 'streaming', 'awaiting'].includes(String(msg.status || '')) && (
@@ -3552,7 +4516,7 @@ function ExecutionLogPanel({ logs, expanded, onToggle }) {
             <div className="kc-log-empty">Waiting for execution log output...</div>
           ) : (
             <div className="kc-log-lines">
-              {items.slice(0, 18).map((item) => (
+              {items.slice(-120).map((item) => (
                 <div key={item.id} className="kc-log-line">
                   {item.clock && <span className="kc-log-clock">{item.clock}</span>}
                   <span className="kc-log-text">{item.text}</span>
@@ -3566,7 +4530,7 @@ function ExecutionLogPanel({ logs, expanded, onToggle }) {
   )
 }
 
-function RunArtifactCards({ cards, onOpenItem, onReviewItem }) {
+function RunArtifactCards({ cards, runId, onOpenItem, onDownloadItem, onReviewItem }) {
   return (
     <div className="kc-activity-grid">
       {cards.map((card) => (
@@ -3583,9 +4547,25 @@ function RunArtifactCards({ cards, onOpenItem, onReviewItem }) {
             )}
           </div>
           {Array.isArray(card.items) && card.items.length > 0 && (
-            <div className="kc-activity-card-items">
-              {card.items.slice(0, 3).map((item) => (
-                item?.path ? (
+            <div className={`kc-activity-card-items${card.kind === 'artifact' ? ' kc-activity-card-items--stack' : ''}`}>
+              {card.items.slice(0, card.kind === 'artifact' ? 6 : 3).map((item) => (
+                card.kind === 'artifact' ? (
+                  <div key={`${item.path || item.name || item.label}-${item.label}`} className="kc-activity-card-file">
+                    <span className="kc-activity-card-file-label">{item.label}</span>
+                    <div className="kc-activity-card-file-actions">
+                      {(runId || item?.downloadUrl) && (
+                        <button className="kc-activity-card-mini" onClick={() => onDownloadItem?.(item, runId)}>
+                          Download
+                        </button>
+                      )}
+                      {item?.path && (
+                        <button className="kc-activity-card-mini kc-activity-card-mini--ghost" onClick={() => onOpenItem?.(item)}>
+                          Open
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : item?.path ? (
                   <button key={`${item.path}-${item.label}`} className="kc-activity-card-item kc-activity-card-item--action" onClick={() => onOpenItem?.(item)}>
                     {item.label}
                   </button>

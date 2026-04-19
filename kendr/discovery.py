@@ -129,6 +129,8 @@ def _register_task_module_agents(registry: Registry, module_name: str) -> None:
         if not name.endswith("_agent") or name.startswith("_"):
             continue
         metadata = dict(module_metadata.get(name, {}) if isinstance(module_metadata, dict) else {})
+        if metadata.get("discoverable", True) is False:
+            continue
         metadata.setdefault("connector_type", "task_agent")
         description = metadata.get("description") or inspect.getdoc(fn) or _default_description(name)
         registry.register_agent(

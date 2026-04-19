@@ -1484,7 +1484,9 @@ def _handle_travel_helper(inputs: dict, **_kwargs) -> dict:
     travel_data: dict[str, Any] = {"source": "planner"}
     origin = str(inputs.get("origin", "")).strip()
     destination = str(inputs.get("destination", "")).strip()
-    if os.getenv("SERP_API_KEY", "").strip() and origin and destination:
+    provider = str(inputs.get("provider", "") or "").strip().lower()
+    use_serpapi = provider == "serpapi"
+    if use_serpapi and os.getenv("SERP_API_KEY", "").strip() and origin and destination:
         try:
             from tasks.travel_tasks import _serpapi_request, _travel_mode_code
 

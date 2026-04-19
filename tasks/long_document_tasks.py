@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import html
 import json
 import math
 import os
@@ -13,27 +12,91 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 import textwrap
 
 from openai import OpenAI
 
 from kendr.domain.deep_research import build_source_strategy, discover_research_intent
+from kendr.domain.local_drive import (
+    normalize_extension_set as _normalize_extension_set,
+    resolve_paths as _resolve_local_drive_paths,
+    scan_local_drive_tree as _scan_local_drive_tree,
+)
 from kendr.execution_trace import append_execution_event
+from kendr.llm_router import supports_native_web_search
 from kendr.rag_manager import build_research_grounding
 from kendr.workflow_contract import approval_request_to_text, build_approval_request
 from tasks.a2a_agent_utils import begin_agent_session, publish_agent_output
 from tasks.coding_tasks import _extract_output_text
 from tasks.file_memory import bootstrap_file_memory, update_planning_file
 from tasks.planning_tasks import build_plan_approval_prompt, normalize_plan_data, plan_as_markdown
-from tasks.research_infra import fetch_search_results, fetch_url_content, llm_json, llm_text
+from tasks.plagiarism_checker import build_plagiarism_report as _dedicated_build_plagiarism_report
+from tasks.research_infra import (
+    fetch_search_results,
+    fetch_url_content,
+    llm_json,
+    llm_text,
+    normalize_research_search_backend,
+    openai_analyze_image,
+    parse_documents,
+    strip_code_fences,
+)
+from tasks.research_output import render_artifact_lines
 from tasks.utils import OUTPUT_DIR, log_task_update, model_selection_for_agent, write_text_file, resolve_output_path
 
 
-DEFAULT_DEEP_RESEARCH_MODEL = os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research")
+DEFAULT_DEEP_RESEARCH_MODEL = os.getenv("KENDR_DEEP_RESEARCH_MODEL", os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research"))
 DEFAULT_RESEARCH_FORMATS = ["pdf", "docx", "html", "md"]
 SUPPORTED_CITATION_STYLES = {"apa", "mla", "chicago", "ieee", "vancouver", "harvard"}
 DEEP_RESEARCH_LABEL = "Deep Research"
+OPENAI_WEB_SEARCH_TOOL = os.getenv("OPENAI_WEB_SEARCH_TOOL", "web_search").strip() or "web_search"
+DEEP_RESEARCH_DEPTH_PRESETS = {
+    "brief": {
+        "pages": 10,
+        "label": "Focused Brief",
+        "summary": "Focused",
+        "description": "Tight synthesis of the most important findings with a narrower evidence sweep.",
+    },
+    "standard": {
+        "pages": 25,
+        "label": "Standard Report",
+        "summary": "Standard",
+        "description": "Balanced multi-section research with enough room for evidence, tradeoffs, and conclusions.",
+    },
+    "comprehensive": {
+        "pages": 50,
+        "label": "Comprehensive Study",
+        "summary": "Comprehensive",
+        "description": "Broader source coverage and deeper cross-section synthesis for more complex topics.",
+    },
+    "exhaustive": {
+        "pages": 100,
+        "label": "Exhaustive Dossier",
+        "summary": "Exhaustive",
+        "description": "Maximum depth and breadth for heavy research, longer runtimes, and large evidence sets.",
+    },
+}
+
+
+def _normalize_research_depth_mode(value: Any, target_pages: int) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in DEEP_RESEARCH_DEPTH_PRESETS:
+        return normalized
+    if target_pages >= 100:
+        return "exhaustive"
+    if target_pages >= 50:
+        return "comprehensive"
+    if target_pages >= 20:
+        return "standard"
+    return "brief"
+
+
+def _research_depth_config(value: Any, target_pages: int) -> dict[str, Any]:
+    mode = _normalize_research_depth_mode(value, target_pages)
+    config = dict(DEEP_RESEARCH_DEPTH_PRESETS.get(mode, DEEP_RESEARCH_DEPTH_PRESETS["standard"]))
+    config["mode"] = mode
+    return config
 
 
 def _trace_now() -> str:
@@ -132,6 +195,7 @@ AGENT_METADATA = {
             "long_document_section_references",
             "long_document_section_search",
             "long_document_section_search_results",
+            "research_depth_mode",
             "research_model",
             "research_instructions",
             "research_max_tool_calls",
@@ -169,12 +233,15 @@ AGENT_METADATA = {
             "long_document_compiled_docx_path",
             "long_document_compiled_pdf_path",
             "long_document_outline_md_path",
+            "long_document_subplan_md_path",
             "long_document_coherence_base_path",
             "long_document_coherence_live_path",
             "long_document_references_path",
             "long_document_references_json_path",
             "long_document_visual_index_path",
             "long_document_visual_index_json_path",
+            "long_document_source_manifest_path",
+            "long_document_source_manifest_json_path",
             "long_document_summary",
             "research_kb_used",
             "research_kb_name",
@@ -183,7 +250,7 @@ AGENT_METADATA = {
             "research_kb_warning",
             "draft_response",
         ],
-        "requirements": ["openai"],
+        "requirements": ["configured_llm"],
         "display_name": "Deep Research Report Agent",
         "category": "documents",
         "intent_patterns": [
@@ -191,8 +258,8 @@ AGENT_METADATA = {
             "generate a handbook", "produce a whitepaper", "write a guide",
             "document about", "full report on", "comprehensive guide to",
         ],
-        "active_when": ["env:OPENAI_API_KEY"],
-        "config_hint": "Add your OpenAI API key in Setup → Providers.",
+        "active_when": [],
+        "config_hint": "Choose a configured model in Studio. OpenAI is still required when Deep Research web search is enabled.",
     }
 }
 
@@ -219,6 +286,83 @@ def _normalize_title(value: str, fallback: str) -> str:
     return fallback
 
 
+def _objective_title_fallback(objective: str) -> str:
+    value = re.sub(r"\s+", " ", str(objective or "").strip())
+    if not value:
+        return "Deep Research Report"
+
+    patterns = [
+        r"^(?:create|draft|write|produce|generate|prepare|build)\s+(?:a|an|the)?\s*(?:deep\s+research\s+)?(?:report|study|analysis|brief|dossier|document)\s+(?:on|about|for)\s+",
+        r"^(?:what\s+is|explain|analyze|analyse|investigate|research|summarize|summarise)\s+",
+    ]
+    for pattern in patterns:
+        value = re.sub(pattern, "", value, flags=re.IGNORECASE).strip()
+
+    value = value.rstrip("?.! ")
+    if not value:
+        return "Deep Research Report"
+    trimmed = _trim_text(value, 90)
+    return trimmed[0].upper() + trimmed[1:] if trimmed else "Deep Research Report"
+
+
+def _generate_report_title(objective: str, *, fallback: str = "Deep Research Report") -> str:
+    heuristic = _objective_title_fallback(objective)
+    try:
+        payload = llm_json(
+            f"""
+You are naming a deep research report.
+
+Objective:
+{objective}
+
+Return ONLY valid JSON:
+{{
+  "title": "A concise professional report title in title case"
+}}
+
+Constraints:
+- 4 to 10 words
+- no quotes
+- no trailing punctuation
+- do not use the generic title "Deep Research Report"
+- reflect the actual topic
+""",
+            {"title": heuristic},
+        )
+        candidate = str(payload.get("title", "") or "").strip()
+    except Exception:
+        candidate = heuristic
+
+    candidate = re.sub(r"\s+", " ", candidate).strip().strip("\"'")
+    if not candidate or candidate.lower() == "deep research report":
+        candidate = heuristic
+    return _normalize_title(candidate, fallback)
+
+
+def _strip_heading_attributes(value: str) -> str:
+    return re.sub(r"\s*\{#[^}]+\}\s*$", "", str(value or "").strip())
+
+
+def _slugify_heading(value: str, *, fallback: str = "section") -> str:
+    cleaned = _strip_heading_attributes(value).lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", cleaned).strip("-")
+    return slug or fallback
+
+
+def _heading_with_anchor(level: int, title: str, anchor: str) -> str:
+    normalized_title = _strip_heading_attributes(title)
+    normalized_anchor = _slugify_heading(anchor or title, fallback=f"heading-{level}")
+    return f"{'#' * max(1, level)} {normalized_title} {{#{normalized_anchor}}}"
+
+
+def _normalized_heading_candidate(value: str) -> str:
+    cleaned = _strip_heading_attributes(value)
+    cleaned = re.sub(r"^\s*#+\s*", "", cleaned)
+    cleaned = re.sub(r"^\s*section\s+\d+\s*[:.\-]\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*\d+\s*[:.\-]\s*", "", cleaned)
+    return re.sub(r"[^a-z0-9]+", " ", cleaned.lower()).strip()
+
+
 def _read_text_file(path_value: str, fallback: str = "") -> str:
     path = str(path_value or "").strip()
     if not path:
@@ -234,6 +378,170 @@ def _trim_text(text: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 3)] + "..."
+
+
+def _local_source_log_label(path_value: str, manifest_entry: Mapping[str, Any] | None = None) -> str:
+    entry = manifest_entry if isinstance(manifest_entry, Mapping) else {}
+    relative_path = str(entry.get("relative_path", "") or "").strip().replace("\\", "/")
+    if relative_path:
+        return relative_path
+    file_name = str(entry.get("name", "") or "").strip()
+    if file_name:
+        return file_name
+    raw_path = str(path_value or "").strip()
+    return Path(raw_path).name or raw_path or "local file"
+
+
+def _web_source_log_label(url: str) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return "website"
+    parsed = urlparse(value)
+    if parsed.netloc:
+        compact = parsed.netloc + (parsed.path or "")
+        if parsed.query:
+            compact += f"?{parsed.query}"
+        return _trim_text(compact, 120)
+    return _trim_text(value, 120)
+
+
+def _log_local_file_review(
+    path_value: str,
+    *,
+    status: str,
+    position: int,
+    total: int,
+    manifest_entry: Mapping[str, Any] | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> None:
+    label = _local_source_log_label(path_value, manifest_entry)
+    if status == "started":
+        log_task_update(DEEP_RESEARCH_LABEL, f"Reviewing local file [{position}/{total}]: {label}")
+        return
+    metadata = payload.get("metadata", {}) if isinstance(payload, Mapping) and isinstance(payload.get("metadata"), dict) else {}
+    error_text = str(metadata.get("error", "") or (payload.get("error", "") if isinstance(payload, Mapping) else "") or "").strip()
+    reader = str(metadata.get("reader", "") or "").strip()
+    char_count = len(str((payload or {}).get("text", "") or "").strip()) if isinstance(payload, Mapping) else 0
+    if error_text or status == "failed":
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"Local file review failed [{position}/{total}]: {label} ({_trim_text(error_text or 'document parse failed', 140)})",
+        )
+        return
+    outcome = [f"{char_count} chars" if char_count > 0 else "no readable text"]
+    if reader:
+        outcome.append(f"reader={reader}")
+    log_task_update(DEEP_RESEARCH_LABEL, f"Reviewed local file [{position}/{total}]: {label} ({', '.join(outcome)}).")
+
+
+def _log_web_review(
+    url: str,
+    *,
+    status: str,
+    position: int,
+    total: int,
+    payload: Mapping[str, Any] | None = None,
+    context: str = "website",
+) -> None:
+    label = _web_source_log_label(url)
+    if status == "started":
+        log_task_update(DEEP_RESEARCH_LABEL, f"Reviewing {context} [{position}/{total}]: {label}")
+        return
+    error_text = str((payload or {}).get("error", "") or "").strip() if isinstance(payload, Mapping) else ""
+    char_count = int((payload or {}).get("char_count", 0) or 0) if isinstance(payload, Mapping) else 0
+    if not char_count and isinstance(payload, Mapping):
+        char_count = len(str(payload.get("text", "") or "").strip())
+    content_type = str((payload or {}).get("content_type", "") or "").strip() if isinstance(payload, Mapping) else ""
+    if error_text or status == "failed":
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"{context.capitalize()} review failed [{position}/{total}]: {label} ({_trim_text(error_text or 'fetch failed', 140)})",
+        )
+        return
+    outcome = [f"{char_count} chars" if char_count > 0 else "no readable text"]
+    if content_type:
+        outcome.append(content_type)
+    log_task_update(DEEP_RESEARCH_LABEL, f"Reviewed {context} [{position}/{total}]: {label} ({', '.join(outcome)}).")
+
+
+def _log_search_collection(
+    query: str,
+    payload: Mapping[str, Any] | None,
+    *,
+    max_queries: int = 6,
+    max_results: int = 8,
+) -> None:
+    search_payload = payload if isinstance(payload, Mapping) else {}
+    provider = str(search_payload.get("provider", "") or "").strip()
+    if not provider:
+        providers_tried = search_payload.get("providers_tried", [])
+        if isinstance(providers_tried, list):
+            provider = str(providers_tried[0] or "").strip()
+    provider = provider or "none"
+
+    query_plan = search_payload.get("query_plan", [])
+    if isinstance(query_plan, list) and query_plan:
+        total_queries = len(query_plan)
+        for index, plan in enumerate(query_plan[:max_queries], start=1):
+            if not isinstance(plan, Mapping):
+                continue
+            plan_query = _trim_text(str(plan.get("query", "") or query).strip(), 180)
+            if not plan_query:
+                continue
+            metadata: list[str] = []
+            scope = str(plan.get("scope", "") or "").strip()
+            timelimit = str(plan.get("timelimit", "") or "").strip()
+            if scope:
+                metadata.append(scope)
+            if timelimit:
+                metadata.append(f"timelimit={timelimit}")
+            metadata_text = f" ({', '.join(metadata)})" if metadata else ""
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Search query [{index}/{total_queries}] via {provider}: {plan_query}{metadata_text}",
+            )
+        if total_queries > max_queries:
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Additional search queries omitted from log: {total_queries - max_queries}.",
+            )
+    elif str(query or "").strip():
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"Search query via {provider}: {_trim_text(str(query).strip(), 180)}",
+        )
+
+    results = search_payload.get("results", [])
+    if isinstance(results, list) and results:
+        total_results = len(results)
+        for index, item in enumerate(results[:max_results], start=1):
+            if not isinstance(item, Mapping):
+                continue
+            url = str(item.get("url", "") or "").strip()
+            if not url:
+                continue
+            title = _trim_text(str(item.get("title", "") or "").strip(), 100)
+            title_text = f" — {title}" if title else ""
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Collected search result [{index}/{total_results}] via {provider}: {_web_source_log_label(url)}{title_text}",
+            )
+        if total_results > max_results:
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Additional collected search results omitted from log: {total_results - max_results}.",
+            )
+        return
+
+    error_text = _trim_text(str(search_payload.get("error", "") or "").strip(), 180)
+    log_task_update(
+        DEEP_RESEARCH_LABEL,
+        (
+            f"No search result URLs collected via {provider}: {error_text}"
+            if error_text
+            else f"No search result URLs collected via {provider}."
+        ),
+    )
 
 
 def _normalize_research_formats(raw_value: Any) -> list[str]:
@@ -283,13 +591,43 @@ def _copy_artifact_alias(source_path: str, destination_path: str) -> str:
     if not source or not destination:
         return ""
     try:
-        src = Path(source)
-        dst = Path(destination)
+        src = Path(_output_file_path(source))
+        dst = Path(_output_file_path(destination))
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
         return str(dst)
     except Exception:
         return ""
+
+
+def _mirror_root_report_artifacts(
+    compiled_path: str,
+    export_paths: Mapping[str, Any] | None = None,
+    *,
+    root_report_dir: str = "reports",
+) -> dict[str, str]:
+    safe_exports = export_paths if isinstance(export_paths, Mapping) else {}
+    target_map = {
+        "md": _artifact_file(root_report_dir, "report.md"),
+        "html": _artifact_file(root_report_dir, "report.html"),
+        "pdf": _artifact_file(root_report_dir, "report.pdf"),
+        "docx": _artifact_file(root_report_dir, "report.docx"),
+    }
+    source_map = {
+        "md": compiled_path,
+        "html": str(safe_exports.get("html", "") or ""),
+        "pdf": str(safe_exports.get("pdf", "") or ""),
+        "docx": str(safe_exports.get("docx", "") or ""),
+    }
+    mirrored: dict[str, str] = {}
+    for fmt, destination in target_map.items():
+        source = str(source_map.get(fmt, "") or "").strip()
+        if not source:
+            continue
+        mirrored_path = _copy_artifact_alias(source, destination)
+        if mirrored_path:
+            mirrored[fmt] = mirrored_path
+    return mirrored
 
 
 def _normalize_reference_identity(reference: Mapping[str, Any], fallback_index: int) -> tuple[str, str, str]:
@@ -693,12 +1031,14 @@ def _research_depth_analysis(
     objective: str,
     *,
     target_pages: int,
+    depth_mode: str,
     requested_sources: list[str],
     date_range: str,
     max_sources: int = 0,
 ) -> dict[str, Any]:
     text = str(objective or "").strip()
     lowered = text.lower()
+    depth_config = _research_depth_config(depth_mode, target_pages)
     heuristic_tier = 2
     reason_bits: list[str] = []
 
@@ -741,6 +1081,9 @@ def _research_depth_analysis(
         "reason": "; ".join(reason_bits) or "heuristic estimate",
         "estimated_sources": estimated_sources,
         "estimated_pages": estimated_pages,
+        "depth_mode": depth_config["mode"],
+        "depth_label": depth_config["label"],
+        "depth_description": depth_config["description"],
         "subtopics": subtopics[:6],
         "requires_deep_research": heuristic_tier >= 3,
         "estimated_duration_minutes": estimated_duration,
@@ -756,6 +1099,9 @@ Respond with JSON only:
   "reason": "string",
   "estimated_sources": 40,
   "estimated_pages": 15,
+  "depth_mode": "standard",
+  "depth_label": "Standard Report",
+  "depth_description": "Balanced multi-section research with enough room for evidence, tradeoffs, and conclusions.",
   "subtopics": ["...", "..."],
   "requires_deep_research": true,
   "estimated_duration_minutes": 15
@@ -794,18 +1140,23 @@ Heuristic estimate:
         "reason": str(data.get("reason", "")).strip() or fallback["reason"],
         "estimated_sources": estimated_sources,
         "estimated_pages": estimated_pages,
+        "depth_mode": _normalize_research_depth_mode(data.get("depth_mode"), target_pages),
+        "depth_label": str(data.get("depth_label", "")).strip() or depth_config["label"],
+        "depth_description": str(data.get("depth_description", "")).strip() or depth_config["description"],
         "subtopics": subtopics,
         "requires_deep_research": bool(data.get("requires_deep_research", tier >= 3)),
         "estimated_duration_minutes": estimated_duration,
         "budget": budget,
         "execution_budget": execution_budget,
         "requested_target_pages": target_pages,
+        "requested_depth_mode": depth_config["mode"],
         "requested_max_sources": max_sources,
         "requested_sources": requested_sources,
         "date_range": date_range or "all_time",
         "request_signature": {
             "objective": text,
             "target_pages": target_pages,
+            "depth_mode": depth_config["mode"],
             "requested_sources": list(requested_sources),
             "date_range": date_range or "all_time",
             "max_sources": max_sources,
@@ -844,14 +1195,21 @@ def _normalize_output_relative_path(path_value: str) -> str:
     return value
 
 
+def _output_file_path(path_value: str) -> str:
+    value = str(path_value or "").strip()
+    if not value:
+        return ""
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return str(candidate)
+    normalized = _normalize_output_relative_path(value)
+    return resolve_output_path(normalized)
+
+
 def _resolve_existing_output_path(path_value: str) -> str:
     if not str(path_value or "").strip():
         return ""
-    candidate = Path(str(path_value))
-    if candidate.is_absolute() and candidate.exists():
-        return str(candidate)
-    normalized = _normalize_output_relative_path(str(path_value))
-    resolved = resolve_output_path(normalized)
+    resolved = _output_file_path(str(path_value))
     if Path(resolved).exists():
         return resolved
     resolved_fallback = resolve_output_path(str(path_value))
@@ -903,6 +1261,8 @@ def _artifact_dir_has_resume_data(artifact_dir: str) -> bool:
         "checkpoint_after_writing.json",
         "evidence_bank.json",
         "evidence_bank.md",
+        "source_manifest.json",
+        "source_manifest.md",
         "deep_research_analysis.md",
         "deep_research_subplan.md",
     )
@@ -917,7 +1277,7 @@ def _artifact_dir_has_resume_data(artifact_dir: str) -> bool:
 
 
 def _artifact_dir_objective_key(artifact_dir: str) -> str:
-    for rel_path in ("evidence_bank.json", "deep_research_manifest.json"):
+    for rel_path in ("evidence_bank.json", "deep_research_manifest.json", "source_manifest.json"):
         payload = _read_json_file(resolve_output_path(_artifact_file(artifact_dir, rel_path)), {})
         if isinstance(payload, dict):
             value = _normalize_objective_key(payload.get("objective", ""))
@@ -990,8 +1350,517 @@ def _load_cached_evidence_bank(
         "artifact_dir": artifact_dir,
         "evidence_markdown": evidence_md,
         "evidence_sources": evidence_sources,
-        "evidence_path": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'evidence_bank.md')}",
-        "evidence_json_path": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'evidence_bank.json')}",
+        "evidence_path": _output_file_path(_artifact_file(artifact_dir, "evidence_bank.md")),
+        "evidence_json_path": _output_file_path(_artifact_file(artifact_dir, "evidence_bank.json")),
+    }
+
+
+def _path_within_root(path_value: str, root_value: str) -> bool:
+    try:
+        normalized_path = os.path.normcase(os.path.abspath(str(path_value or "").strip()))
+        normalized_root = os.path.normcase(os.path.abspath(str(root_value or "").strip()))
+        if not normalized_path or not normalized_root:
+            return False
+        return os.path.commonpath([normalized_path, normalized_root]) == normalized_root
+    except Exception:
+        return False
+
+
+def _collect_local_source_roots(state: dict[str, Any]) -> list[str]:
+    base_directory = (
+        state.get("local_drive_working_directory")
+        or state.get("document_working_directory")
+        or state.get("working_directory")
+    )
+    raw_roots = (
+        state.get("local_drive_paths")
+        or state.get("knowledge_drive_paths")
+        or state.get("drive_paths")
+        or state.get("document_root_paths")
+        or []
+    )
+    return _resolve_local_drive_paths(raw_roots, base_directory)
+
+
+def _build_local_source_tree(local_manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    roots = [str(item).strip() for item in (local_manifest.get("roots", []) or []) if str(item).strip()]
+    folder_entries = [item for item in (local_manifest.get("folders", []) or []) if isinstance(item, dict)]
+    file_entries = [item for item in (local_manifest.get("files", []) or []) if isinstance(item, dict)]
+    folder_paths = {str(item.get("path", "")).strip() for item in folder_entries}
+    file_by_path = {
+        str(item.get("path", "")).strip(): item
+        for item in file_entries
+        if str(item.get("path", "")).strip()
+    }
+    tree: list[dict[str, Any]] = []
+
+    def _node_from_entry(entry: Mapping[str, Any], *, include_children: bool = True) -> dict[str, Any]:
+        node = {
+            "name": str(entry.get("name", "")).strip() or Path(str(entry.get("path", "")).strip()).name or str(entry.get("path", "")).strip(),
+            "path": str(entry.get("path", "")).strip(),
+            "type": "directory" if str(entry.get("entry_type", "")).strip() == "directory" else "file",
+            "relative_path": str(entry.get("relative_path", "")).strip(),
+            "depth": int(entry.get("depth", 0) or 0),
+        }
+        if node["type"] == "file":
+            node["selected_for_processing"] = bool(entry.get("selected_for_processing"))
+            node["exclusion_reason"] = str(entry.get("exclusion_reason", "")).strip()
+            node["selection_reason"] = str(entry.get("selection_reason", "")).strip()
+            node["extension"] = str(entry.get("extension", "")).strip()
+        elif include_children:
+            node["children"] = []
+        return node
+
+    def _sort_tree(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        sorted_nodes = sorted(
+            nodes,
+            key=lambda item: (0 if item.get("type") == "directory" else 1, str(item.get("name", "")).lower()),
+        )
+        for node in sorted_nodes:
+            children = node.get("children")
+            if isinstance(children, list):
+                node["children"] = _sort_tree(children)
+        return sorted_nodes
+
+    for root in roots:
+        if root in file_by_path and root not in folder_paths:
+            tree.append(_node_from_entry(file_by_path[root], include_children=False))
+            continue
+        root_node = {
+            "name": Path(root).name or root,
+            "path": root,
+            "type": "directory",
+            "relative_path": ".",
+            "depth": 0,
+            "children": [],
+        }
+        children_by_relative: dict[str, dict[str, Any]] = {"": root_node}
+        scoped_entries: list[dict[str, Any]] = []
+        for entry in folder_entries + file_entries:
+            path_value = str(entry.get("path", "")).strip()
+            if not path_value or path_value == root or not _path_within_root(path_value, root):
+                continue
+            scoped_entries.append(entry)
+        scoped_entries.sort(
+            key=lambda item: (
+                int(item.get("depth", 0) or 0),
+                0 if str(item.get("entry_type", "")).strip() == "directory" else 1,
+                str(item.get("relative_path", "")).lower(),
+                str(item.get("name", "")).lower(),
+            )
+        )
+        for entry in scoped_entries:
+            relative_path = str(entry.get("relative_path", "")).strip().replace("\\", "/")
+            if not relative_path or relative_path == ".":
+                continue
+            parent_relative = str(Path(relative_path).parent).replace("\\", "/")
+            if parent_relative == ".":
+                parent_relative = ""
+            parent = children_by_relative.get(parent_relative, root_node)
+            node = _node_from_entry(entry)
+            parent.setdefault("children", []).append(node)
+            if node.get("type") == "directory":
+                children_by_relative[relative_path] = node
+        tree.append(root_node)
+    return _sort_tree(tree)
+
+
+def _tree_status_label(node: Mapping[str, Any]) -> str:
+    if str(node.get("type", "")).strip() == "directory":
+        return ""
+    if bool(node.get("selected_for_processing", False)):
+        return " [selected]"
+    exclusion_reason = str(node.get("exclusion_reason", "")).strip()
+    return f" [skipped: {exclusion_reason or 'not_selected'}]"
+
+
+def _render_local_source_tree_markdown(nodes: list[dict[str, Any]], *, depth: int = 0) -> list[str]:
+    lines: list[str] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        indent = "  " * depth
+        label = str(node.get("name", "")).strip() or Path(str(node.get("path", "")).strip()).name or str(node.get("path", "")).strip()
+        if depth == 0:
+            label = str(node.get("path", "")).strip() or label
+        if str(node.get("type", "")).strip() == "directory":
+            lines.append(f"{indent}- {label}/")
+            children = node.get("children", [])
+            if isinstance(children, list):
+                lines.extend(_render_local_source_tree_markdown(children, depth=depth + 1))
+            continue
+        lines.append(f"{indent}- {label}{_tree_status_label(node)}")
+    return lines
+
+
+def _format_source_manifest_markdown(
+    *,
+    objective: str,
+    source_strategy: Mapping[str, Any],
+    local_manifest: Mapping[str, Any],
+    source_tree: list[dict[str, Any]],
+    document_summaries: list[dict[str, Any]],
+    rollup_summary: str,
+) -> str:
+    roots = [str(item).strip() for item in (local_manifest.get("roots", []) or []) if str(item).strip()]
+    lines = [
+        "# Source Manifest",
+        "",
+        "## Objective",
+        str(objective or "").strip() or "No objective provided.",
+        "",
+        "## Discovery Summary",
+        f"- Roots scanned: {len(roots)}",
+        f"- Folders discovered: {int(local_manifest.get('folder_count', 0) or 0)}",
+        f"- Files discovered: {int(local_manifest.get('file_count', 0) or 0)}",
+        f"- Files selected for processing: {int(local_manifest.get('selected_file_count', 0) or 0)}",
+        f"- Files excluded from processing: {int(local_manifest.get('excluded_file_count', 0) or 0)}",
+        "",
+        "## Source Strategy",
+        str(source_strategy.get("summary", "")).strip() or "No source strategy recorded.",
+        "",
+        "## File Tree",
+    ]
+    tree_lines = _render_local_source_tree_markdown(source_tree)
+    lines.extend(tree_lines or ["- No local files or folders were discovered."])
+    lines.extend(["", "## Selected File Summaries"])
+    if document_summaries:
+        for item in document_summaries:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"### {str(item.get('file_name', '')).strip() or Path(str(item.get('path', '')).strip()).name or 'Unnamed file'}")
+            if str(item.get("path", "")).strip():
+                lines.append(f"- Path: {item['path']}")
+            if str(item.get("type", "")).strip():
+                lines.append(f"- Type: {item['type']}")
+            if int(item.get("char_count", 0) or 0) > 0:
+                lines.append(f"- Characters: {int(item.get('char_count', 0) or 0)}")
+            if str(item.get("reader", "")).strip():
+                lines.append(f"- Reader: {item['reader']}")
+            if str(item.get("selection_reason", "")).strip():
+                lines.append(f"- Selection reason: {item['selection_reason']}")
+            if str(item.get("error", "")).strip():
+                lines.append(f"- Extraction error: {item['error']}")
+            summary_text = str(item.get("summary", "")).strip()
+            if summary_text:
+                lines.append("- Summary:")
+                lines.append(textwrap.indent(summary_text, "  "))
+            lines.append("")
+    else:
+        lines.extend(["- No selected files were summarized.", ""])
+    if str(rollup_summary or "").strip():
+        lines.extend(["## Local Source Rollup", str(rollup_summary).strip(), ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _summarize_local_documents(
+    *,
+    objective: str,
+    documents: list[dict[str, Any]],
+    local_manifest: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    manifest_files = local_manifest.get("files", []) if isinstance(local_manifest.get("files", []), list) else []
+    manifest_by_path = {
+        str(item.get("path", "")).strip(): item
+        for item in manifest_files
+        if isinstance(item, dict) and str(item.get("path", "")).strip()
+    }
+    summaries: list[dict[str, Any]] = []
+    for index, parsed in enumerate(documents or [], start=1):
+        if not isinstance(parsed, dict):
+            continue
+        file_path = str(parsed.get("path", "")).strip()
+        parsed_text = str(parsed.get("text", "") or "").strip()
+        metadata = parsed.get("metadata", {}) if isinstance(parsed.get("metadata"), dict) else {}
+        document_type = str(metadata.get("type", Path(file_path).suffix.lstrip(".").lower() or "unknown"))
+        manifest_entry = manifest_by_path.get(file_path, {})
+        if parsed_text:
+            try:
+                summary = llm_text(
+                    f"""
+You are a document-reading sub-agent for a deep research workflow.
+
+Task objective:
+{objective}
+
+Document path:
+{file_path}
+
+Document type:
+{document_type}
+
+Extracted content:
+{parsed_text[:16000]}
+
+Write a concise summary with:
+- what this document is about
+- critical facts, numbers, dates, and entities
+- decisions or action items
+- data quality concerns or missing pieces
+"""
+                ).strip()
+            except Exception:
+                summary = _trim_text(parsed_text, 1400)
+        else:
+            summary = f"No readable text extracted. Reason: {metadata.get('error', 'empty document after extraction')}"
+        summaries.append(
+            {
+                "index": index,
+                "path": file_path,
+                "file_name": Path(file_path).name or file_path or f"Local file {index}",
+                "type": document_type,
+                "summary": summary,
+                "char_count": len(parsed_text),
+                "error": str(metadata.get("error", "") or ""),
+                "error_kind": str(metadata.get("error_kind", "") or ""),
+                "recoverable": bool(metadata.get("recoverable", False)),
+                "reader": str(metadata.get("reader", "") or ""),
+                "selection_reason": str(manifest_entry.get("selection_reason", "") or ""),
+                "metadata": dict(metadata),
+            }
+        )
+    return summaries
+
+
+def _roll_up_local_document_summaries(
+    *,
+    objective: str,
+    document_summaries: list[dict[str, Any]],
+) -> str:
+    if not document_summaries:
+        return ""
+    rollup_input = {
+        "objective": objective,
+        "document_count": len(document_summaries),
+        "documents": [
+            {
+                "index": item.get("index"),
+                "path": item.get("path", ""),
+                "type": item.get("type", ""),
+                "summary": item.get("summary", ""),
+                "error": item.get("error", ""),
+            }
+            for item in document_summaries
+        ],
+    }
+    try:
+        return llm_text(
+            f"""
+You are a knowledge-synthesis agent. Build one actionable summary from these document summaries.
+
+Return:
+- 5-10 bullet key findings
+- contradictions or missing data
+- recommended next tasks for report generation
+- list of highest-priority source files to inspect deeper
+
+Input:
+{json.dumps(rollup_input, indent=2, ensure_ascii=False)[:28000]}
+"""
+        ).strip()
+    except Exception:
+        strong_files = [
+            str(item.get("file_name", "")).strip()
+            for item in document_summaries
+            if str(item.get("summary", "")).strip() and not str(item.get("error", "")).strip()
+        ]
+        return (
+            "Local-source rollup fallback:\n"
+            f"- Objective: {objective or 'not provided'}\n"
+            f"- Files summarized: {len(document_summaries)}\n"
+            f"- Strongest sources: {', '.join(strong_files[:5]) or 'none'}"
+        )
+
+
+def _load_cached_local_source_manifest(
+    *,
+    artifact_dir: str,
+    objective: str,
+) -> dict[str, Any]:
+    manifest_json_abs = resolve_output_path(_artifact_file(artifact_dir, "source_manifest.json"))
+    manifest_md_abs = resolve_output_path(_artifact_file(artifact_dir, "source_manifest.md"))
+    if not Path(manifest_json_abs).exists() and not Path(manifest_md_abs).exists():
+        return {}
+    payload = _read_json_file(manifest_json_abs, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    cached_objective = _normalize_objective_key(payload.get("objective", ""))
+    if cached_objective and cached_objective != _normalize_objective_key(objective):
+        return {}
+    local_manifest = payload.get("manifest", {})
+    document_summaries = payload.get("document_summaries", [])
+    if not isinstance(local_manifest, dict):
+        local_manifest = {}
+    if not isinstance(document_summaries, list):
+        document_summaries = []
+    if not local_manifest and not document_summaries and not Path(manifest_md_abs).exists():
+        return {}
+    return {
+        "artifact_dir": artifact_dir,
+        "manifest": local_manifest,
+        "source_tree": payload.get("tree", []) if isinstance(payload.get("tree", []), list) else [],
+        "document_summaries": [item for item in document_summaries if isinstance(item, dict)],
+        "rollup_summary": str(payload.get("rollup_summary", "") or ""),
+        "manifest_path": _output_file_path(_artifact_file(artifact_dir, "source_manifest.md")),
+        "manifest_json_path": _output_file_path(_artifact_file(artifact_dir, "source_manifest.json")),
+        "manifest_markdown": _read_text_file(manifest_md_abs, ""),
+    }
+
+
+def _ensure_local_source_manifest(
+    state: dict[str, Any],
+    *,
+    objective: str,
+    artifact_dir: str,
+    source_strategy: Mapping[str, Any],
+) -> dict[str, Any]:
+    local_manifest = state.get("local_drive_manifest", {}) if isinstance(state.get("local_drive_manifest"), dict) else {}
+    document_summaries = state.get("local_drive_document_summaries", []) if isinstance(state.get("local_drive_document_summaries"), list) else []
+    rollup_summary = str(state.get("local_drive_rollup_summary", "") or "")
+    roots = _collect_local_source_roots(state)
+
+    if not local_manifest and not document_summaries:
+        cached_manifest = _load_cached_local_source_manifest(artifact_dir=artifact_dir, objective=objective)
+        if cached_manifest:
+            local_manifest = cached_manifest.get("manifest", {}) if isinstance(cached_manifest.get("manifest", {}), dict) else {}
+            document_summaries = list(cached_manifest.get("document_summaries", []) or [])
+            rollup_summary = str(cached_manifest.get("rollup_summary", "") or "")
+            state["local_drive_manifest"] = local_manifest
+            state["local_drive_document_summaries"] = document_summaries
+            state["local_drive_files"] = list(local_manifest.get("selected_files", []) or [])
+            state["local_drive_summary_bank"] = {
+                str(item.get("path", "")).strip(): str(item.get("summary", "")).strip()
+                for item in document_summaries
+                if isinstance(item, dict) and str(item.get("path", "")).strip()
+            }
+            state["local_drive_rollup_summary"] = rollup_summary
+            state["long_document_source_manifest_path"] = str(cached_manifest.get("manifest_path", "") or "")
+            state["long_document_source_manifest_json_path"] = str(cached_manifest.get("manifest_json_path", "") or "")
+            return {
+                "from_cache": True,
+                "manifest": local_manifest,
+                "document_summaries": document_summaries,
+                "rollup_summary": rollup_summary,
+                "source_tree": list(cached_manifest.get("source_tree", []) or []),
+            }
+
+    if not local_manifest and not roots:
+        return {}
+
+    if not local_manifest:
+        local_drive_started_at = _trace_now()
+        _trace_research_event(
+            state,
+            title="Discovering local source tree",
+            detail="Scanning attached local files and folders before research synthesis begins.",
+            command="\n".join(roots),
+            status="running",
+            started_at=local_drive_started_at,
+            metadata={"phase": "local_source_manifest", "roots": roots},
+            subtask="Build local source manifest",
+        )
+        local_manifest = _scan_local_drive_tree(
+            roots,
+            recursive=bool(state.get("local_drive_recursive", True)),
+            include_hidden=bool(state.get("local_drive_include_hidden", False)),
+            max_files=max(1, min(int(state.get("local_drive_max_files", 200) or 200), 1000)),
+            allowed_extensions=_normalize_extension_set(state.get("local_drive_extensions")),
+            objective=objective,
+            source_strategy=source_strategy,
+        )
+        state["local_drive_manifest"] = local_manifest
+        state["local_drive_files"] = list(local_manifest.get("selected_files", []) or [])
+        _trace_research_event(
+            state,
+            title="Discovering local source tree",
+            detail=(
+                f"Discovered {int(local_manifest.get('file_count', 0) or 0)} file(s) and selected "
+                f"{int(local_manifest.get('selected_file_count', 0) or 0)} for processing."
+            ),
+            command="\n".join(roots),
+            status="completed",
+            started_at=local_drive_started_at,
+            completed_at=_trace_now(),
+            metadata={"phase": "local_source_manifest", "roots": roots, "manifest": local_manifest},
+            subtask="Build local source manifest",
+        )
+
+    selected_files = list(local_manifest.get("selected_files", []) or state.get("local_drive_files") or [])
+    if not document_summaries and selected_files:
+        manifest_files = local_manifest.get("files", []) if isinstance(local_manifest.get("files", []), list) else []
+        manifest_by_path = {
+            str(item.get("path", "")).strip(): item
+            for item in manifest_files
+            if isinstance(item, dict) and str(item.get("path", "")).strip()
+        }
+
+        def _document_progress_callback(path_value: str, status: str, payload: Mapping[str, Any] | None, position: int, total: int) -> None:
+            _log_local_file_review(
+                path_value,
+                status=status,
+                position=position,
+                total=total,
+                manifest_entry=manifest_by_path.get(str(path_value or "").strip(), {}),
+                payload=payload,
+            )
+
+        documents = parse_documents(
+            selected_files,
+            continue_on_error=True,
+            ocr_images=bool(state.get("local_drive_enable_image_ocr", True)),
+            ocr_instruction=state.get("local_drive_ocr_instruction"),
+            progress_callback=_document_progress_callback,
+        )
+        state["local_drive_documents"] = documents
+        document_summaries = _summarize_local_documents(
+            objective=objective,
+            documents=documents,
+            local_manifest=local_manifest,
+        )
+        state["local_drive_document_summaries"] = document_summaries
+        state["local_drive_summary_bank"] = {
+            str(item.get("path", "")).strip(): str(item.get("summary", "")).strip()
+            for item in document_summaries
+            if isinstance(item, dict) and str(item.get("path", "")).strip()
+        }
+
+    if not rollup_summary and document_summaries:
+        rollup_summary = _roll_up_local_document_summaries(
+            objective=objective,
+            document_summaries=document_summaries,
+        )
+        state["local_drive_rollup_summary"] = rollup_summary
+
+    source_tree = _build_local_source_tree(local_manifest)
+    payload = {
+        "objective": objective,
+        "roots": list(local_manifest.get("roots", []) or roots),
+        "manifest": local_manifest,
+        "tree": source_tree,
+        "document_summaries": document_summaries,
+        "rollup_summary": rollup_summary,
+        "source_strategy": dict(source_strategy) if isinstance(source_strategy, Mapping) else {},
+    }
+    manifest_md = _format_source_manifest_markdown(
+        objective=objective,
+        source_strategy=source_strategy,
+        local_manifest=local_manifest,
+        source_tree=source_tree,
+        document_summaries=document_summaries,
+        rollup_summary=rollup_summary,
+    )
+    manifest_filename = _artifact_file(artifact_dir, "source_manifest.md")
+    manifest_json_filename = _artifact_file(artifact_dir, "source_manifest.json")
+    write_text_file(manifest_filename, manifest_md)
+    write_text_file(manifest_json_filename, json.dumps(payload, indent=2, ensure_ascii=False))
+    state["long_document_source_manifest_path"] = _output_file_path(manifest_filename)
+    state["long_document_source_manifest_json_path"] = _output_file_path(manifest_json_filename)
+    return {
+        "from_cache": False,
+        "manifest": local_manifest,
+        "document_summaries": document_summaries,
+        "rollup_summary": rollup_summary,
+        "source_tree": source_tree,
     }
 
 
@@ -1326,16 +2195,38 @@ def _collect_user_url_evidence(objective: str, state: dict, *, max_items: int = 
     if fetch_parallelism <= 1:
         for index, url in enumerate(bounded_urls):
             _raise_if_cancelled(state, phase="provided_urls")
-            indexed_entries[index] = _collect_single_user_url_entry(objective, url)
+            _log_web_review(url, status="started", position=index + 1, total=len(bounded_urls), context="website")
+            entry = _collect_single_user_url_entry(objective, url)
+            indexed_entries[index] = entry
+            _log_web_review(
+                url,
+                status="completed" if not str(entry.get("error", "")).strip() else "failed",
+                position=index + 1,
+                total=len(bounded_urls),
+                payload=entry,
+                context="website",
+            )
     else:
         with ThreadPoolExecutor(max_workers=fetch_parallelism, thread_name_prefix="kendr-url") as executor:
             future_map = {
-                executor.submit(_collect_single_user_url_entry, objective, url): index
+                executor.submit(_collect_single_user_url_entry, objective, url): (index, url)
                 for index, url in enumerate(bounded_urls)
             }
+            for index, url in enumerate(bounded_urls):
+                _log_web_review(url, status="started", position=index + 1, total=len(bounded_urls), context="website")
             for future in as_completed(future_map):
                 _raise_if_cancelled(state, phase="provided_urls")
-                indexed_entries[future_map[future]] = future.result()
+                index, url = future_map[future]
+                entry = future.result()
+                indexed_entries[index] = entry
+                _log_web_review(
+                    url,
+                    status="completed" if not str(entry.get("error", "")).strip() else "failed",
+                    position=index + 1,
+                    total=len(bounded_urls),
+                    payload=entry,
+                    context="website",
+                )
     entries = [indexed_entries[index] for index in sorted(indexed_entries)]
     ok_urls = [str(item.get("url", "")).strip() for item in entries if not str(item.get("error", "")).strip()]
     failed_urls = [str(item.get("url", "")).strip() for item in entries if str(item.get("error", "")).strip()]
@@ -1414,8 +2305,16 @@ Write a structured evidence memo that includes:
     ).strip()
 
 
-def _collect_google_search_evidence(query: str, *, num: int = 10) -> dict:
-    payload = fetch_search_results(query, num=num, fetch_pages=min(max(num, 1), 3))
+def _collect_google_search_evidence(query: str, *, num: int = 10, progress_callback=None, search_backend: str = "auto") -> dict:
+    normalized_backend = normalize_research_search_backend(search_backend)
+    payload = fetch_search_results(
+        query,
+        num=num,
+        fetch_pages=min(max(num, 1), 3),
+        progress_callback=progress_callback,
+        provider_hint="" if normalized_backend == "auto" else normalized_backend,
+        focused_brief=query,
+    )
     results = list(payload.get("results", []) or [])
     viewed_pages = list(payload.get("viewed_pages", []) or [])
     viewed_map = {
@@ -1431,14 +2330,18 @@ def _collect_google_search_evidence(query: str, *, num: int = 10) -> dict:
             item["content_type"] = str(evidence.get("content_type", "")).strip()
             if evidence.get("error"):
                 item["view_error"] = str(evidence.get("error", "")).strip()
-    return {
+    response_payload = {
         "results": results,
         "viewed_pages": viewed_pages,
         "provider": str(payload.get("provider", "")).strip(),
         "providers_tried": list(payload.get("providers_tried", []) or []),
         "raw": payload.get("raw", {}),
+        "instant_answer": payload.get("instant_answer", {}),
+        "query_plan": payload.get("query_plan", []),
         "error": str(payload.get("error", "")).strip(),
     }
+    _log_search_collection(query, response_payload)
+    return response_payload
 
 
 # ---------------------------------------------------------------------------
@@ -1448,6 +2351,336 @@ def _collect_google_search_evidence(query: str, *, num: int = 10) -> dict:
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp"}
 _IMAGE_MAX_BYTES = int(os.getenv("KENDR_IMAGE_MAX_BYTES", str(4 * 1024 * 1024)))  # 4 MB default
 _IMAGE_DOWNLOAD_TIMEOUT = int(os.getenv("KENDR_IMAGE_DOWNLOAD_TIMEOUT", "15"))
+_IMAGE_SOURCE_PAGE_LIMIT = max(1, min(int(os.getenv("KENDR_IMAGE_SOURCE_PAGE_LIMIT", "5") or 5), 10))
+_IMAGE_CANDIDATES_PER_PAGE = max(1, min(int(os.getenv("KENDR_IMAGE_CANDIDATES_PER_PAGE", "12") or 12), 40))
+_IMAGE_MIN_DIMENSION = max(64, int(os.getenv("KENDR_IMAGE_MIN_DIMENSION", "120") or 120))
+_IMAGE_RELEVANCE_THRESHOLD = float(os.getenv("KENDR_IMAGE_RELEVANCE_THRESHOLD", "5.0") or 5.0)
+_IMAGE_CONTEXT_STOPWORDS = {
+    "about", "after", "also", "among", "and", "are", "because", "been", "being", "between", "both",
+    "but", "chart", "could", "data", "does", "figure", "from", "have", "into", "just", "more", "most",
+    "over", "page", "report", "section", "should", "than", "that", "their", "them", "there", "these",
+    "they", "this", "those", "through", "under", "using", "very", "what", "when", "where", "which",
+    "with", "your",
+}
+_IMAGE_DECORATIVE_MARKERS = {
+    "logo", "logos", "icon", "icons", "avatar", "avatars", "banner", "banners", "hero", "heroes", "thumbnail",
+    "thumbnails", "thumb", "social", "footer", "header", "sprite", "badge", "placeholder", "promo", "advert",
+    "advertisement", "marketing", "tracking", "pixel", "brand", "navbar", "button",
+}
+_IMAGE_PRIORITY_MARKERS = {
+    "architecture", "diagram", "workflow", "process", "flow", "flowchart", "chart", "graph", "dashboard",
+    "screenshot", "figure", "infographic", "timeline", "matrix", "heatmap", "pipeline", "network", "topology",
+    "system", "interface", "console", "reference", "overview",
+}
+_IMAGE_CLASS_REJECTION_MARKERS = {"logo", "icon", "avatar", "badge", "hero", "banner", "social", "promo"}
+_IMAGE_REQUIRED_LOCAL_SIGNAL_FIELDS = ("alt_text", "figcaption", "nearby_text", "heading")
+
+
+def _normalize_image_term(token: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", "", str(token or "").lower())
+    if len(value) > 4 and value.endswith("ies"):
+        value = value[:-3] + "y"
+    elif len(value) > 4 and value.endswith("s") and not value.endswith("ss"):
+        value = value[:-1]
+    return value
+
+
+def _image_terms(*texts: Any, limit: int = 120) -> set[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw in texts:
+        for match in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", str(raw or "").lower()):
+            normalized = _normalize_image_term(match)
+            if (
+                not normalized
+                or normalized in seen
+                or normalized in _IMAGE_CONTEXT_STOPWORDS
+                or normalized.isdigit()
+            ):
+                continue
+            seen.add(normalized)
+            terms.append(normalized)
+            if len(terms) >= limit:
+                return set(terms)
+    return set(terms)
+
+
+def _extract_image_src(tag: Any) -> str:
+    for key in ("src", "data-src", "data-original", "data-lazy-src", "data-image", "data-url"):
+        value = str(tag.get(key, "") or "").strip()
+        if value:
+            return value
+    srcset = str(tag.get("srcset", "") or "").strip()
+    if srcset:
+        first_candidate = srcset.split(",")[0].strip().split(" ")[0].strip()
+        if first_candidate:
+            return first_candidate
+    return ""
+
+
+def _image_attr_int(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    match = re.search(r"\d+", text)
+    return int(match.group()) if match else 0
+
+
+def _truncate_context_text(value: Any, limit: int = 280) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    return _trim_text(text, limit) if text else ""
+
+
+def _source_image_urls(section_sources: list[dict], *, max_pages: int = _IMAGE_SOURCE_PAGE_LIMIT) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for item in section_sources or []:
+        if not isinstance(item, dict):
+            continue
+        candidate = str(item.get("source_page", "") or item.get("url", "") or "").strip()
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or candidate in seen:
+            continue
+        seen.add(candidate)
+        urls.append(candidate)
+        if len(urls) >= max_pages:
+            break
+    return urls
+
+
+def _extract_source_page_image_candidates(
+    page_url: str,
+    payload: Mapping[str, Any],
+    *,
+    limit: int = _IMAGE_CANDIDATES_PER_PAGE,
+) -> list[dict]:
+    content_type = str(payload.get("content_type", "") or "").lower()
+    raw_html = str(payload.get("raw_text", "") or "")
+    if "html" not in content_type or not raw_html.strip():
+        return []
+
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        BeautifulSoup = None
+
+    candidates: list[dict] = []
+    if BeautifulSoup is not None:
+        soup = BeautifulSoup(raw_html, "html.parser")
+        page_title = _truncate_context_text(soup.title.get_text(" ", strip=True) if soup.title else "", 180)
+        for img in soup.find_all("img"):
+            src = _extract_image_src(img)
+            if not src:
+                continue
+            resolved_url = urljoin(page_url, src)
+            parsed = urlparse(resolved_url)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            figure = img.find_parent("figure")
+            figcaption = ""
+            if figure is not None:
+                fig_node = figure.find("figcaption")
+                if fig_node is not None:
+                    figcaption = _truncate_context_text(fig_node.get_text(" ", strip=True), 220)
+            parent = figure or img.parent
+            nearby_text = ""
+            if parent is not None and hasattr(parent, "get_text"):
+                nearby_text = _truncate_context_text(parent.get_text(" ", strip=True), 260)
+            heading = ""
+            prev_heading = img.find_previous(["h1", "h2", "h3", "h4"])
+            if prev_heading is not None:
+                heading = _truncate_context_text(prev_heading.get_text(" ", strip=True), 160)
+            img_classes = img.get("class", [])
+            if isinstance(img_classes, str):
+                img_classes = [img_classes]
+            candidates.append(
+                {
+                    "url": resolved_url,
+                    "source_page": page_url,
+                    "source": urlparse(page_url).netloc,
+                    "page_title": page_title,
+                    "alt_text": _truncate_context_text(img.get("alt", ""), 180),
+                    "title": _truncate_context_text(img.get("title", ""), 180),
+                    "figcaption": figcaption,
+                    "nearby_text": nearby_text,
+                    "heading": heading,
+                    "img_class": " ".join(str(item).strip() for item in img_classes if str(item).strip()),
+                    "img_id": str(img.get("id", "") or "").strip(),
+                    "width": _image_attr_int(img.get("width")),
+                    "height": _image_attr_int(img.get("height")),
+                }
+            )
+            if len(candidates) >= limit:
+                break
+        return candidates
+
+    page_title_match = re.search(r"<title[^>]*>(.*?)</title>", raw_html, flags=re.IGNORECASE | re.DOTALL)
+    page_title = _truncate_context_text(re.sub(r"<[^>]+>", " ", page_title_match.group(1) if page_title_match else ""), 180)
+    for match in re.finditer(r"<img\b([^>]+)>", raw_html, flags=re.IGNORECASE | re.DOTALL):
+        attrs = match.group(1)
+        src_match = re.search(r'(?:src|data-src|data-original|data-lazy-src)=["\']([^"\']+)["\']', attrs, flags=re.IGNORECASE)
+        if not src_match:
+            continue
+        resolved_url = urljoin(page_url, src_match.group(1).strip())
+        parsed = urlparse(resolved_url)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        alt_match = re.search(r'alt=["\']([^"\']*)["\']', attrs, flags=re.IGNORECASE)
+        title_match = re.search(r'title=["\']([^"\']*)["\']', attrs, flags=re.IGNORECASE)
+        width_match = re.search(r'width=["\']?(\d+)', attrs, flags=re.IGNORECASE)
+        height_match = re.search(r'height=["\']?(\d+)', attrs, flags=re.IGNORECASE)
+        class_match = re.search(r'class=["\']([^"\']*)["\']', attrs, flags=re.IGNORECASE)
+        id_match = re.search(r'id=["\']([^"\']*)["\']', attrs, flags=re.IGNORECASE)
+        candidates.append(
+            {
+                "url": resolved_url,
+                "source_page": page_url,
+                "source": urlparse(page_url).netloc,
+                "page_title": page_title,
+                "alt_text": _truncate_context_text(alt_match.group(1) if alt_match else "", 180),
+                "title": _truncate_context_text(title_match.group(1) if title_match else "", 180),
+                "figcaption": "",
+                "nearby_text": "",
+                "heading": "",
+                "img_class": _truncate_context_text(class_match.group(1) if class_match else "", 120),
+                "img_id": _truncate_context_text(id_match.group(1) if id_match else "", 120),
+                "width": int(width_match.group(1)) if width_match else 0,
+                "height": int(height_match.group(1)) if height_match else 0,
+            }
+        )
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _score_source_image_candidate(
+    candidate: Mapping[str, Any],
+    *,
+    section_title: str,
+    section_objective: str,
+    section_text: str,
+) -> tuple[float, list[str], str]:
+    topic_terms = _image_terms(section_title, section_objective, _trim_text(section_text, 1800))
+    signal_sources = {
+        "alt": str(candidate.get("alt_text", "") or ""),
+        "caption": str(candidate.get("figcaption", "") or ""),
+        "heading": str(candidate.get("heading", "") or ""),
+        "nearby": str(candidate.get("nearby_text", "") or ""),
+        "page_title": str(candidate.get("page_title", "") or ""),
+        "title": str(candidate.get("title", "") or ""),
+        "url": str(urlparse(str(candidate.get("url", "") or "")).path or ""),
+    }
+    weights = {"alt": 5.0, "caption": 6.0, "heading": 4.0, "nearby": 2.0, "page_title": 2.0, "title": 3.0, "url": 1.0}
+    score = 0.0
+    reasons: list[str] = []
+    matched_terms: set[str] = set()
+    local_match_terms: set[str] = set()
+    for label, text in signal_sources.items():
+        terms = _image_terms(text, limit=40)
+        overlap = sorted(topic_terms & terms)
+        if not overlap:
+            continue
+        matched_terms.update(overlap)
+        if label in {"alt", "caption", "heading", "nearby"}:
+            local_match_terms.update(overlap)
+        score += weights.get(label, 1.0) * min(len(overlap), 3)
+        reasons.append(f"{label}:{', '.join(overlap[:2])}")
+
+    combined_terms = _image_terms(
+        candidate.get("alt_text", ""),
+        candidate.get("title", ""),
+        candidate.get("figcaption", ""),
+        candidate.get("heading", ""),
+        candidate.get("nearby_text", ""),
+        candidate.get("img_class", ""),
+        candidate.get("img_id", ""),
+        urlparse(str(candidate.get("url", "") or "")).path,
+    )
+    priority_hits = sorted(_IMAGE_PRIORITY_MARKERS & combined_terms)
+    if priority_hits:
+        score += 3.0 + min(len(priority_hits), 2)
+        reasons.append(f"visual:{', '.join(priority_hits[:2])}")
+
+    decorative_hits = sorted((_IMAGE_DECORATIVE_MARKERS | _IMAGE_CLASS_REJECTION_MARKERS) & combined_terms)
+    if decorative_hits:
+        score -= 8.0 + min(len(decorative_hits), 2)
+        reasons.append(f"decorative:{', '.join(decorative_hits[:2])}")
+
+    width = int(candidate.get("width", 0) or 0)
+    height = int(candidate.get("height", 0) or 0)
+    min_dimension = min(value for value in (width, height) if value > 0) if (width > 0 or height > 0) else 0
+    if min_dimension and min_dimension < _IMAGE_MIN_DIMENSION:
+        score -= 6.0
+        reasons.append(f"size:{width}x{height}")
+    elif min_dimension >= 200:
+        score += 1.0
+
+    alt_text = str(candidate.get("alt_text", "") or "").strip().lower()
+    if alt_text in {"image", "photo", "graphic", "illustration", "banner", "hero", "logo"}:
+        score -= 4.0
+        reasons.append("generic_alt")
+
+    rejection = ""
+    if decorative_hits:
+        rejection = "decorative"
+    elif min_dimension and min_dimension < 96:
+        rejection = "too_small"
+    elif not local_match_terms:
+        rejection = "weak_context"
+    elif score < _IMAGE_RELEVANCE_THRESHOLD:
+        rejection = "low_relevance"
+    return score, reasons, rejection
+
+
+def _parse_image_vision_verdict(text: str) -> tuple[bool | None, str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return None, ""
+    try:
+        payload = json.loads(strip_code_fences(raw))
+        if isinstance(payload, dict):
+            relevant_value = payload.get("relevant")
+            decorative_value = payload.get("decorative")
+            if decorative_value is True:
+                return False, str(payload.get("reason", "") or "vision_marked_decorative").strip()
+            if isinstance(relevant_value, bool):
+                return relevant_value, str(payload.get("reason", "") or "").strip()
+    except Exception:
+        pass
+    lowered = raw.lower()
+    if '"relevant": false' in lowered or "relevant: false" in lowered or '"decorative": true' in lowered:
+        return False, raw
+    if '"relevant": true' in lowered or "relevant: true" in lowered:
+        return True, raw
+    return None, raw
+
+
+def _verify_downloaded_image_with_vision(
+    abs_path: str,
+    *,
+    section_title: str,
+    section_objective: str,
+    section_text: str,
+) -> tuple[bool, str]:
+    try:
+        verdict = openai_analyze_image(
+            abs_path,
+            instruction=(
+                "You are validating whether an image belongs in a professional deep-research report section.\n"
+                f"Section title: {section_title}\n"
+                f"Section objective: {section_objective}\n"
+                f"Section preview: {_trim_text(section_text, 900)}\n\n"
+                "Reject decorative assets, logos, hero banners, generic stock photos, portraits, and unrelated branding.\n"
+                "Accept diagrams, dashboards, screenshots, charts, process visuals, system architecture, and figures that clearly support the section.\n"
+                'Return ONLY JSON like {"relevant": true|false, "decorative": true|false, "reason": "short reason"}.'
+            ),
+        )
+        relevant, reason = _parse_image_vision_verdict(str(verdict.get("analysis", "") or ""))
+        if relevant is None:
+            return True, "vision_inconclusive"
+        return bool(relevant), reason or ("vision_verified" if relevant else "vision_rejected")
+    except Exception as exc:
+        return True, f"vision_unavailable:{exc}"
 
 
 def _collect_image_search_results(query: str, *, num: int = 10) -> list[dict]:
@@ -1587,25 +2820,111 @@ def _collect_section_images(
     section_title: str,
     section_objective: str,
     section_text: str,
+    section_sources: list[dict],
     artifact_dir: str,
     section_index: int,
     max_images: int = 3,
     search_num: int = 12,
+    fallback_to_search: bool = False,
+    verify_with_vision: bool = True,
 ) -> list[dict]:
-    """Search, filter, and download images for a report section.
+    """Collect, rank, and download images for a report section.
 
     Returns a list of dicts with keys:
         relative_path, abs_path, title, source, source_page, alt_text, section_index, section_title
     """
-    query = f"{section_title} diagram chart architecture infographic"
-    log_task_update(DEEP_RESEARCH_LABEL, f"Searching for images for section {section_index}: '{section_title[:50]}'")
-    candidates = _collect_image_search_results(query, num=search_num)
-    if not candidates:
-        return []
+    source_urls = _source_image_urls(section_sources, max_pages=_IMAGE_SOURCE_PAGE_LIMIT)
+    ranked_candidates: list[dict] = []
+    rejection_counts = {"decorative": 0, "too_small": 0, "weak_context": 0, "low_relevance": 0, "vision_rejected": 0}
+    if source_urls:
+        for page_index, page_url in enumerate(source_urls, start=1):
+            page_label = _web_source_log_label(page_url)
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Reviewing source images [{page_index}/{len(source_urls)}]: {page_label}",
+            )
+            try:
+                payload = fetch_url_content(page_url, timeout=20)
+            except Exception as exc:
+                log_task_update(
+                    DEEP_RESEARCH_LABEL,
+                    f"Source image review failed [{page_index}/{len(source_urls)}]: {page_label} ({exc})",
+                )
+                continue
+            page_candidates = _extract_source_page_image_candidates(page_url, payload, limit=_IMAGE_CANDIDATES_PER_PAGE)
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Found {len(page_candidates)} source image candidate(s) on {page_label}",
+            )
+            accepted_on_page = 0
+            for candidate in page_candidates:
+                score, reasons, rejection = _score_source_image_candidate(
+                    candidate,
+                    section_title=section_title,
+                    section_objective=section_objective,
+                    section_text=section_text,
+                )
+                if rejection:
+                    rejection_counts[rejection] = rejection_counts.get(rejection, 0) + 1
+                    continue
+                accepted_on_page += 1
+                ranked_candidates.append(
+                    {
+                        **candidate,
+                        "candidate_kind": "source_page",
+                        "relevance_score": score,
+                        "selection_reason": "; ".join(reasons[:3]) if reasons else "context match",
+                    }
+                )
+            if accepted_on_page:
+                log_task_update(
+                    DEEP_RESEARCH_LABEL,
+                    f"Accepted {accepted_on_page} grounded image candidate(s) from {page_label}",
+                )
+        if any(rejection_counts.values()):
+            rejection_summary = ", ".join(
+                f"{label}={count}" for label, count in rejection_counts.items() if count
+            )
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Rejected grounded image candidates for section {section_index}: {rejection_summary}",
+            )
+    else:
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"No eligible web source pages for grounded image collection in section {section_index}: '{section_title[:50]}'",
+        )
 
-    selected = _filter_relevant_images(candidates, section_title=section_title, section_text=section_text, max_images=max_images)
+    ranked_candidates.sort(key=lambda item: (-float(item.get("relevance_score", 0.0) or 0.0), str(item.get("url", ""))))
+    selected = ranked_candidates[:max_images]
+
+    if not selected and fallback_to_search:
+        query = f"{section_title} diagram chart architecture infographic"
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"No grounded source images qualified for section {section_index}; falling back to external image search.",
+        )
+        candidates = _collect_image_search_results(query, num=search_num)
+        selected = _filter_relevant_images(
+            candidates,
+            section_title=section_title,
+            section_text=section_text,
+            max_images=max_images,
+        )
+        selected = [
+            {
+                **item,
+                "candidate_kind": "external_search",
+                "selection_reason": "external fallback search",
+            }
+            for item in selected
+        ]
+
     if not selected:
-        log_task_update(DEEP_RESEARCH_LABEL, f"No relevant images selected for section {section_index}: '{section_title[:50]}'")
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            f"No grounded images selected for section {section_index}: '{section_title[:50]}'",
+        )
         return []
 
     images_dir = _artifact_file(artifact_dir, f"section_{section_index:02d}/images")
@@ -1627,21 +2946,56 @@ def _collect_section_images(
         relative_path = f"section_{section_index:02d}/images/{filename}"
 
         if _download_image(img_url, abs_path):
-            alt_text = img.get("title", "") or f"{section_title} — visual {img_index}"
+            alt_text = (
+                str(img.get("alt_text", "") or "").strip()
+                or str(img.get("title", "") or "").strip()
+                or str(img.get("figcaption", "") or "").strip()
+                or f"{section_title} — visual {img_index}"
+            )
+            if verify_with_vision:
+                is_relevant, vision_reason = _verify_downloaded_image_with_vision(
+                    abs_path,
+                    section_title=section_title,
+                    section_objective=section_objective,
+                    section_text=section_text,
+                )
+                if not is_relevant:
+                    rejection_counts["vision_rejected"] = rejection_counts.get("vision_rejected", 0) + 1
+                    try:
+                        Path(abs_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    log_task_update(
+                        DEEP_RESEARCH_LABEL,
+                        f"Rejected downloaded image for section {section_index} via vision check: "
+                        f"{_web_source_log_label(str(img.get('source_page', '') or img_url))} ({vision_reason or 'vision_rejected'})",
+                    )
+                    continue
             saved.append({
                 "relative_path": relative_path,
                 "abs_path": abs_path,
                 "filename": filename,
-                "title": img.get("title", ""),
-                "source": img.get("source", ""),
-                "source_page": img.get("source_page", ""),
+                "title": str(img.get("title", "") or "").strip() or alt_text,
+                "source": str(img.get("source", "") or "").strip() or urlparse(str(img.get("source_page", "") or img_url)).netloc,
+                "source_page": str(img.get("source_page", "") or "").strip(),
                 "url": img_url,
                 "alt_text": alt_text,
                 "section_index": section_index,
                 "section_title": section_title,
-                "width": img.get("width", 0),
-                "height": img.get("height", 0),
+                "width": int(img.get("width", 0) or 0),
+                "height": int(img.get("height", 0) or 0),
+                "source_page_title": str(img.get("page_title", "") or "").strip(),
+                "figcaption": str(img.get("figcaption", "") or "").strip(),
+                "selection_reason": str(img.get("selection_reason", "") or "").strip(),
+                "relevance_score": float(img.get("relevance_score", 0.0) or 0.0),
+                "candidate_kind": str(img.get("candidate_kind", "") or "source_page").strip(),
             })
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Selected image [{len(saved)}/{len(selected)}] for section {section_index}: "
+                f"{_web_source_log_label(str(img.get('source_page', '') or img_url))} "
+                f"({str(img.get('selection_reason', '') or 'context match')})",
+            )
 
     log_task_update(
         DEEP_RESEARCH_LABEL,
@@ -1652,7 +3006,7 @@ def _collect_section_images(
 
 def _image_appendix_markdown(all_image_entries: list[dict]) -> str:
     """Build Appendix D — Image Gallery markdown from all collected section images."""
-    lines = ["## Appendix D - Image Gallery", ""]
+    lines = [_heading_with_anchor(2, "Appendix D - Image Gallery", "appendix-d-image-gallery"), ""]
     if not all_image_entries:
         lines.append("_No images were collected during research._")
         return "\n".join(lines)
@@ -1968,20 +3322,20 @@ Write an addendum of about {words_target} words that:
         except Exception:
             manifest = {}
         if isinstance(manifest, dict):
-            manifest["addendum_file"] = f"{OUTPUT_DIR}/{addendum_filename}"
+            manifest["addendum_file"] = _output_file_path(addendum_filename)
             manifest["addendum_attempts"] = attempts
             _write_absolute_text_file(manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False))
 
     state["long_document_addendum_requested"] = False
     state["long_document_addendum_completed"] = True
-    state["long_document_addendum_path"] = f"{OUTPUT_DIR}/{addendum_filename}"
+    state["long_document_addendum_path"] = _output_file_path(addendum_filename)
     state["_skip_review_once"] = True
     if bool(state.get("long_document_addendum_force_no_review", True)):
         state["skip_reviews"] = True
     summary = (
         "Addendum generated and appended to compiled report.\n"
         f"- Compiled markdown: {compiled_path}\n"
-        f"- Addendum file: {OUTPUT_DIR}/{addendum_filename}\n"
+        f"- Addendum file: {_output_file_path(addendum_filename)}\n"
     )
     state["draft_response"] = summary
     log_task_update(DEEP_RESEARCH_LABEL, "Addendum appended to compiled report.", summary)
@@ -2102,6 +3456,29 @@ def _remap_section_citations(section_text: str, section_sources: list[dict], con
 
     # Match any source citation tag of the form [S1], [S12], [P1], etc.
     return re.sub(r"\[([A-Z]\d+)\]", _swap, section_text)
+
+
+def _strip_leading_section_heading(section_text: str, *, section_title: str, section_index: int) -> str:
+    lines = str(section_text or "").splitlines()
+    first_content_index = 0
+    while first_content_index < len(lines) and not lines[first_content_index].strip():
+        first_content_index += 1
+    if first_content_index >= len(lines):
+        return ""
+
+    first_line = lines[first_content_index].strip()
+    normalized_first = _normalized_heading_candidate(first_line)
+    heading_variants = {
+        _normalized_heading_candidate(section_title),
+        _normalized_heading_candidate(f"{section_index}. {section_title}"),
+        _normalized_heading_candidate(f"Section {section_index}: {section_title}"),
+    }
+    if normalized_first and normalized_first in heading_variants:
+        next_index = first_content_index + 1
+        while next_index < len(lines) and not lines[next_index].strip():
+            next_index += 1
+        return "\n".join(lines[next_index:]).strip()
+    return str(section_text or "").strip()
 
 
 def _consolidate_references(section_outputs: list[dict]) -> list[dict]:
@@ -2615,7 +3992,8 @@ def _deep_research_analysis_markdown(
     provided_url_count: int,
 ) -> str:
     budget = analysis.get("execution_budget", analysis.get("budget", {})) if isinstance(analysis, dict) else {}
-    requested_target_pages = int(analysis.get("requested_target_pages", 0) or 0) if isinstance(analysis, dict) else 0
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
+    depth_description = str(analysis.get("depth_description", "") or "").strip()
 
     def _budget_value(key: str, *, suffix: str = "") -> str:
         raw = 0
@@ -2629,8 +4007,7 @@ def _deep_research_analysis_markdown(
         "# Deep Research Analysis",
         "",
         f"- Tier: {analysis.get('tier', '?')}",
-        f"- Page target: {requested_target_pages or analysis.get('estimated_pages', '?')}",
-        f"- Estimated pages: {analysis.get('estimated_pages', '?')}",
+        f"- Research depth: {depth_label}",
         f"- Estimated sources: {analysis.get('estimated_sources', '?')}",
         f"- Estimated duration: {analysis.get('estimated_duration_minutes', '?')} minutes",
         f"- Citation style: {citation_style.upper()}",
@@ -2640,9 +4017,10 @@ def _deep_research_analysis_markdown(
         f"- Local file sources detected: {local_source_count}",
         f"- User-provided URLs: {provided_url_count}",
         f"- Date range: {analysis.get('date_range', 'all_time')}",
-        "",
-        "## Detected Subtopics",
     ]
+    if depth_description:
+        lines.append(f"- Scope profile: {depth_description}")
+    lines.extend(["", "## Detected Subtopics"])
     for idx, topic in enumerate(analysis.get("subtopics", []) if isinstance(analysis.get("subtopics", []), list) else [], start=1):
         lines.append(f"- {idx}. {topic}")
     if budget:
@@ -2680,7 +4058,8 @@ def _deep_research_analysis_summary_prompt(
     analysis_storage_path: str,
     version: int,
 ) -> str:
-    requested_target_pages = int(analysis.get("requested_target_pages", 0) or 0) if isinstance(analysis, dict) else 0
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
+    depth_description = str(analysis.get("depth_description", "") or "").strip()
     lines = [
         f"The deep research confirmation v{version} is ready for approval.",
         "Review this compact summary before the expensive research phases begin.",
@@ -2688,8 +4067,7 @@ def _deep_research_analysis_summary_prompt(
         "Summary",
         f"- Title: {title}",
         f"- Tier: {analysis.get('tier', '?')}",
-        f"- Page target: {requested_target_pages or analysis.get('estimated_pages', '?')}",
-        f"- Estimated pages: {analysis.get('estimated_pages', '?')}",
+        f"- Research depth: {depth_label}",
         f"- Estimated sources: {analysis.get('estimated_sources', '?')}",
         f"- Estimated duration: {analysis.get('estimated_duration_minutes', '?')} minutes",
         f"- Citation style: {citation_style.upper()}",
@@ -2699,6 +4077,8 @@ def _deep_research_analysis_summary_prompt(
         f"- Local file sources detected: {local_source_count}",
         f"- User-provided URLs: {provided_url_count}",
     ]
+    if depth_description:
+        lines.append(f"- Scope profile: {_compact_text(depth_description, width=140)}")
     subtopics = analysis.get("subtopics", []) if isinstance(analysis.get("subtopics", []), list) else []
     if subtopics:
         lines.extend(["", "Key focus areas"])
@@ -2732,6 +4112,7 @@ def _deep_research_subplan_summary_prompt(
     version: int,
 ) -> str:
     sections = outline.get("sections", []) if isinstance(outline, dict) else []
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
     lines = [
         f"The deep research section plan v{version} is ready for approval.",
         "Review this compact section outline before the long-running research and drafting phases begin.",
@@ -2739,9 +4120,8 @@ def _deep_research_subplan_summary_prompt(
         "Plan summary",
         f"- Title: {title}",
         f"- Tier: {analysis.get('tier', '?')}",
-        f"- Total pages: {target_pages}",
+        f"- Research depth: {depth_label}",
         f"- Sections: {len(sections)}",
-        f"- Approx pages per section: {section_pages}",
         f"- Web search: {'enabled' if web_search_enabled else 'disabled'}",
         f"- Output formats: {', '.join(fmt.upper() for fmt in formats)}",
     ]
@@ -2767,6 +4147,46 @@ def _deep_research_subplan_summary_prompt(
     return "\n".join(lines).strip()
 
 
+def _deep_research_subplan_auto_approved_message(
+    *,
+    title: str,
+    outline: dict,
+    analysis: dict,
+    target_pages: int,
+    section_pages: int,
+    web_search_enabled: bool,
+    outline_storage_path: str,
+    subplan_storage_path: str,
+    version: int,
+) -> str:
+    sections = outline.get("sections", []) if isinstance(outline, dict) else []
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
+    lines = [
+        f"Deep research section plan v{version} auto-approved.",
+        "",
+        "Execution handoff",
+        f"- Title: {title}",
+        f"- Research depth: {depth_label}",
+        f"- Sections: {len(sections)}",
+        f"- Web search: {'enabled' if web_search_enabled else 'disabled'}",
+        "- Next phase: evidence collection and report drafting",
+    ]
+    if outline_storage_path or subplan_storage_path:
+        lines.extend(["", "Saved artifacts"])
+        if outline_storage_path:
+            lines.append(f"- Outline: {outline_storage_path}")
+        if subplan_storage_path:
+            lines.append(f"- Step-by-step plan: {subplan_storage_path}")
+    return "\n".join(lines).strip()
+
+
+def _deep_research_handoff_only_enabled(state: Mapping[str, Any]) -> bool:
+    value = state.get("_phase0_handoff_only", os.getenv("KENDR_PHASE0_HANDOFF_ONLY", ""))
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _build_deep_research_confirmation_prompt(analysis_md: str, *, version: int) -> str:
     return build_plan_approval_prompt(
         analysis_md,
@@ -2789,7 +4209,8 @@ def _build_deep_research_analysis_request(
     version: int,
 ) -> dict[str, Any]:
     budget = analysis.get("execution_budget", analysis.get("budget", {})) if isinstance(analysis, dict) else {}
-    requested_target_pages = int(analysis.get("requested_target_pages", 0) or 0) if isinstance(analysis, dict) else 0
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
+    depth_description = str(analysis.get("depth_description", "") or "").strip()
 
     def _budget_value(key: str, *, suffix: str = "") -> str:
         raw = 0
@@ -2801,8 +4222,7 @@ def _build_deep_research_analysis_request(
 
     overview_items = [
         f"Tier {int(analysis.get('tier', 0) or 0)} deep research run.",
-        f"Page target: {requested_target_pages or int(analysis.get('estimated_pages', 0) or 0)}.",
-        f"Estimated pages: {int(analysis.get('estimated_pages', 0) or 0)}.",
+        f"Research depth: {depth_label}.",
         f"Estimated sources: {int(analysis.get('estimated_sources', 0) or 0)}.",
         f"Estimated duration: {int(analysis.get('estimated_duration_minutes', 0) or 0)} minutes.",
         f"Citation style: {citation_style.upper()}.",
@@ -2813,6 +4233,8 @@ def _build_deep_research_analysis_request(
         f"User-provided URLs: {provided_url_count}.",
         f"Date range: {str(analysis.get('date_range', 'all_time') or 'all_time')}.",
     ]
+    if depth_description:
+        overview_items.insert(2, f"Scope profile: {depth_description}.")
     detected_subtopics = [str(topic).strip() for topic in (analysis.get("subtopics", []) or []) if str(topic).strip()]
     budget_items = [
         f"Max tokens: {_budget_value('max_tokens')}.",
@@ -2833,7 +4255,7 @@ def _build_deep_research_analysis_request(
         accept_label="Start Deep Research",
         reject_label="Revise Scope",
         suggest_label="Suggestion",
-        help_text="Accept starts the expensive research pipeline. Reject or Suggestion sends changes back into the paused run.",
+        help_text="Approve starts the expensive research pipeline. Reject or Suggestion sends changes back into the paused run.",
         artifact_paths=[analysis_storage_path] if analysis_storage_path else [],
         metadata={"version": version, "report_title": title},
     )
@@ -2853,24 +4275,23 @@ def _build_deep_research_subplan_request(
     version: int,
 ) -> dict[str, Any]:
     sections = outline.get("sections", []) if isinstance(outline.get("sections"), list) else []
+    depth_label = str(analysis.get("depth_label", "") or "Standard Report").strip()
     section_titles = []
     for index, section in enumerate(sections, start=1):
         section_title = str((section or {}).get("title", f"Section {index}") or f"Section {index}").strip()
-        target = int((section or {}).get("target_pages", section_pages) or section_pages)
         questions = (section or {}).get("key_questions", []) if isinstance(section, dict) else []
         q_count = len(questions) if isinstance(questions, list) else 0
-        section_titles.append(f"{index}. {section_title} | target_pages={target} | questions={q_count or 'n/a'}")
+        section_titles.append(f"{index}. {section_title} | questions={q_count or 'n/a'}")
     execution_items = [
-        f"Deliver a {target_pages}-page deep research report through approved section-by-section research, drafting, and final merge.",
+        f"Execution scope: {depth_label}.",
         f"Section count: {len(sections)}.",
-        f"Default section size: {section_pages} pages.",
         f"Web search: {'enabled' if web_search_enabled else 'disabled'}.",
         f"Output formats: {', '.join(fmt.upper() for fmt in formats) or 'MD'}.",
         f"Research tier: {int(analysis.get('tier', 0) or 0)}.",
     ]
     return build_approval_request(
         scope="long_document_plan",
-        title=f"{title or 'Deep Research Report'} ({target_pages} pages)",
+        title=title or "Deep Research Report",
         summary="The deep research section plan is ready for approval.",
         sections=[
             {"title": "Section Outline", "items": section_titles},
@@ -2879,7 +4300,7 @@ def _build_deep_research_subplan_request(
         accept_label="Approve Plan",
         reject_label="Revise Plan",
         suggest_label="Suggestion",
-        help_text="Accept keeps the same workflow and starts the section research and drafting stages. Reject or Suggestion regenerates the plan before execution.",
+        help_text="Approve keeps the same workflow and starts the section research and drafting stages. Reject or Suggestion regenerates the plan before execution.",
         artifact_paths=[path for path in [outline_storage_path, subplan_storage_path] if path],
         metadata={"version": version, "section_count": len(sections)},
     )
@@ -2988,121 +4409,72 @@ def _ensure_section_citations(section_text: str, section_sources: list[dict]) ->
     return "\n".join(lines).strip()
 
 
-def _tokenize_words(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", str(text or "").lower())
+def _build_plagiarism_source_texts(
+    *,
+    evidence_bank_md: str,
+    section_packages: list[dict],
+    local_entries: list[dict],
+    url_entries: list[dict],
+) -> list[dict]:
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
 
+    def _add_entry(*, label: str, text: str, url: str = "", kind: str = "external_source") -> None:
+        cleaned_text = str(text or "").strip()
+        if not cleaned_text:
+            return
+        normalized = re.sub(r"\s+", " ", cleaned_text).strip().lower()
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        entries.append({"label": label, "url": url, "text": cleaned_text, "kind": kind})
 
-def _cosine_similarity(left: str, right: str) -> float:
-    left_tokens = _tokenize_words(left)
-    right_tokens = _tokenize_words(right)
-    if not left_tokens or not right_tokens:
-        return 0.0
-    left_counts: dict[str, int] = {}
-    right_counts: dict[str, int] = {}
-    for token in left_tokens:
-        left_counts[token] = left_counts.get(token, 0) + 1
-    for token in right_tokens:
-        right_counts[token] = right_counts.get(token, 0) + 1
-    numerator = sum(left_counts[token] * right_counts.get(token, 0) for token in left_counts)
-    left_norm = math.sqrt(sum(value * value for value in left_counts.values()))
-    right_norm = math.sqrt(sum(value * value for value in right_counts.values()))
-    if not left_norm or not right_norm:
-        return 0.0
-    return numerator / (left_norm * right_norm)
-
-
-def _ngram_overlap(left: str, right: str, *, n: int = 3) -> float:
-    def _ngrams(value: str) -> set[tuple[str, ...]]:
-        tokens = _tokenize_words(value)
-        if len(tokens) < n:
-            return set()
-        return {tuple(tokens[idx : idx + n]) for idx in range(0, len(tokens) - n + 1)}
-
-    left_ngrams = _ngrams(left)
-    right_ngrams = _ngrams(right)
-    if not left_ngrams or not right_ngrams:
-        return 0.0
-    return len(left_ngrams & right_ngrams) / max(1, len(left_ngrams))
-
-
-def _estimate_ai_content_score(text: str) -> float:
-    tokens = _tokenize_words(text)
-    if not tokens:
-        return 0.0
-    unique_ratio = len(set(tokens)) / max(1, len(tokens))
-    sentence_starts = re.findall(r"(?:^|[.!?]\s+)([A-Z][a-z]+)", str(text or ""))
-    repeated_start_ratio = 0.0
-    if sentence_starts:
-        counts: dict[str, int] = {}
-        for item in sentence_starts:
-            counts[item] = counts.get(item, 0) + 1
-        repeated = sum(value for value in counts.values() if value > 1)
-        repeated_start_ratio = repeated / max(1, len(sentence_starts))
-    citation_density = len(re.findall(r"\[[A-Z]\d+\]", str(text or ""))) / max(1, len(_section_text_blocks(text)))
-    score = 55.0 * max(0.0, 0.45 - unique_ratio) + 25.0 * repeated_start_ratio + 8.0 * max(0.0, 1.0 - citation_density)
-    return round(max(0.0, min(100.0, score)), 1)
+    _add_entry(label="Evidence bank", text=evidence_bank_md, kind="evidence_bank")
+    for package in section_packages or []:
+        title = str(package.get("title", "")).strip() or "Section research"
+        _add_entry(
+            label=f"{title} research memo",
+            text=str(package.get("research_text", "")).strip(),
+            kind="research_memo",
+        )
+    for entry in local_entries or []:
+        if str(entry.get("error", "")).strip():
+            continue
+        path_value = str(entry.get("path", "")).strip()
+        label = str(entry.get("file_name", "")).strip() or Path(path_value).name or "Local file"
+        source_text = "\n\n".join(
+            part
+            for part in (
+                f"Summary:\n{str(entry.get('summary', '')).strip()}" if str(entry.get("summary", "")).strip() else "",
+                f"Excerpt:\n{str(entry.get('excerpt', '')).strip()}" if str(entry.get("excerpt", "")).strip() else "",
+            )
+            if part
+        )
+        _add_entry(
+            label=label,
+            text=source_text,
+            url=_file_source_url(path_value) if path_value else "",
+            kind="local_file",
+        )
+    for entry in url_entries or []:
+        if str(entry.get("error", "")).strip():
+            continue
+        url = str(entry.get("url", "")).strip()
+        label = str(entry.get("label", "")).strip() or _source_label(url)
+        source_text = "\n\n".join(
+            part
+            for part in (
+                f"Summary:\n{str(entry.get('summary', '')).strip()}" if str(entry.get("summary", "")).strip() else "",
+                f"Excerpt:\n{str(entry.get('excerpt', '')).strip()}" if str(entry.get("excerpt", "")).strip() else "",
+            )
+            if part
+        )
+        _add_entry(label=label or "Provided URL", text=source_text, url=url, kind="provided_url")
+    return entries
 
 
 def _build_plagiarism_report(section_outputs: list[dict], source_texts: list[dict]) -> dict:
-    source_blocks: list[dict[str, str]] = []
-    for item in source_texts:
-        label = str(item.get("label", "")).strip() or "source"
-        url = str(item.get("url", "")).strip()
-        for block in _section_text_blocks(item.get("text", "")):
-            if len(block.split()) < 12:
-                continue
-            source_blocks.append({"label": label, "url": url, "text": block})
-
-    sections_payload = []
-    total_paragraphs = 0
-    flagged_paragraphs_total = 0
-    ai_scores: list[float] = []
-    for section in section_outputs:
-        flagged = []
-        paragraphs = [block for block in _section_text_blocks(section.get("section_text", "")) if len(block.split()) >= 12]
-        total_paragraphs += len(paragraphs)
-        section_ai = _estimate_ai_content_score(section.get("section_text", ""))
-        ai_scores.append(section_ai)
-        for paragraph in paragraphs:
-            best_match = None
-            best_similarity = 0.0
-            best_overlap = 0.0
-            for source in source_blocks[:250]:
-                cosine = _cosine_similarity(paragraph, source["text"])
-                overlap = _ngram_overlap(paragraph, source["text"])
-                if cosine > best_similarity or overlap > best_overlap:
-                    best_similarity = max(best_similarity, cosine)
-                    best_overlap = max(best_overlap, overlap)
-                    best_match = source
-            if best_match and (best_similarity >= 0.85 or best_overlap >= 0.65):
-                flagged.append(
-                    {
-                        "text_excerpt": _trim_text(paragraph, 240),
-                        "similarity": round(max(best_similarity, best_overlap), 3),
-                        "source_url": best_match.get("url", ""),
-                        "type": "near-verbatim" if best_similarity >= 0.85 else "mosaic",
-                        "recommendation": "rephrase or add citation",
-                    }
-                )
-        flagged_paragraphs_total += len(flagged)
-        section_score = round((len(flagged) / max(1, len(paragraphs))) * 100.0, 1) if paragraphs else 0.0
-        sections_payload.append(
-            {
-                "section_title": section.get("title", ""),
-                "plagiarism_score": section_score,
-                "ai_score": section_ai,
-                "flagged_paragraphs": flagged[:8],
-            }
-        )
-    overall = round((flagged_paragraphs_total / max(1, total_paragraphs)) * 100.0, 1) if total_paragraphs else 0.0
-    ai_content = round(sum(ai_scores) / max(1, len(ai_scores)), 1) if ai_scores else 0.0
-    status = "PASS" if overall < 10 else "WARN" if overall <= 20 else "FAIL"
-    return {
-        "overall_score": overall,
-        "ai_content_score": ai_content,
-        "status": status,
-        "sections": sections_payload,
-    }
+    return _dedicated_build_plagiarism_report(section_outputs, source_texts)
 
 
 def _format_citation(entry: dict, *, style: str, index: int) -> str:
@@ -3126,7 +4498,7 @@ def _format_citation(entry: dict, *, style: str, index: int) -> str:
 
 
 def _bibliography_markdown(entries: list[dict], *, style: str) -> str:
-    lines = [f"## Bibliography ({style.upper()})", ""]
+    lines = [_heading_with_anchor(2, f"Bibliography ({style.upper()})", "bibliography"), ""]
     if not entries:
         lines.append("- No sources were available for bibliography generation.")
         return "\n".join(lines).strip() + "\n"
@@ -3140,10 +4512,23 @@ def _bibliography_markdown(entries: list[dict], *, style: str) -> str:
 
 
 def _plagiarism_report_markdown(report: dict) -> str:
-    lines = ["## Appendix B - Plagiarism Report", ""]
-    lines.append(f"- Overall plagiarism score: {report.get('overall_score', 0)}%")
-    lines.append(f"- AI content score: {report.get('ai_content_score', 0)}%")
+    lines = [_heading_with_anchor(2, "Appendix B - Plagiarism Report", "appendix-b-plagiarism-report"), ""]
+    lines.append(f"- Overall similarity score: {report.get('overall_score', 0)}%")
+    lines.append(f"- AI-writing risk score: {report.get('ai_content_score', 0)}%")
     lines.append(f"- Status: {report.get('status', 'PASS')}")
+    summary = str(report.get("summary", "")).strip()
+    if summary:
+        lines.append(f"- Summary: {summary}")
+    source_block_count = int(report.get("source_block_count", 0) or 0)
+    if source_block_count:
+        lines.append(f"- Source passages scanned: {source_block_count}")
+    method = report.get("method", {}) if isinstance(report, dict) else {}
+    matching = method.get("matching", []) if isinstance(method, dict) else []
+    ai_scoring = method.get("ai_scoring", []) if isinstance(method, dict) else []
+    if matching:
+        lines.append(f"- Matching signals: {', '.join(str(item) for item in matching)}")
+    if ai_scoring:
+        lines.append(f"- AI signals: {', '.join(str(item) for item in ai_scoring)}")
     sections = report.get("sections", []) if isinstance(report, dict) else []
     if not sections:
         lines.append("- No section-level findings.")
@@ -3153,19 +4538,45 @@ def _plagiarism_report_markdown(report: dict) -> str:
             [
                 "",
                 f"### {section.get('section_title', 'Section')}",
-                f"- Plagiarism score: {section.get('plagiarism_score', 0)}%",
-                f"- AI score: {section.get('ai_score', 0)}%",
+                f"- Similarity score: {section.get('plagiarism_score', 0)}%",
+                f"- AI-writing risk: {section.get('ai_score', 0)}%",
+                f"- Passages scanned: {section.get('passages_scanned', 0)}",
+                f"- Words scanned: {section.get('words_scanned', 0)}",
             ]
         )
-        flagged = section.get("flagged_paragraphs", []) if isinstance(section, dict) else []
+        ai_components = section.get("ai_components", {}) if isinstance(section, dict) else {}
+        ranked_components = [
+            (str(key).replace("_", " "), float(value))
+            for key, value in ai_components.items()
+            if float(value or 0) > 0
+        ]
+        ranked_components.sort(key=lambda item: item[1], reverse=True)
+        if ranked_components:
+            top_components = ", ".join(f"{label}={round(value, 1)}" for label, value in ranked_components[:4])
+            lines.append(f"- Strongest AI signals: {top_components}")
+        flagged = []
+        if isinstance(section, dict):
+            flagged = section.get("flagged_passages", []) or section.get("flagged_paragraphs", [])
         if not flagged:
-            lines.append("- No flagged paragraphs.")
+            lines.append("- No flagged passages.")
             continue
+        lines.append("- Matched passages:")
         for item in flagged[:5]:
+            match_type = str(item.get("type", "flagged")).replace("_", " ")
+            source_label = str(item.get("source_label", "")).strip() or str(item.get("source_url", "")).strip() or "unknown source"
             lines.append(
-                f"- {item.get('type', 'flagged')}: {item.get('text_excerpt', '')} "
-                f"(similarity={item.get('similarity', 0)}, source={item.get('source_url', '')})"
+                f"  - {match_type} | severity={item.get('severity', 'n/a')} | "
+                f"similarity={item.get('similarity', 0)} | source={source_label}"
             )
+            excerpt = str(item.get("text_excerpt", "")).strip()
+            if excerpt:
+                lines.append(f"    Excerpt: {excerpt}")
+            matched_phrase = str(item.get("matched_phrase", "")).strip()
+            if matched_phrase:
+                lines.append(f"    Matched phrase: {matched_phrase}")
+            recommendation = str(item.get("recommendation", "")).strip()
+            if recommendation:
+                lines.append(f"    Recommendation: {recommendation}")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -3196,7 +4607,7 @@ def _long_document_subplan(outline: dict, *, objective: str, target_pages: int, 
                 "success_criteria": "Research package is strong enough to support a sourced section draft.",
                 "rationale": "Front-load evidence before drafting.",
                 "llm_model": research_model,
-                "model_source": "state.research_model/OPENAI_DEEP_RESEARCH_MODEL",
+                "model_source": "state.research_model/KENDR_DEEP_RESEARCH_MODEL",
                 "substeps": [],
             }
         )
@@ -3269,7 +4680,7 @@ def _run_research_pass(
         "background": True,
         "max_tool_calls": max_tool_calls,
         "reasoning": {"summary": "auto"},
-        "tools": [{"type": "web_search_preview"}],
+        "tools": [{"type": OPENAI_WEB_SEARCH_TOOL}],
     }
     if max_output_tokens is not None and max_output_tokens > 0:
         create_kwargs["max_output_tokens"] = max_output_tokens
@@ -3339,6 +4750,7 @@ def _collect_section_research_package(
     continuity_notes: list[str],
     coherence_context_md: str,
     web_search_enabled: bool,
+    native_web_search_enabled: bool,
     research_model: str,
     research_instructions: str,
     max_tool_calls: int,
@@ -3435,33 +4847,55 @@ def _collect_section_research_package(
         section_sources = _merge_sources(section_sources, section_search_sources)
     else:
         if web_search_enabled:
-            if callable(cancel_check):
-                cancel_check()
-            query_lines = [
-                f"Global objective: {objective}",
-                f"Section {section_index} title: {section_title}",
-                f"Section objective: {section_objective}",
-                "Key questions:",
-                *[f"- {item}" for item in section_questions[:12]],
-                "Continuity notes from previous sections:",
-                *[f"- {item}" for item in continuity_notes[-10:]],
-                "Markdown coherence anchors:",
-                _trim_text(coherence_context_md, 4000),
-            ]
-            research_pass = _run_research_pass(
-                OpenAI(api_key=api_key),
-                query="\n".join(query_lines),
-                model=research_model,
-                instructions=research_instructions,
-                max_tool_calls=max_tool_calls,
-                max_output_tokens=max_output_tokens_int,
-                poll_interval_seconds=poll_interval_seconds,
-                max_wait_seconds=max_wait_seconds,
-                heartbeat_interval_seconds=heartbeat_seconds,
-                heartbeat_label=f"Section {section_index} research in progress",
-                cancel_check=cancel_check,
-            )
-            research_output = str(research_pass.get("output_text", "")).strip()
+            if native_web_search_enabled:
+                if callable(cancel_check):
+                    cancel_check()
+                query_lines = [
+                    f"Global objective: {objective}",
+                    f"Section {section_index} title: {section_title}",
+                    f"Section objective: {section_objective}",
+                    "Key questions:",
+                    *[f"- {item}" for item in section_questions[:12]],
+                    "Continuity notes from previous sections:",
+                    *[f"- {item}" for item in continuity_notes[-10:]],
+                    "Markdown coherence anchors:",
+                    _trim_text(coherence_context_md, 4000),
+                ]
+                research_pass = _run_research_pass(
+                    OpenAI(api_key=api_key),
+                    query="\n".join(query_lines),
+                    model=research_model,
+                    instructions=research_instructions,
+                    max_tool_calls=max_tool_calls,
+                    max_output_tokens=max_output_tokens_int,
+                    poll_interval_seconds=poll_interval_seconds,
+                    max_wait_seconds=max_wait_seconds,
+                    heartbeat_interval_seconds=heartbeat_seconds,
+                    heartbeat_label=f"Section {section_index} research in progress",
+                    cancel_check=cancel_check,
+                )
+                research_output = str(research_pass.get("output_text", "")).strip()
+            else:
+                if not search_query:
+                    search_query = f"{section_title} {section_objective}"
+                if not section_search_text:
+                    if callable(cancel_check):
+                        cancel_check()
+                    section_search_results = _collect_google_search_evidence(search_query, num=section_search_results_count)
+                    section_search_sources = _sources_from_search_results(section_search_results.get("results", []))
+                    section_search_text = _search_results_markdown(section_search_results.get("results", []))
+                research_pass = {
+                    "response_id": f"kendr_web_search_section_{section_index}",
+                    "status": "fallback_web_search",
+                    "elapsed_seconds": 0,
+                    "output_text": local_section_notes,
+                    "raw": {
+                        "reason": "native_web_search_unavailable",
+                        "search_provider": str((section_search_results or {}).get("provider", "")).strip(),
+                        "search_providers_tried": list((section_search_results or {}).get("providers_tried", []) or []),
+                    },
+                }
+                research_output = local_section_notes
         else:
             research_pass = {
                 "response_id": f"local_only_section_{section_index}",
@@ -3564,7 +4998,7 @@ def _record_section_research_package(
             log_task_update(DEEP_RESEARCH_LABEL, f"Section {index} web search error: {section_search_results.get('error')}")
 
     section_research_status = str(research_pass.get("status", "")).strip() or "completed"
-    if section_research_status not in {"completed", "", "local_only", "evidence_bank"}:
+    if section_research_status not in {"completed", "", "local_only", "evidence_bank", "fallback_web_search"}:
         log_task_update(DEEP_RESEARCH_LABEL, f"Section {index} research status: {research_pass.get('status')}")
 
     _trace_research_event(
@@ -3576,11 +5010,11 @@ def _record_section_research_package(
                 if from_cache
                 else f"{section_title} completed with {len(section_sources)} sources."
             )
-            if section_research_status in {"completed", "local_only", "evidence_bank"}
+            if section_research_status in {"completed", "local_only", "evidence_bank", "fallback_web_search"}
             else f"{section_title} finished with status '{section_research_status}'. Using partial research output."
         ),
         command=str(package.get("objective", "")).strip(),
-        status="completed" if section_research_status in {"completed", "local_only", "evidence_bank"} else "failed",
+        status="completed" if section_research_status in {"completed", "local_only", "evidence_bank", "fallback_web_search"} else "failed",
         started_at=section_research_started_at,
         completed_at=_trace_now(),
         metadata={
@@ -3672,6 +5106,7 @@ Requirements:
 - Keep conceptual continuity with prior sections.
 - Keep factual claims tied to evidence gathered in the research notes below.
 - Use the editorial correlation briefing to avoid overlap and to cross-reference related sections.
+- Do not repeat the section title as a heading; the compiler adds the section heading for you.
 - Include a short "Section Takeaways" list at the end.
 - Use source tags like "[S1]" inline for factual claims that come from the source ledger.
 - Do not cite source ids that are not present in the source ledger.
@@ -3736,163 +5171,15 @@ def _markdown_to_plain_text(markdown_text: str) -> str:
     return cleaned_ascii
 
 
-def _markdown_to_html(markdown_text: str) -> str:
+def _markdown_to_html(markdown_text: str, *, base_path: str | Path | None = None) -> str:
     input_chars = len(markdown_text or "")
     log_task_update(DEEP_RESEARCH_LABEL, f"_markdown_to_html: converting {input_chars} chars of markdown to HTML.")
-    lines = (markdown_text or "").splitlines()
-    html_lines: list[str] = []
-    in_code = False
-    in_ul = False
-    in_ol = False
-    index = 0
-    heading_count = 0
-    list_item_count = 0
-    table_count = 0
+    from tasks.md_to_pdf import build_html_from_markdown
 
-    def close_lists() -> None:
-        nonlocal in_ul, in_ol
-        if in_ul:
-            html_lines.append("</ul>")
-            in_ul = False
-        if in_ol:
-            html_lines.append("</ol>")
-            in_ol = False
-
-    def render_table(table_lines: list[str]) -> None:
-        rows = []
-        for row_line in table_lines:
-            if not row_line.strip():
-                continue
-            parts = [cell.strip() for cell in row_line.strip().strip("|").split("|")]
-            rows.append(parts)
-        if not rows:
-            return
-        header = rows[0]
-        body_rows = rows[2:] if len(rows) > 2 else rows[1:]
-        html_lines.append("<table>")
-        html_lines.append("<thead><tr>" + "".join(f"<th>{html.escape(cell)}</th>" for cell in header) + "</tr></thead>")
-        if body_rows:
-            html_lines.append("<tbody>")
-            for row in body_rows:
-                html_lines.append("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>")
-            html_lines.append("</tbody>")
-        html_lines.append("</table>")
-
-    while index < len(lines):
-        line = lines[index]
-        if line.strip().startswith("```"):
-            if in_code:
-                html_lines.append("</code></pre>")
-                in_code = False
-            else:
-                close_lists()
-                html_lines.append("<pre><code>")
-                in_code = True
-            index += 1
-            continue
-        if in_code:
-            html_lines.append(html.escape(line))
-            index += 1
-            continue
-
-        # Table detection (header + separator line)
-        if "|" in line and index + 1 < len(lines):
-            sep = lines[index + 1]
-            if re.match(r"^\s*\|?\s*[:\-\s|]+\|?\s*$", sep):
-                table_block = [line, sep]
-                index += 2
-                while index < len(lines) and "|" in lines[index] and lines[index].strip():
-                    table_block.append(lines[index])
-                    index += 1
-                close_lists()
-                render_table(table_block)
-                table_count += 1
-                continue
-
-        heading = re.match(r"^(#{1,6})\s+(.*)$", line)
-        if heading:
-            close_lists()
-            level = min(len(heading.group(1)), 6)
-            html_lines.append(f"<h{level}>{html.escape(heading.group(2).strip())}</h{level}>")
-            heading_count += 1
-            index += 1
-            continue
-
-        ul_item = re.match(r"^[-*]\s+(.*)$", line)
-        if ul_item:
-            if not in_ul:
-                close_lists()
-                html_lines.append("<ul>")
-                in_ul = True
-            html_lines.append(f"<li>{html.escape(ul_item.group(1).strip())}</li>")
-            list_item_count += 1
-            index += 1
-            continue
-
-        ol_item = re.match(r"^\d+\.\s+(.*)$", line)
-        if ol_item:
-            if not in_ol:
-                close_lists()
-                html_lines.append("<ol>")
-                in_ol = True
-            html_lines.append(f"<li>{html.escape(ol_item.group(1).strip())}</li>")
-            list_item_count += 1
-            index += 1
-            continue
-
-        if not line.strip():
-            close_lists()
-            html_lines.append("<p></p>")
-            index += 1
-            continue
-
-        # Image syntax: ![alt text](path)
-        img_match = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)$", line.strip())
-        if img_match:
-            close_lists()
-            img_alt = html.escape(img_match.group(1).strip())
-            img_src = html.escape(img_match.group(2).strip())
-            html_lines.append(
-                f'<figure style="margin:18px 0;text-align:center;">'
-                f'<img src="{img_src}" alt="{img_alt}" style="max-width:100%;border-radius:6px;border:1px solid var(--line);">'
-                f'<figcaption style="font-size:0.85em;color:var(--muted);margin-top:6px;">{img_alt}</figcaption>'
-                f'</figure>'
-            )
-            index += 1
-            continue
-
-        close_lists()
-        html_lines.append(f"<p>{html.escape(line.strip())}</p>")
-        index += 1
-
-    close_lists()
-    if in_code:
-        html_lines.append("</code></pre>")
-
-    style = (
-        "<style>"
-        ":root{color-scheme:light dark;--bg:#ffffff;--text:#111827;--muted:#475569;--line:#dbe4ee;--panel:#f8fafc;}"
-        "@media (prefers-color-scheme:dark){:root{--bg:#0f172a;--text:#e2e8f0;--muted:#94a3b8;--line:#334155;--panel:#111827;}}"
-        "body{font-family:Georgia,'Times New Roman',serif;line-height:1.6;margin:40px auto;max-width:920px;padding:0 18px;background:var(--bg);color:var(--text);}"
-        "h1{font-size:30px;border-bottom:1px solid var(--line);padding-bottom:8px;}"
-        "h2{font-size:22px;margin-top:32px;}"
-        "h3{font-size:17px;margin-top:22px;}"
-        "p{margin:10px 0;}"
-        "table{border-collapse:collapse;width:100%;margin:14px 0;background:var(--panel);}"
-        "th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top;}"
-        "th{background:#0f172a;color:#f8fafc;}"
-        "tr:nth-child(even) td{background:rgba(148,163,184,0.08);}"
-        "pre{background:var(--panel);padding:12px;border-radius:6px;overflow:auto;border:1px solid var(--line);}"
-        "code{font-family:'Courier New',monospace;font-size:0.95em;}"
-        "ul,ol{padding-left:22px;}"
-        "</style>"
-    )
-    html_result = (
-        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Deep Research Report</title>"
-        f"{style}</head><body>\n"
-        + "\n".join(html_lines)
-        + "\n</body></html>"
-    )
+    heading_count = len(re.findall(r"^#{1,6}\s+", markdown_text or "", flags=re.MULTILINE))
+    list_item_count = len(re.findall(r"^(?:[-*]|\d+\.)\s+", markdown_text or "", flags=re.MULTILINE))
+    table_count = len(re.findall(r"^\|.*\|\s*$", markdown_text or "", flags=re.MULTILINE))
+    html_result = build_html_from_markdown(markdown_text or "", for_pdf=False, base_path=base_path)
     log_task_update(
         DEEP_RESEARCH_LABEL,
         f"_markdown_to_html: done — {heading_count} headings, {list_item_count} list items, "
@@ -3907,55 +5194,203 @@ def _markdown_to_docx(markdown_text: str, output_path: str) -> None:
     if not _ensure_python_package("python-docx", "docx"):
         raise RuntimeError("python-docx not available")
     from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Inches, Pt, RGBColor
 
     doc = Document()
-    in_code = False
+    for section in doc.sections:
+        section.top_margin = Inches(0.82)
+        section.bottom_margin = Inches(0.86)
+        section.left_margin = Inches(0.72)
+        section.right_margin = Inches(0.72)
+
+    normal_style = doc.styles["Normal"]
+    normal_style.font.name = "Georgia"
+    normal_style.font.size = Pt(11)
+    normal_style.paragraph_format.space_after = Pt(9)
+    normal_style.paragraph_format.line_spacing = 1.5
+
+    title_style = doc.styles["Title"]
+    title_style.font.name = "Georgia"
+    title_style.font.size = Pt(25)
+    title_style.font.bold = True
+    title_style.font.color.rgb = RGBColor(15, 23, 42)
+
+    for style_name, font_size, color in (
+        ("Heading 1", 17, RGBColor(15, 23, 42)),
+        ("Heading 2", 15, RGBColor(15, 118, 110)),
+        ("Heading 3", 12.5, RGBColor(20, 78, 74)),
+    ):
+        style = doc.styles[style_name]
+        style.font.name = "Georgia"
+        style.font.size = Pt(font_size)
+        style.font.bold = True
+        style.font.color.rgb = color
+
+    bookmark_id = 1
     heading_count = 0
     bullet_count = 0
     numbered_count = 0
     para_count = 0
-    for raw in (markdown_text or "").splitlines():
-        line = raw.rstrip()
+
+    def _strip_inline_markdown(value: str) -> str:
+        text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", str(value or ""))
+        text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+        text = re.sub(r"\*([^*]+)\*", r"\1", text)
+        return text
+
+    def _add_bookmark(paragraph, name: str) -> None:
+        nonlocal bookmark_id
+        anchor = _slugify_heading(name, fallback=f"bookmark-{bookmark_id}")
+        start = OxmlElement("w:bookmarkStart")
+        start.set(qn("w:id"), str(bookmark_id))
+        start.set(qn("w:name"), anchor)
+        end = OxmlElement("w:bookmarkEnd")
+        end.set(qn("w:id"), str(bookmark_id))
+        paragraph._p.insert(0, start)
+        paragraph._p.append(end)
+        bookmark_id += 1
+
+    def _append_internal_hyperlink(paragraph, text: str, anchor: str) -> None:
+        hyperlink = OxmlElement("w:hyperlink")
+        hyperlink.set(qn("w:anchor"), _slugify_heading(anchor, fallback="section"))
+        run = OxmlElement("w:r")
+        run_properties = OxmlElement("w:rPr")
+        color = OxmlElement("w:color")
+        color.set(qn("w:val"), "0F766E")
+        underline = OxmlElement("w:u")
+        underline.set(qn("w:val"), "single")
+        run_properties.append(color)
+        run_properties.append(underline)
+        run.append(run_properties)
+        text_node = OxmlElement("w:t")
+        text_node.text = text
+        run.append(text_node)
+        hyperlink.append(run)
+        paragraph._p.append(hyperlink)
+
+    def _append_inline_runs(paragraph, text: str) -> None:
+        token_pattern = re.compile(r"(\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*)")
+        cursor = 0
+        for match in token_pattern.finditer(text):
+            if match.start() > cursor:
+                paragraph.add_run(text[cursor:match.start()])
+            token = match.group(0)
+            if token.startswith("**"):
+                run = paragraph.add_run(token[2:-2])
+                run.bold = True
+            elif token.startswith("*"):
+                run = paragraph.add_run(token[1:-1])
+                run.italic = True
+            else:
+                link_match = re.match(r"\[([^\]]+)\]\(([^)]+)\)", token)
+                if link_match:
+                    label = link_match.group(1)
+                    target = link_match.group(2)
+                    if target.startswith("#"):
+                        _append_internal_hyperlink(paragraph, label, target[1:])
+                    else:
+                        run = paragraph.add_run(label)
+                        run.font.color.rgb = RGBColor(15, 118, 110)
+                        run.underline = True
+            cursor = match.end()
+        if cursor < len(text):
+            paragraph.add_run(text[cursor:])
+
+    lines = (markdown_text or "").splitlines()
+    in_code = False
+    index = 0
+    while index < len(lines):
+        line = lines[index].rstrip()
         if line.strip().startswith("```"):
             in_code = not in_code
+            index += 1
             continue
         if in_code:
             para = doc.add_paragraph()
             run = para.add_run(line)
             run.font.name = "Courier New"
+            run.font.size = Pt(9.5)
+            index += 1
             continue
         if not line.strip():
             doc.add_paragraph("")
+            index += 1
+            continue
+        if "|" in line and index + 1 < len(lines) and re.match(r"^\s*\|?\s*[:\-\s|]+\|?\s*$", lines[index + 1]):
+            table_lines = [line, lines[index + 1]]
+            index += 2
+            while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                table_lines.append(lines[index])
+                index += 1
+            rows = []
+            for row_line in table_lines:
+                parts = [part.strip() for part in row_line.strip().strip("|").split("|")]
+                rows.append(parts)
+            if rows:
+                header = rows[0]
+                body_rows = rows[2:] if len(rows) > 2 else rows[1:]
+                table = doc.add_table(rows=1 + len(body_rows), cols=len(header))
+                table.style = "Table Grid"
+                for col_index, value in enumerate(header):
+                    cell = table.rows[0].cells[col_index]
+                    cell.text = _strip_inline_markdown(value)
+                    if cell.paragraphs:
+                        cell.paragraphs[0].runs[0].bold = True
+                for row_index, row_values in enumerate(body_rows, start=1):
+                    padded = row_values + [""] * max(0, len(header) - len(row_values))
+                    for col_index, value in enumerate(padded[:len(header)]):
+                        table.rows[row_index].cells[col_index].text = _strip_inline_markdown(value)
             continue
         heading_match = re.match(r"^(#{1,6})\s+(.*)$", line)
         if heading_match:
             level = min(len(heading_match.group(1)), 6)
-            doc.add_heading(heading_match.group(2).strip(), level=level)
+            raw_heading = heading_match.group(2).strip()
+            anchor_match = re.match(r"^(.*?)(?:\s+\{#([^}]+)\})?$", raw_heading)
+            heading_text = _strip_heading_attributes(anchor_match.group(1).strip() if anchor_match else raw_heading)
+            anchor_name = anchor_match.group(2).strip() if anchor_match and anchor_match.group(2) else _slugify_heading(heading_text, fallback=f"heading-{level}")
+            if level == 1 and heading_count == 0:
+                paragraph = doc.add_paragraph(heading_text, style="Title")
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            else:
+                paragraph = doc.add_heading(heading_text, level=level)
+            _add_bookmark(paragraph, anchor_name)
             heading_count += 1
+            index += 1
             continue
-        if re.match(r"^[-*]\s+", line):
-            doc.add_paragraph(re.sub(r"^[-*]\s+", "", line), style="List Bullet")
+        bullet_match = re.match(r"^[-*]\s+(.*)$", line)
+        if bullet_match:
+            paragraph = doc.add_paragraph(style="List Bullet")
+            bullet_text = bullet_match.group(1).strip()
+            link_match = re.fullmatch(r"\[([^\]]+)\]\((#[^)]+)\)", bullet_text)
+            if link_match:
+                _append_internal_hyperlink(paragraph, link_match.group(1), link_match.group(2)[1:])
+            else:
+                _append_inline_runs(paragraph, bullet_text)
             bullet_count += 1
+            index += 1
             continue
-        if re.match(r"^\d+\.\s+", line):
-            doc.add_paragraph(re.sub(r"^\d+\.\s+", "", line), style="List Number")
+        numbered_match = re.match(r"^\d+\.\s+(.*)$", line)
+        if numbered_match:
+            paragraph = doc.add_paragraph(style="List Number")
+            _append_inline_runs(paragraph, numbered_match.group(1).strip())
             numbered_count += 1
+            index += 1
             continue
-        # Image syntax: ![alt text](path or url)
         img_match = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)$", line.strip())
         if img_match:
             img_alt = img_match.group(1).strip()
             img_path = img_match.group(2).strip()
-            # Only embed local file paths (not http URLs which docx can't fetch)
             if not img_path.startswith("http"):
                 try:
-                    # Resolve relative to compiled markdown's output dir
                     abs_img = resolve_output_path(img_path) if not os.path.isabs(img_path) else img_path
                     if os.path.isfile(abs_img):
-                        from docx.shared import Inches  # type: ignore
                         doc.add_picture(abs_img, width=Inches(5.5))
                         caption_para = doc.add_paragraph(img_alt or "Figure")
                         caption_para.style = "Caption" if "Caption" in [s.name for s in doc.styles] else "Normal"
+                        caption_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         log_task_update(DEEP_RESEARCH_LABEL, f"  Embedded image in DOCX: {abs_img}")
                     else:
                         doc.add_paragraph(f"[Image not found: {img_path}]")
@@ -3965,10 +5400,25 @@ def _markdown_to_docx(markdown_text: str, output_path: str) -> None:
                     log_task_update(DEEP_RESEARCH_LABEL, f"  DOCX image embed failed ({img_path}): {img_exc}")
             else:
                 doc.add_paragraph(f"[Image: {img_alt or img_path}]")
+            index += 1
+            continue
+        if re.match(r"^\s*>\s*", line):
+            paragraph = doc.add_paragraph(style="Intense Quote" if "Intense Quote" in [s.name for s in doc.styles] else "Normal")
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            _append_inline_runs(paragraph, re.sub(r"^\s*>\s*", "", line))
+            para_count += 1
+            index += 1
+            continue
+        if re.match(r"^\s*-{3,}\s*$", line):
+            doc.add_paragraph("")
+            index += 1
             continue
 
-        doc.add_paragraph(line)
+        paragraph = doc.add_paragraph()
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        _append_inline_runs(paragraph, line)
         para_count += 1
+        index += 1
 
     doc.save(output_path)
     log_task_update(
@@ -4120,7 +5570,7 @@ def _export_long_document_formats(
     formats = set(_normalize_research_formats(requested_formats or DEFAULT_RESEARCH_FORMATS))
     export_errors: dict[str, str] = {}
 
-    html_text = _markdown_to_html(compiled_markdown)
+    html_text = _markdown_to_html(compiled_markdown, base_path=compiled_path.parent)
     log_task_update(DEEP_RESEARCH_LABEL, f"Document export starting. Requested formats: {', '.join(formats)}.")
     if "html" in formats or "pdf" in formats:
         log_task_update(DEEP_RESEARCH_LABEL, f"Rendering HTML ({len(html_text)} chars)...")
@@ -4191,43 +5641,61 @@ def _build_compiled_markdown(
     deep_research_tier: int,
     image_entries: list[dict] | None = None,
 ) -> str:
-    escaped_title = title.replace('"', '\\"')
-    lines = [
-        "---",
-        f'title: "{escaped_title}"',
-        f"generated_at: {generated_at}",
-        f"citation_style: {citation_style}",
-        f"deep_research_tier: {deep_research_tier}",
-        f"model: {model_name}",
-        "---",
-        "",
-        f"# {title}",
-        "",
-        f"_Generated by Kendr Deep Research on {generated_at} using {model_name}_",
-        "",
-        "## Executive Summary",
-        executive_summary.strip(),
-        "",
-        "## Table of Contents",
+    def _section_anchor(item: dict) -> str:
+        index = int(item["index"])
+        fallback = f"section-{index}"
+        return f"section-{index}-{_slugify_heading(item['title'], fallback=fallback)}"
+
+    toc_entries = [
+        ("executive-summary", "Executive Summary"),
+        *[
+            (_section_anchor(item), f"{item['index']}. {item['title']}")
+            for item in section_outputs
+        ],
+        ("bibliography", f"Bibliography ({citation_style.upper()})"),
+        ("appendix-a-source-list", "Appendix A - Source List"),
+        ("appendix-b-plagiarism-report", "Appendix B - Plagiarism Report"),
+        ("appendix-c-research-log", "Appendix C - Research Log"),
     ]
-    for item in section_outputs:
-        lines.append(f"- {item['index']}. {item['title']}")
-    lines.append("")
+    if image_entries:
+        toc_entries.append(("appendix-d-image-gallery", "Appendix D - Image Gallery"))
+    lines = [
+        _heading_with_anchor(1, title, "report-title"),
+        "",
+        _heading_with_anchor(2, "Table of Contents", "table-of-contents"),
+    ]
+    for anchor, label in toc_entries:
+        lines.append(f"- [{label}](#{anchor})")
     lines.extend(
         [
-            "## Methodology",
-            methodology_text.strip(),
+            "",
+            _heading_with_anchor(2, "Executive Summary", "executive-summary"),
+        ]
+    )
+    if objective.strip():
+        lines.extend(
+            [
+                "",
+                f"> Objective: {objective.strip()}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            f"_Generated on {generated_at}_",
             "",
         ]
     )
+    lines.extend([executive_summary.strip(), ""])
     for item in section_outputs:
-        lines.append(f"## {item['index']}. {item['title']}")
+        section_anchor = _section_anchor(item)
+        lines.append(_heading_with_anchor(2, f"{item['index']}. {item['title']}", section_anchor))
         lines.append("")
-        lines.append(item["section_text"].strip())
+        lines.append(_strip_leading_section_heading(item["section_text"], section_title=item["title"], section_index=int(item["index"])))
         lines.append("")
     bibliography_md = _bibliography_markdown(consolidated_references, style=citation_style).strip()
     lines.extend([bibliography_md, ""])
-    lines.extend(["## Appendix A - Source List", ""])
+    lines.extend([_heading_with_anchor(2, "Appendix A - Source List", "appendix-a-source-list"), ""])
     if source_entries:
         for item in source_entries:
             lines.append(f"- [{item.get('id', '')}] {item.get('label', '')} - {item.get('url', '')}")
@@ -4236,15 +5704,32 @@ def _build_compiled_markdown(
     lines.append("")
     lines.append(_plagiarism_report_markdown(plagiarism_report).strip())
     lines.append("")
-    lines.extend(["## Appendix C - Research Log", ""])
+    lines.extend([_heading_with_anchor(2, "Appendix C - Research Log", "appendix-c-research-log"), ""])
     if research_log_lines:
         for line in research_log_lines:
             lines.append(f"- {line}")
     else:
         lines.append("- No research log lines were captured.")
     lines.append("")
+    if methodology_text.strip():
+        lines.extend(
+            [
+                _heading_with_anchor(3, "Run Configuration", "appendix-c-run-configuration"),
+                "",
+                methodology_text.strip(),
+                "",
+            ]
+        )
     lines.append(_image_appendix_markdown(image_entries or []))
-    lines.append("")
+    lines.extend(
+        [
+            "",
+            "---",
+            "",
+            f"_Generated by Kendr on {generated_at}. Visit at [Kendr.org](https://kendr.org)._",
+            "",
+        ]
+    )
     return "\n".join(lines).strip() + "\n"
 
 
@@ -4264,22 +5749,36 @@ def long_document_agent(state):
     if not soul_file or not Path(soul_file).exists():
         state = bootstrap_file_memory(state)
 
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is required for long_document_agent.")
-
     target_pages = _safe_int(state.get("long_document_pages") or state.get("report_target_pages"), 50, 5, 500)
+    research_depth_config = _research_depth_config(state.get("research_depth_mode"), target_pages)
+    research_depth_mode = str(research_depth_config["mode"])
+    research_depth_label = str(research_depth_config["label"])
     section_pages = _safe_int(state.get("long_document_section_pages"), 5, 2, 20)
     section_count_default = max(3, math.ceil(target_pages / max(1, section_pages)))
     section_count = _safe_int(state.get("long_document_sections"), section_count_default, 1, 40)
-    title = _normalize_title(state.get("long_document_title", ""), f"Deep Research Report ({target_pages} pages)")
+    initial_outline = state.get("long_document_outline", {})
+    if not isinstance(initial_outline, dict):
+        initial_outline = {}
+    title = (
+        str(state.get("long_document_title", "") or initial_outline.get("title", "")).strip()
+        or _generate_report_title(objective)
+    )
+    state["research_depth_mode"] = research_depth_mode
 
-    _raw_research_model = str(state.get("research_model", "")).strip()
+    draft_selection = model_selection_for_agent("long_document_agent")
+    explicit_research_provider = str(state.get("research_provider") or "").strip().lower()
+    selected_provider = explicit_research_provider or str(state.get("provider") or draft_selection.get("provider") or "").strip().lower()
+    selected_model = str(state.get("model") or draft_selection.get("model") or "").strip()
+
+    _raw_research_model = str(state.get("research_model") or selected_model).strip()
     _PROVIDER_NAMES = {"openai", "anthropic", "google", "xai", "ollama", "openrouter", "custom", "minimax", "qwen", "glm"}
     if not _raw_research_model or _raw_research_model in _PROVIDER_NAMES:
         if _raw_research_model in _PROVIDER_NAMES:
-            log_task_update(DEEP_RESEARCH_LABEL, f"state.research_model='{_raw_research_model}' looks like a provider name, not a model ID — ignoring and using OPENAI_DEEP_RESEARCH_MODEL default.")
-        research_model = DEFAULT_DEEP_RESEARCH_MODEL
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"state.research_model='{_raw_research_model}' looks like a provider name, not a model ID — ignoring and using the selected deep-research model/default.",
+            )
+        research_model = selected_model or DEFAULT_DEEP_RESEARCH_MODEL
     else:
         research_model = _raw_research_model
     max_tool_calls = _safe_int(state.get("research_max_tool_calls"), 8, 1, 64)
@@ -4293,6 +5792,25 @@ def long_document_agent(state):
     include_section_references = bool(state.get("long_document_section_references", False))
     section_search_flag = state.get("long_document_section_search")
     web_search_enabled = bool(state.get("research_web_search_enabled", True))
+    native_web_search_enabled = bool(web_search_enabled and supports_native_web_search(research_model, selected_provider))
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if native_web_search_enabled and not api_key:
+        raise ValueError("OPENAI_API_KEY is required when the selected Deep Research model uses native web search.")
+    if web_search_enabled and not native_web_search_enabled:
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            (
+                f"{selected_provider or 'selected'} / {research_model} does not expose native web search here. "
+                "Using the Kendr web search client for source gathering instead."
+            ),
+        )
+    web_search_mode = (
+        "native_model"
+        if native_web_search_enabled
+        else "kendr_search"
+        if web_search_enabled
+        else "disabled"
+    )
     use_section_search = web_search_enabled if section_search_flag is None else bool(section_search_flag) and web_search_enabled
     section_search_results_count = _safe_int(state.get("long_document_section_search_results"), 6, 1, 20)
     deep_research_mode = bool(state.get("deep_research_mode", False))
@@ -4302,6 +5820,7 @@ def long_document_agent(state):
     date_range = str(state.get("research_date_range", "all_time") or "all_time").strip() or "all_time"
     requested_sources = [str(item).strip().lower() for item in state.get("research_sources", []) if str(item).strip()] if isinstance(state.get("research_sources", []), list) else []
     source_family_display = requested_sources or (["web"] if web_search_enabled else ["local"])
+    search_backend = normalize_research_search_backend(state.get("research_search_backend", "auto"))
     max_sources = _safe_int(state.get("research_max_sources"), 0, 0, 400)
     checkpoint_enabled = bool(state.get("research_checkpoint_enabled", False))
     research_kb_enabled = bool(state.get("research_kb_enabled", False))
@@ -4326,9 +5845,9 @@ def long_document_agent(state):
     log_task_update(
         DEEP_RESEARCH_LABEL,
         (
-            f"Deep research pass #{call_number} started. target_pages={target_pages}, "
+            f"Deep research pass #{call_number} started. depth={research_depth_mode}, "
             f"sections={section_count}, section_pages~{section_pages}, model={research_model}, "
-            f"formats={','.join(output_formats)}, citation_style={citation_style}"
+            f"formats={','.join(output_formats)}, citation_style={citation_style}, search_backend={search_backend}"
         ),
         objective,
     )
@@ -4336,7 +5855,7 @@ def long_document_agent(state):
         state,
         title="Deep research run started",
         detail=(
-            f"Preparing a {target_pages}-page report across about {section_count} sections with "
+            f"Preparing a {research_depth_label} run across about {section_count} sections with "
             f"{citation_style.upper()} citations and {', '.join(output_formats)} exports."
         ),
         status="running",
@@ -4346,6 +5865,8 @@ def long_document_agent(state):
             "target_pages": target_pages,
             "section_count": section_count,
             "research_model": research_model,
+            "web_search_mode": web_search_mode,
+            "search_backend": search_backend,
             "research_kb_enabled": research_kb_enabled,
             "research_kb_id": research_kb_id,
         },
@@ -4355,10 +5876,14 @@ def long_document_agent(state):
     state["deep_research_mode"] = deep_research_mode
     state["long_document_mode"] = True
     state["workflow_type"] = "deep_research" if deep_research_mode else "long_document"
+    state["research_provider"] = selected_provider
+    state["research_model"] = research_model
     state["research_output_formats"] = output_formats
     state["research_citation_style"] = citation_style
     state["research_enable_plagiarism_check"] = plagiarism_enabled
     state["research_web_search_enabled"] = web_search_enabled
+    state["research_web_search_mode"] = web_search_mode
+    state["research_search_backend"] = search_backend
     state["research_date_range"] = date_range
     state["research_checkpoint_enabled"] = checkpoint_enabled
     if max_sources > 0:
@@ -4409,6 +5934,12 @@ def long_document_agent(state):
         metadata={"phase": "source_strategy", "strategy": source_strategy},
         subtask="Plan source strategy",
     )
+    _ensure_local_source_manifest(
+        state,
+        objective=objective,
+        artifact_dir=artifact_dir,
+        source_strategy=source_strategy,
+    )
 
     if bool(state.get("long_document_addendum_requested", False)):
         return _run_long_document_addendum(
@@ -4422,6 +5953,7 @@ def long_document_agent(state):
     analysis_signature = {
         "objective": objective,
         "target_pages": target_pages,
+        "depth_mode": research_depth_mode,
         "requested_sources": list(requested_sources),
         "date_range": date_range or "all_time",
         "max_sources": max_sources,
@@ -4432,6 +5964,7 @@ def long_document_agent(state):
         analysis = _research_depth_analysis(
             objective,
             target_pages=target_pages,
+            depth_mode=research_depth_mode,
             requested_sources=requested_sources,
             date_range=date_range,
             max_sources=max_sources,
@@ -4493,7 +6026,8 @@ def long_document_agent(state):
             "kind": "analysis",
             "title": title,
             "tier": analysis.get("tier", 0),
-            "estimated_pages": analysis.get("estimated_pages", target_pages),
+            "depth_mode": analysis.get("depth_mode", research_depth_mode),
+            "depth_label": analysis.get("depth_label", research_depth_label),
             "estimated_sources": analysis.get("estimated_sources", 0),
             "estimated_duration_minutes": analysis.get("estimated_duration_minutes", 0),
             "subtopics": analysis.get("subtopics", []),
@@ -4544,9 +6078,12 @@ def long_document_agent(state):
         if str(state.get("approval_pending_scope", "") or "").strip() == "deep_research_confirmation":
             state["approval_request"] = {}
 
+    auto_approve_subplan = bool(state.get("auto_approve", False)) or bool(state.get("auto_approve_plan", False))
+
     approved_outline = state.get("long_document_outline", {})
     if not isinstance(approved_outline, dict):
         approved_outline = {}
+    title = _normalize_title(approved_outline.get("title", ""), title)
     needs_outline_approval = (
         state.get("long_document_plan_status") != "approved"
         or not approved_outline
@@ -4568,6 +6105,7 @@ def long_document_agent(state):
             section_pages=section_pages,
             subtopics=analysis.get("subtopics", []),
         )
+        title = _normalize_title(outline.get("title", ""), title)
         outline_md = _outline_markdown(outline, fallback_title=title)
         subplan_data = _long_document_subplan(outline, objective=objective, target_pages=target_pages, research_model=research_model)
         subplan_md = outline_md.rstrip() + "\n\n" + plan_as_markdown(subplan_data)
@@ -4609,20 +6147,16 @@ def long_document_agent(state):
         state["long_document_plan_data"] = subplan_data
         state["long_document_plan_markdown"] = subplan_md
         state["long_document_plan_version"] = subplan_version
-        state["long_document_plan_waiting_for_approval"] = True
-        state["long_document_plan_status"] = "pending"
-        state["pending_user_input_kind"] = "subplan_approval"
-        state["approval_pending_scope"] = "long_document_plan"
-        state["approval_request"] = approval_request
-        state["pending_user_question"] = approval_request_to_text(approval_request) or approval_prompt
-        state["draft_response"] = state["pending_user_question"]
-        state["_skip_review_once"] = True
-        state["_hold_planned_step_completion_once"] = True
+        state["long_document_outline_md_path"] = outline_storage_path
+        state["long_document_subplan_md_path"] = subplan_storage_path
         state["long_document_replan_requested"] = False
         state["deep_research_result_card"] = {
             "kind": "plan",
+            "status": "approved" if auto_approve_subplan else "pending_approval",
             "title": title,
             "tier": analysis.get("tier", 0),
+            "depth_mode": analysis.get("depth_mode", research_depth_mode),
+            "depth_label": analysis.get("depth_label", research_depth_label),
             "subtopics": analysis.get("subtopics", []),
             "section_count": len(outline.get("sections", [])),
             "formats": output_formats,
@@ -4638,34 +6172,97 @@ def long_document_agent(state):
             "selection_rationale": source_strategy.get("selection_rationale", []),
         }
 
-        update_planning_file(
-            state,
-            status="awaiting_subplan_approval",
-            objective=objective,
-            plan_text=state.get("plan", ""),
-            clarifications=state.get("plan_clarification_questions", []),
-            execution_note=f"Deep research subplan v{subplan_version} generated and queued for approval.",
-        )
-        log_task_update(DEEP_RESEARCH_LABEL, "Prepared a section-by-section deep research plan for approval.", subplan_md)
-        _trace_research_event(
-            state,
-            title="Research section plan prepared",
-            detail=f"Generated a section-by-section plan with {len(outline.get('sections', []))} sections and queued it for approval.",
-            status="completed",
-            metadata={"phase": "planning", "section_count": len(outline.get("sections", [])), "version": subplan_version},
-            subtask="Review section plan",
-        )
-        return publish_agent_output(
-            state,
-            "long_document_agent",
-            state["draft_response"],
-            f"deep_research_subplan_{subplan_version}",
-            recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
-        )
+        if auto_approve_subplan:
+            approved_outline = outline
+            state["long_document_plan_waiting_for_approval"] = False
+            state["long_document_plan_status"] = "approved"
+            state["long_document_execute_from_saved_outline"] = True
+            state["pending_user_input_kind"] = ""
+            state["approval_pending_scope"] = ""
+            state["approval_request"] = {}
+            state["pending_user_question"] = ""
+            state["draft_response"] = _deep_research_subplan_auto_approved_message(
+                title=title,
+                outline=outline,
+                analysis=analysis,
+                target_pages=target_pages,
+                section_pages=section_pages,
+                web_search_enabled=web_search_enabled,
+                outline_storage_path=outline_storage_path,
+                subplan_storage_path=subplan_storage_path,
+                version=subplan_version,
+            )
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Auto-approved section plan v{subplan_version}; continuing to execution.",
+            )
+            if _deep_research_handoff_only_enabled(state):
+                update_planning_file(
+                    state,
+                    status="subplan_auto_approved",
+                    objective=objective,
+                    plan_text=state.get("plan", ""),
+                    clarifications=state.get("plan_clarification_questions", []),
+                    execution_note=(
+                        f"Deep research subplan v{subplan_version} auto-approved and handoff prepared for evidence collection."
+                    ),
+                )
+                _trace_research_event(
+                    state,
+                    title="Research handoff prepared",
+                    detail=(
+                        f"Auto-approved subplan v{subplan_version} and stopped after the brief-to-report handoff."
+                    ),
+                    status="completed",
+                    metadata={"phase": "planning", "section_count": len(outline.get("sections", [])), "version": subplan_version},
+                    subtask="Prepare execution handoff",
+                )
+                return publish_agent_output(
+                    state,
+                    "long_document_agent",
+                    state["draft_response"],
+                    f"deep_research_subplan_{subplan_version}",
+                    recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
+                )
+        else:
+            state["long_document_plan_waiting_for_approval"] = True
+            state["long_document_plan_status"] = "pending"
+            state["pending_user_input_kind"] = "subplan_approval"
+            state["approval_pending_scope"] = "long_document_plan"
+            state["approval_request"] = approval_request
+            state["pending_user_question"] = approval_request_to_text(approval_request) or approval_prompt
+            state["draft_response"] = state["pending_user_question"]
+            state["_skip_review_once"] = True
+            state["_hold_planned_step_completion_once"] = True
+
+        if not auto_approve_subplan:
+            update_planning_file(
+                state,
+                status="awaiting_subplan_approval",
+                objective=objective,
+                plan_text=state.get("plan", ""),
+                clarifications=state.get("plan_clarification_questions", []),
+                execution_note=f"Deep research subplan v{subplan_version} generated and queued for approval.",
+            )
+            log_task_update(DEEP_RESEARCH_LABEL, "Prepared a section-by-section deep research plan for approval.", subplan_md)
+            _trace_research_event(
+                state,
+                title="Research section plan prepared",
+                detail=f"Generated a section-by-section plan with {len(outline.get('sections', []))} sections and queued it for approval.",
+                status="completed",
+                metadata={"phase": "planning", "section_count": len(outline.get("sections", [])), "version": subplan_version},
+                subtask="Review section plan",
+            )
+            return publish_agent_output(
+                state,
+                "long_document_agent",
+                state["draft_response"],
+                f"deep_research_subplan_{subplan_version}",
+                recipients=["orchestrator_agent", "reviewer_agent", "report_agent"],
+            )
     if str(state.get("approval_pending_scope", "") or "").strip() == "long_document_plan":
         state["approval_request"] = {}
 
-    client = OpenAI(api_key=api_key)
     evidence_bank_md = ""
     evidence_sources: list[dict] = []
     evidence_excerpt = ""
@@ -4763,7 +6360,23 @@ def long_document_agent(state):
             )
             log_task_update(DEEP_RESEARCH_LABEL, "Collecting the cross-report evidence bank.")
             if web_search_enabled:
-                search_results = _collect_google_search_evidence(objective, num=int(state.get("long_document_search_results", 10) or 10))
+                log_task_update(
+                    DEEP_RESEARCH_LABEL,
+                    f"Searching the web for shared report evidence via {search_backend}.",
+                )
+                search_results = _collect_google_search_evidence(
+                    objective,
+                    num=int(state.get("long_document_search_results", 10) or 10),
+                    search_backend=search_backend,
+                    progress_callback=lambda url, status, payload, position, total: _log_web_review(
+                        url,
+                        status=status,
+                        position=position,
+                        total=total,
+                        payload=payload,
+                        context="search result website",
+                    ),
+                )
                 _trace_research_event(
                     state,
                     title="Google search results gathered",
@@ -4779,7 +6392,15 @@ def long_document_agent(state):
                         "viewed_urls": _trace_url_list([str(item.get("url", "")).strip() for item in (search_results or {}).get("viewed_pages", [])]),
                         "urls": _trace_url_list([str(item.get("url", "")).strip() for item in (search_results or {}).get("results", [])]),
                     },
-                    subtask="Search for shared report evidence",
+                        subtask="Search for shared report evidence",
+                    )
+                log_task_update(
+                    DEEP_RESEARCH_LABEL,
+                    (
+                        f"Web search gathered {len((search_results or {}).get('results', []))} result(s); "
+                        f"provider={str((search_results or {}).get('provider', '') or 'none')}, "
+                        f"providers_tried={', '.join(list((search_results or {}).get('providers_tried', []) or [])) or 'none'}."
+                    ),
                 )
                 evidence_instructions = str(
                     state.get(
@@ -4799,36 +6420,65 @@ def long_document_agent(state):
                     _kb_grounding_summary(kb_grounding),
                     "Task: Build a source-backed evidence bank with URLs, disagreements, numbers, and explicit citations.",
                 ]
-                evidence_pass = _run_research_pass(
-                    client,
-                    query="\n".join(line for line in evidence_query_lines if str(line).strip()),
-                    model=research_model,
-                    instructions=evidence_instructions,
-                    max_tool_calls=max_tool_calls,
-                    max_output_tokens=max_output_tokens_int,
-                    poll_interval_seconds=poll_interval_seconds,
-                    max_wait_seconds=max_wait_seconds,
-                    heartbeat_interval_seconds=heartbeat_seconds,
-                    heartbeat_label="Evidence bank research in progress",
-                    heartbeat_callback=lambda elapsed: _trace_research_event(
-                        state,
-                        title="Collecting evidence bank",
-                        detail=f"Shared evidence bank research still running ({elapsed}s elapsed).",
-                        command=objective,
-                        status="running",
-                        metadata={"phase": "evidence_bank", "elapsed_seconds": elapsed},
-                        subtask="Build cross-report evidence bank",
-                    ),
-                    cancel_check=lambda: _raise_if_cancelled(state, phase="evidence_bank"),
-                )
+                if native_web_search_enabled:
+                    evidence_pass = _run_research_pass(
+                        OpenAI(api_key=api_key),
+                        query="\n".join(line for line in evidence_query_lines if str(line).strip()),
+                        model=research_model,
+                        instructions=evidence_instructions,
+                        max_tool_calls=max_tool_calls,
+                        max_output_tokens=max_output_tokens_int,
+                        poll_interval_seconds=poll_interval_seconds,
+                        max_wait_seconds=max_wait_seconds,
+                        heartbeat_interval_seconds=heartbeat_seconds,
+                        heartbeat_label="Evidence bank research in progress",
+                        heartbeat_callback=lambda elapsed: _trace_research_event(
+                            state,
+                            title="Collecting evidence bank",
+                            detail=f"Shared evidence bank research still running ({elapsed}s elapsed).",
+                            command=objective,
+                            status="running",
+                            metadata={"phase": "evidence_bank", "elapsed_seconds": elapsed},
+                            subtask="Build cross-report evidence bank",
+                        ),
+                        cancel_check=lambda: _raise_if_cancelled(state, phase="evidence_bank"),
+                    )
+                    evidence_sources = _merge_sources(
+                        explicit_source_entries,
+                        _extract_source_entries(evidence_pass, max_sources=max_sources or 60),
+                        max_sources=max_sources or 120,
+                    )
+                    evidence_notes_text = str(evidence_pass.get("output_text", "")).strip()
+                else:
+                    evidence_pass = {
+                        "response_id": "kendr_search_evidence_bank",
+                        "status": "fallback_web_search",
+                        "elapsed_seconds": 0,
+                        "output_text": _build_local_only_research_notes(
+                            objective=objective,
+                            focus="overall report evidence bank",
+                            local_entries=local_entries,
+                            url_entries=url_entries,
+                        ),
+                        "raw": {
+                            "reason": "native_web_search_unavailable",
+                            "search_provider": str((search_results or {}).get("provider", "")).strip(),
+                            "search_providers_tried": list((search_results or {}).get("providers_tried", []) or []),
+                        },
+                    }
+                    evidence_sources = _merge_sources(
+                        explicit_source_entries,
+                        _sources_from_kb_grounding(kb_grounding),
+                        max_sources=max_sources or 120,
+                    )
+                    evidence_sources = _merge_sources(
+                        evidence_sources,
+                        _sources_from_search_results(search_results.get("results", [])),
+                        max_sources=max_sources or 120,
+                    )
+                    evidence_notes_text = str(evidence_pass.get("output_text", "")).strip()
                 evidence_pass["research_kb"] = kb_grounding
                 evidence_pass["research_kb_warning"] = kb_warning
-                evidence_sources = _merge_sources(
-                    explicit_source_entries,
-                    _extract_source_entries(evidence_pass, max_sources=max_sources or 60),
-                    max_sources=max_sources or 120,
-                )
-                evidence_notes_text = str(evidence_pass.get("output_text", "")).strip()
             else:
                 search_results = {"results": [], "error": "Web search disabled by user."}
                 evidence_pass = {
@@ -4876,13 +6526,13 @@ def long_document_agent(state):
             if url_entries:
                 write_text_file(_artifact_file(artifact_dir, "provided_url_sources.json"), json.dumps(url_entries, indent=2, ensure_ascii=False))
             state["long_document_sources_collected"] = True
-            state["long_document_evidence_bank_path"] = f"{OUTPUT_DIR}/{evidence_md_filename}"
-            state["long_document_evidence_bank_json_path"] = f"{OUTPUT_DIR}/{evidence_json_filename}"
+            state["long_document_evidence_bank_path"] = _output_file_path(evidence_md_filename)
+            state["long_document_evidence_bank_json_path"] = _output_file_path(evidence_json_filename)
             evidence_excerpt = _trim_text(evidence_bank_md, 18000)
             state["long_document_evidence_bank_excerpt"] = evidence_excerpt
             state["long_document_evidence_sources"] = evidence_sources
             evidence_status = str(evidence_pass.get("status", "")).strip() or "completed"
-            evidence_completed = "completed" if evidence_status in {"completed", "local_only", "evidence_bank"} else "failed"
+            evidence_completed = "completed" if evidence_status in {"completed", "local_only", "evidence_bank", "fallback_web_search"} else "failed"
             evidence_detail = (
                 f"Evidence bank ready with {len(evidence_sources)} consolidated sources."
                 if evidence_completed == "completed"
@@ -4926,7 +6576,7 @@ def long_document_agent(state):
 
     research_log_lines = [
         f"Tier {analysis.get('tier', 0)} analysis confirmed.",
-        f"Target pages: {target_pages}",
+        f"Research depth: {analysis.get('depth_label', research_depth_label)}",
         f"Output formats: {', '.join(output_formats)}",
         f"Citation style: {citation_style.upper()}",
         f"Plagiarism check: {'enabled' if plagiarism_enabled else 'disabled'}",
@@ -4937,9 +6587,26 @@ def long_document_agent(state):
     section_outputs: list[dict] = []
     section_packages: list[dict] = []
     all_section_images: list[dict] = []
-    image_collection_enabled = web_search_enabled and bool(os.getenv("SERP_API_KEY", "").strip())
-    if not image_collection_enabled:
-        log_task_update(DEEP_RESEARCH_LABEL, "Image collection disabled (requires web search + SERP_API_KEY).")
+    image_collection_enabled = not disable_visuals and bool(state.get("long_document_enable_source_images", True))
+    image_search_fallback_enabled = bool(state.get("long_document_image_search_fallback", False))
+    image_vision_verification_enabled = bool(state.get("long_document_verify_source_images", True))
+    if image_collection_enabled:
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            "Image collection enabled: preferring source-grounded images from reviewed web pages.",
+        )
+        if image_vision_verification_enabled:
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                "Vision verification is enabled for downloaded images when a vision backend is available.",
+            )
+        if image_search_fallback_enabled:
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                "External image-search fallback is enabled if no grounded page image qualifies.",
+            )
+    else:
+        log_task_update(DEEP_RESEARCH_LABEL, "Image collection disabled.")
     coherence_context_md = _coherence_base_context(state, objective)
     write_text_file(_artifact_file(artifact_dir, "deep_research_coherence_base.md"), coherence_context_md)
 
@@ -5045,6 +6712,7 @@ def long_document_agent(state):
                         continuity_notes=continuity_notes,
                         coherence_context_md=coherence_context_md,
                         web_search_enabled=web_search_enabled,
+                        native_web_search_enabled=native_web_search_enabled,
                         research_model=research_model,
                         research_instructions=research_instructions,
                         max_tool_calls=max_tool_calls,
@@ -5106,6 +6774,7 @@ def long_document_agent(state):
                         continuity_notes=continuity_notes,
                         coherence_context_md=coherence_context_md,
                         web_search_enabled=web_search_enabled,
+                        native_web_search_enabled=native_web_search_enabled,
                         research_model=research_model,
                         research_instructions=research_instructions,
                         max_tool_calls=max_tool_calls,
@@ -5159,7 +6828,23 @@ def long_document_agent(state):
         section_search_text = ""
         if use_section_search:
             search_query = f"{section_title} {section_objective}"
-            section_search_results = _collect_google_search_evidence(search_query, num=section_search_results_count)
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                f"Searching the web for section {index} via {search_backend}: {section_title}",
+            )
+            section_search_results = _collect_google_search_evidence(
+                search_query,
+                num=section_search_results_count,
+                search_backend=search_backend,
+                progress_callback=lambda url, status, payload, position, total: _log_web_review(
+                    url,
+                    status=status,
+                    position=position,
+                    total=total,
+                    payload=payload,
+                    context="search result website",
+                ),
+            )
             _trace_research_event(
                 state,
                 title=f"Google search results for section {index}",
@@ -5178,6 +6863,14 @@ def long_document_agent(state):
                     "urls": _trace_url_list([str(item.get("url", "")).strip() for item in (section_search_results or {}).get("results", [])]),
                 },
                 subtask=f"Search for {section_title}",
+            )
+            log_task_update(
+                DEEP_RESEARCH_LABEL,
+                (
+                    f"Section {index} web search gathered {len((section_search_results or {}).get('results', []))} result(s); "
+                    f"provider={str((section_search_results or {}).get('provider', '') or 'none')}, "
+                    f"providers_tried={', '.join(list((section_search_results or {}).get('providers_tried', []) or [])) or 'none'}."
+                ),
             )
             if isinstance(section_search_results, dict) and str(section_search_results.get("error", "")).strip():
                 log_task_update(
@@ -5312,6 +7005,13 @@ def long_document_agent(state):
         )
         write_text_file(_artifact_file(artifact_dir, f"section_{index:02d}/sources.json"), json.dumps(section_sources, indent=2, ensure_ascii=False))
         write_text_file(_artifact_file(artifact_dir, f"section_{index:02d}/sources.md"), _references_markdown(section_sources))
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            (
+                f"Saved section {index}/{total_sections} research bundle: {section_title} "
+                f"({len(section_sources)} sources)."
+            ),
+        )
         section_packages.append(
             {
                 "index": index,
@@ -5436,8 +7136,8 @@ def long_document_agent(state):
                     "continuity_note": note,
                     "references": package.get("sources", []),
                     "visual_assets": visual_assets,
-                    "visual_assets_file": f"{OUTPUT_DIR}/{visual_assets_json_filename}",
-                    "visual_assets_markdown_file": f"{OUTPUT_DIR}/{visual_assets_md_filename}",
+                    "visual_assets_file": _output_file_path(visual_assets_json_filename),
+                    "visual_assets_markdown_file": _output_file_path(visual_assets_md_filename),
                     "flowchart_files": flowchart_files,
                     "section_images": section_images,
                 }
@@ -5516,7 +7216,8 @@ def long_document_agent(state):
         )
         section_text = llm_text(section_prompt).strip()
         if not section_text:
-            section_text = f"## {section_title}\n\nNo section text was generated."
+            section_text = "No section text was generated."
+        section_text = _strip_leading_section_heading(section_text, section_title=section_title, section_index=write_index)
         section_text = _ensure_section_citations(section_text, package.get("sources", []))
         existing_tables = _extract_markdown_tables(section_text)
         existing_flowcharts = _extract_mermaid_blocks(section_text)
@@ -5565,10 +7266,13 @@ def long_document_agent(state):
                     section_title=section_title,
                     section_objective=str(package.get("objective", objective)),
                     section_text=section_text,
+                    section_sources=package.get("sources", []) if isinstance(package.get("sources"), list) else [],
                     artifact_dir=artifact_dir,
                     section_index=write_index,
                     max_images=int(state.get("long_document_max_images_per_section", 3)),
                     search_num=int(state.get("long_document_image_search_num", 12)),
+                    fallback_to_search=image_search_fallback_enabled,
+                    verify_with_vision=image_vision_verification_enabled,
                 )
                 all_section_images.extend(section_images)
                 _trace_research_event(
@@ -5617,6 +7321,13 @@ def long_document_agent(state):
                 ensure_ascii=False,
             ),
         )
+        log_task_update(
+            DEEP_RESEARCH_LABEL,
+            (
+                f"Saved section {write_index}/{len(ordered_packages)} artifacts: {section_title} "
+                f"→ {_output_file_path(section_md_filename)}"
+            ),
+        )
 
         note = _section_continuity_note(section_title, section_text)
         continuity_notes.append(f"{section_title}:\n{note}")
@@ -5644,8 +7355,8 @@ def long_document_agent(state):
                 "continuity_note": note,
                 "references": package.get("sources", []),
                 "visual_assets": visual_assets,
-                "visual_assets_file": f"{OUTPUT_DIR}/{visual_assets_json_filename}",
-                "visual_assets_markdown_file": f"{OUTPUT_DIR}/{visual_assets_md_filename}",
+                "visual_assets_file": _output_file_path(visual_assets_json_filename),
+                "visual_assets_markdown_file": _output_file_path(visual_assets_md_filename),
                 "flowchart_files": flowchart_files,
                 "section_images": section_images,
             }
@@ -5798,15 +7509,12 @@ Section continuity notes:
         )
     else:
         log_task_update(DEEP_RESEARCH_LABEL, "Plagiarism check disabled — skipping.")
-    plagiarism_sources = [{"label": "Evidence bank", "url": "", "text": evidence_bank_md}]
-    for package in section_packages:
-        plagiarism_sources.append(
-            {
-                "label": str(package.get("title", "")).strip() or "Section research",
-                "url": "",
-                "text": str(package.get("research_text", "")).strip(),
-            }
-        )
+    plagiarism_sources = _build_plagiarism_source_texts(
+        evidence_bank_md=evidence_bank_md,
+        section_packages=section_packages,
+        local_entries=local_entries,
+        url_entries=url_entries,
+    )
     plagiarism_report = (
         _build_plagiarism_report(section_outputs, plagiarism_sources)
         if plagiarism_enabled
@@ -5862,11 +7570,12 @@ Section continuity notes:
     )
     compiled_filename = _artifact_file(artifact_dir, "deep_research_report.md")
     write_text_file(compiled_filename, compiled_markdown)
+    compiled_path = _output_file_path(compiled_filename)
     compiled_chars = len(compiled_markdown)
     compiled_words = len(compiled_markdown.split())
     log_task_update(
         DEEP_RESEARCH_LABEL,
-        f"Compiled markdown written: {compiled_words} words, {compiled_chars} chars → {OUTPUT_DIR}/{compiled_filename}",
+        f"Compiled markdown written: {compiled_words} words, {compiled_chars} chars → {compiled_path}",
     )
     _trace_research_event(
         state,
@@ -5979,30 +7688,48 @@ Section continuity notes:
             metadata={"phase": "coverage_gap", "gap": gap},
             subtask="Review research coverage gaps",
         )
-    report_alias_md = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'report.md')}"
-    report_alias_html = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'report.html')}"
-    report_alias_pdf = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'report.pdf')}"
-    report_alias_docx = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'report.docx')}"
-    alias_results = {
-        "md": _copy_artifact_alias(f"{OUTPUT_DIR}/{compiled_filename}", report_alias_md),
+    report_alias_md = _output_file_path(_artifact_file(artifact_dir, "report.md"))
+    report_alias_html = _output_file_path(_artifact_file(artifact_dir, "report.html"))
+    report_alias_pdf = _output_file_path(_artifact_file(artifact_dir, "report.pdf"))
+    report_alias_docx = _output_file_path(_artifact_file(artifact_dir, "report.docx"))
+    nested_alias_results = {
+        "md": _copy_artifact_alias(compiled_path, report_alias_md),
         "html": _copy_artifact_alias(export_paths.get("html", ""), report_alias_html),
         "pdf": _copy_artifact_alias(export_paths.get("pdf", ""), report_alias_pdf),
         "docx": _copy_artifact_alias(export_paths.get("docx", ""), report_alias_docx),
     }
+    root_report_results = _mirror_root_report_artifacts(compiled_path, export_paths, root_report_dir="reports")
+    if root_report_results:
+        mirrored_formats = ", ".join(fmt.upper() for fmt in ("pdf", "docx", "html", "md") if root_report_results.get(fmt))
+        log_task_update(DEEP_RESEARCH_LABEL, f"Mirrored stable report downloads to run root reports/: {mirrored_formats}.")
+    report_results = {
+        "md": root_report_results.get("md", "") or nested_alias_results.get("md", "") or compiled_path,
+        "html": root_report_results.get("html", "") or nested_alias_results.get("html", "") or export_paths.get("html", ""),
+        "pdf": root_report_results.get("pdf", "") or nested_alias_results.get("pdf", "") or export_paths.get("pdf", ""),
+        "docx": root_report_results.get("docx", "") or nested_alias_results.get("docx", "") or export_paths.get("docx", ""),
+    }
     created_artifacts = [
-        {"name": "report.md", "path": alias_results.get("md", "") or f"{OUTPUT_DIR}/{compiled_filename}", "kind": "report"},
-        {"name": "source_ledger.json", "path": f"{OUTPUT_DIR}/{source_ledger_filename}", "kind": "evidence"},
-        {"name": "coverage_report.json", "path": f"{OUTPUT_DIR}/{coverage_report_filename}", "kind": "coverage"},
-        {"name": "quality_report.json", "path": f"{OUTPUT_DIR}/{quality_report_filename}", "kind": "quality"},
+        {"name": "report.md", "path": report_results.get("md", "") or compiled_path, "kind": "report"},
+        {"name": "source_ledger.json", "path": _output_file_path(source_ledger_filename), "kind": "evidence"},
+        {"name": "coverage_report.json", "path": _output_file_path(coverage_report_filename), "kind": "coverage"},
+        {"name": "quality_report.json", "path": _output_file_path(quality_report_filename), "kind": "quality"},
         {"name": "evidence_bank.md", "path": state.get("long_document_evidence_bank_path", ""), "kind": "evidence"},
         {"name": "evidence_bank.json", "path": state.get("long_document_evidence_bank_json_path", ""), "kind": "evidence"},
     ]
-    if alias_results.get("pdf"):
-        created_artifacts.append({"name": "report.pdf", "path": alias_results["pdf"], "kind": "report"})
-    if alias_results.get("docx"):
-        created_artifacts.append({"name": "report.docx", "path": alias_results["docx"], "kind": "report"})
-    if alias_results.get("html"):
-        created_artifacts.append({"name": "report.html", "path": alias_results["html"], "kind": "report"})
+    if str(state.get("long_document_source_manifest_path", "")).strip():
+        created_artifacts.append(
+            {"name": "source_manifest.md", "path": state.get("long_document_source_manifest_path", ""), "kind": "manifest"}
+        )
+    if str(state.get("long_document_source_manifest_json_path", "")).strip():
+        created_artifacts.append(
+            {"name": "source_manifest.json", "path": state.get("long_document_source_manifest_json_path", ""), "kind": "manifest"}
+        )
+    if report_results.get("pdf"):
+        created_artifacts.append({"name": "report.pdf", "path": report_results["pdf"], "kind": "report"})
+    if report_results.get("docx"):
+        created_artifacts.append({"name": "report.docx", "path": report_results["docx"], "kind": "report"})
+    if report_results.get("html"):
+        created_artifacts.append({"name": "report.html", "path": report_results["html"], "kind": "report"})
     for artifact in created_artifacts:
         if not str(artifact.get("path", "")).strip():
             continue
@@ -6017,6 +7744,24 @@ Section continuity notes:
         )
     total_images = len(all_section_images)
     manifest_filename = _artifact_file(artifact_dir, "deep_research_manifest.json")
+    manifest_path = _output_file_path(manifest_filename)
+    outline_json_path = _output_file_path(_artifact_file(artifact_dir, "deep_research_outline.json"))
+    outline_md_path = _output_file_path(_artifact_file(artifact_dir, "deep_research_outline.md"))
+    coherence_base_path = _output_file_path(_artifact_file(artifact_dir, "deep_research_coherence_base.md"))
+    coherence_live_path = _output_file_path(_artifact_file(artifact_dir, "deep_research_coherence_live.md"))
+    correlation_briefing_path = _output_file_path(_artifact_file(artifact_dir, "correlation_briefing.md"))
+    knowledge_graph_path = _output_file_path(_artifact_file(artifact_dir, "knowledge_graph.json"))
+    references_md_path = _output_file_path(references_md_filename)
+    references_json_path = _output_file_path(references_json_filename)
+    visual_index_md_path = _output_file_path(visual_index_md_filename)
+    visual_index_json_path = _output_file_path(visual_index_json_filename)
+    plagiarism_json_path = _output_file_path(plagiarism_json_filename)
+    plagiarism_md_path = _output_file_path(plagiarism_md_filename)
+    source_ledger_path = _output_file_path(source_ledger_filename)
+    coverage_report_path = _output_file_path(coverage_report_filename)
+    quality_report_path = _output_file_path(quality_report_filename)
+    intent_path = _output_file_path(intent_json_path)
+    strategy_path = _output_file_path(strategy_json_path)
     write_text_file(
         manifest_filename,
         json.dumps(
@@ -6026,33 +7771,35 @@ Section continuity notes:
                 "tier": analysis.get("tier", 0),
                 "target_pages": target_pages,
                 "section_count": len(section_outputs),
-                "compiled_markdown_file": f"{OUTPUT_DIR}/{compiled_filename}",
-                "report_markdown_file": alias_results.get("md", "") or f"{OUTPUT_DIR}/{compiled_filename}",
-                "report_html_file": alias_results.get("html", "") or export_paths.get("html", ""),
-                "report_docx_file": alias_results.get("docx", "") or export_paths.get("docx", ""),
-                "report_pdf_file": alias_results.get("pdf", "") or export_paths.get("pdf", ""),
-                "outline_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_outline.json')}",
-                "outline_markdown_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_outline.md')}",
-                "coherence_base_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_base.md')}",
-                "coherence_live_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_live.md')}",
-                "correlation_briefing_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'correlation_briefing.md')}",
-                "knowledge_graph_file": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'knowledge_graph.json')}",
-                "references_markdown_file": f"{OUTPUT_DIR}/{references_md_filename}",
-                "references_json_file": f"{OUTPUT_DIR}/{references_json_filename}",
-                "visual_index_markdown_file": f"{OUTPUT_DIR}/{visual_index_md_filename}",
-                "visual_index_json_file": f"{OUTPUT_DIR}/{visual_index_json_filename}",
-                "plagiarism_report_json": f"{OUTPUT_DIR}/{plagiarism_json_filename}",
-                "plagiarism_report_markdown": f"{OUTPUT_DIR}/{plagiarism_md_filename}",
-                "source_ledger_file": f"{OUTPUT_DIR}/{source_ledger_filename}",
-                "coverage_report_file": f"{OUTPUT_DIR}/{coverage_report_filename}",
-                "quality_report_file": f"{OUTPUT_DIR}/{quality_report_filename}",
+                "compiled_markdown_file": compiled_path,
+                "report_markdown_file": report_results.get("md", "") or compiled_path,
+                "report_html_file": report_results.get("html", "") or export_paths.get("html", ""),
+                "report_docx_file": report_results.get("docx", "") or export_paths.get("docx", ""),
+                "report_pdf_file": report_results.get("pdf", "") or export_paths.get("pdf", ""),
+                "outline_file": outline_json_path,
+                "outline_markdown_file": outline_md_path,
+                "coherence_base_file": coherence_base_path,
+                "coherence_live_file": coherence_live_path,
+                "correlation_briefing_file": correlation_briefing_path,
+                "knowledge_graph_file": knowledge_graph_path,
+                "references_markdown_file": references_md_path,
+                "references_json_file": references_json_path,
+                "visual_index_markdown_file": visual_index_md_path,
+                "visual_index_json_file": visual_index_json_path,
+                "plagiarism_report_json": plagiarism_json_path,
+                "plagiarism_report_markdown": plagiarism_md_path,
+                "source_ledger_file": source_ledger_path,
+                "coverage_report_file": coverage_report_path,
+                "quality_report_file": quality_report_path,
                 "compiled_html_file": export_paths.get("html", ""),
                 "compiled_docx_file": export_paths.get("docx", ""),
                 "compiled_pdf_file": export_paths.get("pdf", ""),
                 "evidence_bank_file": state.get("long_document_evidence_bank_path", ""),
                 "evidence_bank_json_file": state.get("long_document_evidence_bank_json_path", ""),
-                "intent_file": f"{OUTPUT_DIR}/{intent_json_path}",
-                "source_strategy_file": f"{OUTPUT_DIR}/{strategy_json_path}",
+                "source_manifest_file": state.get("long_document_source_manifest_path", ""),
+                "source_manifest_json_file": state.get("long_document_source_manifest_json_path", ""),
+                "intent_file": intent_path,
+                "source_strategy_file": strategy_path,
                 "created_artifacts": created_artifacts,
                 "image_gallery_count": total_images,
                 "image_gallery": [
@@ -6100,35 +7847,50 @@ Section continuity notes:
             subtask="Build image gallery appendix",
         )
 
+    downloadable_report_formats: list[str] = []
+    if report_results.get("pdf"):
+        downloadable_report_formats.append("PDF")
+    if report_results.get("docx"):
+        downloadable_report_formats.append("DOCX")
+    if report_results.get("html"):
+        downloadable_report_formats.append("HTML")
+    downloadable_report_formats.append("MD")
+    export_issue_line = f"- Export issues: {'; '.join(export_errors)}\n" if export_errors else ""
+    artifact_summary_lines = render_artifact_lines(
+        [
+            ("Artifact bundle", _output_file_path(artifact_dir)),
+            ("Markdown report", report_results.get("md", "") or compiled_path),
+            ("PDF report", report_results.get("pdf", "")),
+            ("DOCX report", report_results.get("docx", "")),
+            ("HTML report", report_results.get("html", "")),
+            ("Source manifest", state.get("long_document_source_manifest_path", "")),
+            ("Research manifest", manifest_path),
+        ],
+        output_root=OUTPUT_DIR,
+    )
+    artifact_summary_block = "".join(f"{line}\n" for line in artifact_summary_lines)
+
     final_summary = (
         f"Deep research pipeline completed.\n"
         f"- Title: {title}\n"
         f"- Tier: {analysis.get('tier', 0)}\n"
-        f"- Target pages: {target_pages}\n"
+        f"- Research depth: {analysis.get('depth_label', research_depth_label)}\n"
         f"- Sections produced: {len(section_outputs)}\n"
         f"- Words: {total_words}\n"
         f"- Sources: {total_sources}\n"
-        f"- Web search: {'enabled' if web_search_enabled else 'disabled'}\n"
+        f"- Web search: {'disabled' if not web_search_enabled else 'enabled via native model web search' if native_web_search_enabled else 'enabled via Kendr search client'}\n"
         f"- Local file sources: {len(local_entries)}\n"
         f"- Explicit URL sources: {len(url_entries)}\n"
         f"- Knowledge base: {str(kb_grounding.get('kb_name', '') or 'disabled') if research_kb_enabled else 'disabled'}\n"
         f"- Knowledge base hits: {int(kb_grounding.get('hit_count', 0) or 0)}\n"
         f"- Citations: {len(consolidated_references)}\n"
         f"- Plagiarism: {plagiarism_report.get('overall_score', 0)}% ({plagiarism_report.get('status', 'PASS')})\n"
-        f"- Compiled markdown: {OUTPUT_DIR}/{compiled_filename}\n"
-        f"- Compiled HTML: {export_paths.get('html', 'n/a') or 'n/a'}\n"
-        f"- Compiled DOCX: {export_paths.get('docx', 'n/a') or 'n/a'}\n"
-        f"- Compiled PDF: {export_paths.get('pdf', 'n/a') or 'n/a'}\n"
-        f"- References: {OUTPUT_DIR}/{references_md_filename}\n"
-        f"- Visual index: {OUTPUT_DIR}/{visual_index_md_filename}\n"
-        f"- Plagiarism report: {OUTPUT_DIR}/{plagiarism_json_filename}\n"
-        f"- Evidence bank: {state.get('long_document_evidence_bank_path', 'n/a')}\n"
-        f"- Source ledger: {OUTPUT_DIR}/{source_ledger_filename}\n"
-        f"- Coverage report: {OUTPUT_DIR}/{coverage_report_filename}\n"
-        f"- Quality report: {OUTPUT_DIR}/{quality_report_filename}\n"
+        f"- Report downloads in chat: {', '.join(downloadable_report_formats)}\n"
+        f"{artifact_summary_block}"
+        f"- Supporting research files: source_manifest.md, deep_research_references.md, evidence_bank.md, source_ledger.json, coverage_report.json, quality_report.json\n"
         f"- Visual assets generated: {total_tables} tables, {total_flowcharts} flowcharts\n"
         f"- Web images collected: {total_images} (Appendix D)\n"
-        f"- Manifest: {OUTPUT_DIR}/{manifest_filename}\n"
+        f"{export_issue_line}"
         "\nExecutive summary:\n"
         f"{_trim_text(executive_summary, 1800)}\n"
     )
@@ -6157,20 +7919,24 @@ Section continuity notes:
         }
         for item in section_outputs
     ]
-    state["long_document_artifact_dir"] = f"{OUTPUT_DIR}/{artifact_dir}"
-    state["long_document_compiled_path"] = f"{OUTPUT_DIR}/{compiled_filename}"
+    state["long_document_artifact_dir"] = _output_file_path(artifact_dir)
+    state["long_document_compiled_path"] = compiled_path
     state["long_document_compiled_html_path"] = export_paths.get("html", "")
     state["long_document_compiled_docx_path"] = export_paths.get("docx", "")
     state["long_document_compiled_pdf_path"] = export_paths.get("pdf", "")
-    state["long_document_manifest_path"] = f"{OUTPUT_DIR}/{manifest_filename}"
-    state["long_document_outline_md_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_outline.md')}"
-    state["long_document_coherence_base_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_base.md')}"
-    state["long_document_coherence_live_path"] = f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'deep_research_coherence_live.md')}"
-    state["long_document_references_path"] = f"{OUTPUT_DIR}/{references_md_filename}"
-    state["long_document_references_json_path"] = f"{OUTPUT_DIR}/{references_json_filename}"
+    state["deep_research_root_report_dir"] = _output_file_path("reports")
+    state["deep_research_root_report_paths"] = dict(report_results)
+    state["long_document_manifest_path"] = manifest_path
+    state["long_document_source_manifest_path"] = str(state.get("long_document_source_manifest_path", "") or "")
+    state["long_document_source_manifest_json_path"] = str(state.get("long_document_source_manifest_json_path", "") or "")
+    state["long_document_outline_md_path"] = outline_md_path
+    state["long_document_coherence_base_path"] = coherence_base_path
+    state["long_document_coherence_live_path"] = coherence_live_path
+    state["long_document_references_path"] = references_md_path
+    state["long_document_references_json_path"] = references_json_path
     state["long_document_references"] = consolidated_references
-    state["long_document_visual_index_path"] = f"{OUTPUT_DIR}/{visual_index_md_filename}"
-    state["long_document_visual_index_json_path"] = f"{OUTPUT_DIR}/{visual_index_json_filename}"
+    state["long_document_visual_index_path"] = visual_index_md_path
+    state["long_document_visual_index_json_path"] = visual_index_json_path
     state["long_document_summary"] = executive_summary
     state["long_document_evidence_sources"] = evidence_sources or explicit_source_entries
     state["research_kb_used"] = bool(research_kb_enabled and int(kb_grounding.get("hit_count", 0) or 0) > 0)
@@ -6185,14 +7951,18 @@ Section continuity notes:
     state["deep_research_coverage_report"] = coverage_report
     state["deep_research_quality_report"] = quality_report
     state["deep_research_artifacts_manifest"] = {
-        "artifact_dir": f"{OUTPUT_DIR}/{artifact_dir}",
-        "manifest_path": f"{OUTPUT_DIR}/{manifest_filename}",
+        "artifact_dir": _output_file_path(artifact_dir),
+        "manifest_path": manifest_path,
+        "root_report_dir": _output_file_path("reports"),
+        "root_report_paths": dict(report_results),
         "created_artifacts": created_artifacts,
     }
     state["deep_research_result_card"] = {
         "kind": "result",
         "title": title,
         "tier": analysis.get("tier", 0),
+        "depth_mode": analysis.get("depth_mode", research_depth_mode),
+        "depth_label": analysis.get("depth_label", research_depth_label),
         "pages": target_pages,
         "words": total_words,
         "sources": total_sources,
@@ -6221,27 +7991,36 @@ Section continuity notes:
         "why_selected": dict(source_strategy.get("selection_notes", {}) or {}),
         "why_skipped": dict(source_strategy.get("skip_notes", {}) or {}),
         "formats": output_formats,
-        "report_path": f"{OUTPUT_DIR}/{compiled_filename}",
+        "report_path": compiled_path,
         "html_path": export_paths.get("html", ""),
         "docx_path": export_paths.get("docx", ""),
         "pdf_path": export_paths.get("pdf", ""),
-        "report_md_path": alias_results.get("md", "") or f"{OUTPUT_DIR}/{compiled_filename}",
-        "report_docx_path": alias_results.get("docx", "") or export_paths.get("docx", ""),
-        "report_pdf_path": alias_results.get("pdf", "") or export_paths.get("pdf", ""),
-        "knowledge_graph_path": f"{OUTPUT_DIR}/{_artifact_file(artifact_dir, 'knowledge_graph.json')}",
-        "plagiarism_report_path": f"{OUTPUT_DIR}/{plagiarism_json_filename}",
-        "raw_json_path": f"{OUTPUT_DIR}/{manifest_filename}",
-        "source_ledger_path": f"{OUTPUT_DIR}/{source_ledger_filename}",
-        "coverage_report_path": f"{OUTPUT_DIR}/{coverage_report_filename}",
-        "quality_report_path": f"{OUTPUT_DIR}/{quality_report_filename}",
+        "report_md_path": report_results.get("md", "") or compiled_path,
+        "report_docx_path": report_results.get("docx", "") or export_paths.get("docx", ""),
+        "report_pdf_path": report_results.get("pdf", "") or export_paths.get("pdf", ""),
+        "report_html_path": report_results.get("html", "") or export_paths.get("html", ""),
+        "root_report_dir": _output_file_path("reports"),
+        "root_report_paths": dict(report_results),
+        "knowledge_graph_path": knowledge_graph_path,
+        "plagiarism_report_path": plagiarism_json_path,
+        "raw_json_path": manifest_path,
+        "source_manifest_path": state.get("long_document_source_manifest_path", ""),
+        "source_manifest_json_path": state.get("long_document_source_manifest_json_path", ""),
+        "source_ledger_path": source_ledger_path,
+        "coverage_report_path": coverage_report_path,
+        "quality_report_path": quality_report_path,
         "coverage_status": coverage_report.get("status", ""),
         "coverage_gaps": coverage_report.get("gaps", []),
         "coverage_revisit_plan": coverage_report.get("revisit_plan", []),
         "failed_extractions": coverage_report.get("failed_extractions", []),
+        "discovered_files": int(local_manifest.get("file_count", 0) or 0),
+        "selected_local_files": int(local_manifest.get("selected_file_count", 0) or 0),
         "quality_status": quality_report.get("status", ""),
         "quality_flags": quality_report.get("flags", []),
         "created_artifacts": created_artifacts,
+        "downloadable_reports": [artifact for artifact in created_artifacts if artifact.get("kind") == "report"],
         "export_errors": export_errors,
+        "web_search_mode": web_search_mode,
         "image_count": total_images,
         "images": [
             {"section": e.get("section_title", ""), "file": e.get("filename", ""), "path": e.get("abs_path", "")}

@@ -6996,9 +6996,9 @@ const initialState = {
   // App mode
   appMode: (() => {
     try {
-      return localStorage.getItem("kendr:appMode") || "developer";
+      return localStorage.getItem("kendr:appMode") || "studio";
     } catch {
-      return "developer";
+      return "studio";
     }
   })(),
   selectedModel: (() => {
@@ -7009,7 +7009,7 @@ const initialState = {
     }
   })(),
   // Views & panels
-  activeView: "home",
+  activeView: "studio",
   sidebarOpen: true,
   chatOpen: true,
   terminalOpen: false,
@@ -7032,6 +7032,7 @@ const initialState = {
   streaming: false,
   // Runs
   runs: [],
+  activityFeed: [],
   // Git
   gitStatus: null,
   gitBranch: "main",
@@ -7039,6 +7040,27 @@ const initialState = {
   commandPaletteOpen: false,
   // Settings (loaded from electron-store)
   settings: {},
+  updateStatus: {
+    supported: false,
+    enabled: true,
+    configured: false,
+    invalidFeedUrl: false,
+    status: "idle",
+    currentVersion: null,
+    availableVersion: null,
+    downloadedVersion: null,
+    checkedAt: null,
+    progress: null,
+    channel: "latest",
+    feedUrl: "",
+    feedSource: "none",
+    autoDownload: true,
+    autoInstallOnQuit: true,
+    allowPrerelease: false,
+    intervalMinutes: 240,
+    error: null,
+    message: ""
+  },
   // Shared model/provider inventory cache
   modelInventory: null,
   modelInventoryLoading: false,
@@ -7124,6 +7146,25 @@ function reducer(state, action) {
       return { ...state, activeRunId: action.runId };
     case "SET_RUNS":
       return { ...state, runs: action.runs };
+    case "UPSERT_ACTIVITY_ENTRY": {
+      const entry = action.entry;
+      if (!entry?.id) return state;
+      const existing = state.activityFeed.filter((item) => item.id !== entry.id);
+      return {
+        ...state,
+        activityFeed: [entry, ...existing].slice(0, 40)
+      };
+    }
+    case "REMOVE_ACTIVITY_ENTRIES": {
+      const ids = new Set(Array.isArray(action.ids) ? action.ids : []);
+      if (!ids.size) return state;
+      return {
+        ...state,
+        activityFeed: state.activityFeed.filter((item) => !ids.has(item.id))
+      };
+    }
+    case "CLEAR_ACTIVITY_FEED":
+      return { ...state, activityFeed: [] };
     case "SET_GIT_STATUS":
       return { ...state, gitStatus: action.status, gitBranch: action.branch || state.gitBranch };
     case "TOGGLE_COMMAND_PALETTE":
@@ -7132,6 +7173,8 @@ function reducer(state, action) {
       return { ...state, commandPaletteOpen: action.open };
     case "SET_SETTINGS":
       return { ...state, settings: { ...state.settings, ...action.settings } };
+    case "SET_UPDATE_STATUS":
+      return { ...state, updateStatus: { ...state.updateStatus, ...action.status } };
     case "SET_MODEL_INVENTORY_LOADING":
       return { ...state, modelInventoryLoading: action.loading, modelInventoryError: action.loading ? false : state.modelInventoryError };
     case "SET_MODEL_INVENTORY":
@@ -7247,6 +7290,22 @@ function AppProvider({ children }) {
     });
     const unsub = api.backend.onStatusChange((status) => {
       dispatch({ type: "SET_BACKEND_SERVICES", services: status });
+    });
+    return () => {
+      try {
+        unsub?.();
+      } catch (_2) {
+      }
+    };
+  }, []);
+  reactExports.useEffect(() => {
+    const api = window.kendrAPI;
+    if (!api?.updates) return;
+    api.updates.status().then((status) => {
+      if (status) dispatch({ type: "SET_UPDATE_STATUS", status });
+    });
+    const unsub = api.updates.onStatusChange((status) => {
+      dispatch({ type: "SET_UPDATE_STATUS", status });
     });
     return () => {
       try {
@@ -7439,6 +7498,7 @@ const COMMANDS = [
   { id: "view-runs", label: "View: Runs", keys: "" },
   { id: "view-settings", label: "View: Settings", keys: "" },
   { id: "view-developer", label: "View: Developer Workspace", keys: "" },
+  { id: "view-about", label: "View: About Kendr", keys: "" },
   { id: "open-folder", label: "Open Folder…", keys: "" },
   { id: "start-backend", label: "Backend: Start", keys: "" },
   { id: "restart-backend", label: "Backend: Restart", keys: "" },
@@ -7490,6 +7550,9 @@ function CommandPalette() {
         break;
       case "view-developer":
         dispatch({ type: "SET_VIEW", view: "developer" });
+        break;
+      case "view-about":
+        dispatch({ type: "SET_VIEW", view: "about" });
         break;
       case "open-folder": {
         const dir = await api?.dialog.openDirectory();
@@ -7614,18 +7677,26 @@ function useMenuDefs() {
     {
       label: "View",
       items: [
-        { label: "Developer Workspace", shortcut: "Ctrl+Shift+J", action: () => dispatch({ type: "SET_VIEW", view: "developer" }) },
+        { label: "Build Workspace", shortcut: "Ctrl+Shift+J", action: () => dispatch({ type: "SET_VIEW", view: "developer" }) },
         { sep: true },
-        { label: "Home", action: () => {
-          dispatch({ type: "SET_VIEW", view: "home" });
-          dispatch({ type: "SET_SIDEBAR", open: true });
-        } },
         { label: "Studio", action: () => {
           dispatch({ type: "SET_VIEW", view: "studio" });
           dispatch({ type: "SET_SIDEBAR", open: true });
         } },
-        { label: "Build", action: () => {
+        { label: "Build Workspace", action: () => {
+          dispatch({ type: "SET_VIEW", view: "developer" });
+          dispatch({ type: "SET_SIDEBAR", open: true });
+        } },
+        { label: "Automation & Builders", action: () => {
           dispatch({ type: "SET_VIEW", view: "build" });
+          dispatch({ type: "SET_SIDEBAR", open: true });
+        } },
+        { label: "Machine", action: () => {
+          dispatch({ type: "SET_VIEW", view: "machine" });
+          dispatch({ type: "SET_SIDEBAR", open: true });
+        } },
+        { label: "Memory", action: () => {
+          dispatch({ type: "SET_VIEW", view: "memory" });
           dispatch({ type: "SET_SIDEBAR", open: true });
         } },
         { label: "Integrations", action: () => {
@@ -7634,6 +7705,14 @@ function useMenuDefs() {
         } },
         { label: "Runs", action: () => {
           dispatch({ type: "SET_VIEW", view: "runs" });
+          dispatch({ type: "SET_SIDEBAR", open: true });
+        } },
+        { label: "Marketplace", action: () => {
+          dispatch({ type: "SET_VIEW", view: "marketplace" });
+          dispatch({ type: "SET_SIDEBAR", open: true });
+        } },
+        { label: "Settings", action: () => {
+          dispatch({ type: "SET_VIEW", view: "settings" });
           dispatch({ type: "SET_SIDEBAR", open: true });
         } },
         { sep: true },
@@ -7703,7 +7782,7 @@ function useMenuDefs() {
         { label: "Keyboard Shortcuts", shortcut: "Ctrl+Shift+P", action: () => dispatch({ type: "TOGGLE_COMMAND_PALETTE" }) },
         { label: "Model Docs", action: () => dispatch({ type: "SET_VIEW", view: "settings" }) },
         { sep: true },
-        { label: "About Kendr", action: () => window.dispatchEvent(new CustomEvent("kendr:about")) }
+        { label: "About Kendr", action: () => dispatch({ type: "SET_VIEW", view: "about" }) }
       ]
     }
   ];
@@ -7769,6 +7848,207 @@ function MenuBar() {
       )
     ) })
   ] }, menu.label)) });
+}
+function formatErrorMessage(error) {
+  if (!error) return "Unknown renderer failure.";
+  const message = String(error?.message || error || "").trim();
+  return message || "Unknown renderer failure.";
+}
+class RendererErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null, info: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    this.setState({ error, info });
+    try {
+      console.error("RendererErrorBoundary caught an error", error, info);
+    } catch (_2) {
+    }
+  }
+  handleReload = () => {
+    try {
+      window.location.reload();
+    } catch (_2) {
+    }
+  };
+  render() {
+    const { error, info } = this.state;
+    if (!error) return this.props.children;
+    const detail = String(info?.componentStack || "").trim();
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        style: {
+          minHeight: "100vh",
+          display: "grid",
+          placeItems: "center",
+          padding: 24,
+          background: "radial-gradient(circle at top, rgba(232, 117, 88, 0.14), transparent 42%), #0d0f14",
+          color: "#f3f4f6"
+        },
+        children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              width: "min(760px, 100%)",
+              borderRadius: 20,
+              border: "1px solid rgba(255,255,255,0.12)",
+              background: "rgba(15, 23, 42, 0.88)",
+              boxShadow: "0 18px 48px rgba(0,0,0,0.32)",
+              padding: 24
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, letterSpacing: "0.08em", textTransform: "uppercase", color: "#fca5a5", marginBottom: 10 }, children: "Renderer Recovery" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 28, fontWeight: 700, marginBottom: 12 }, children: "Kendr hit a renderer error." }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 15, lineHeight: 1.6, color: "#cbd5e1", marginBottom: 18 }, children: "The app stayed open instead of falling through to a blank screen. Reload the window and try the same action again." }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    borderRadius: 14,
+                    border: "1px solid rgba(252, 165, 165, 0.26)",
+                    background: "rgba(127, 29, 29, 0.22)",
+                    padding: 14,
+                    marginBottom: 18,
+                    fontFamily: "'Cascadia Code', 'Fira Code', monospace",
+                    fontSize: 13,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word"
+                  },
+                  children: [
+                    formatErrorMessage(error),
+                    detail ? `
+
+${detail}` : ""
+                  ]
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  onClick: this.handleReload,
+                  style: {
+                    border: "none",
+                    borderRadius: 10,
+                    background: "#f97316",
+                    color: "#111827",
+                    fontWeight: 700,
+                    padding: "11px 16px",
+                    cursor: "pointer"
+                  },
+                  children: "Reload Kendr"
+                }
+              )
+            ]
+          }
+        )
+      }
+    );
+  }
+}
+function basename$2(filePath) {
+  return String(filePath || "").split(/[\\/]/).pop() || filePath || "file";
+}
+function parentDir(filePath) {
+  const raw = String(filePath || "").trim();
+  if (!raw) return "";
+  const idx = Math.max(raw.lastIndexOf("/"), raw.lastIndexOf("\\"));
+  if (idx <= 0) return raw;
+  return raw.slice(0, idx);
+}
+function classifyDiffLine(line) {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("---") || line.startsWith("+++")) return "meta";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "remove";
+  return "context";
+}
+function countDiffLines(diffText) {
+  let adds = 0;
+  let removes = 0;
+  for (const line of String(diffText || "").split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) adds += 1;
+    if (line.startsWith("-")) removes += 1;
+  }
+  return { adds, removes };
+}
+function GitDiffPreview({ cwd, filePath, onClose, onOpenFile }) {
+  const [loading, setLoading] = reactExports.useState(false);
+  const [diff, setDiff] = reactExports.useState("");
+  const [error, setError] = reactExports.useState("");
+  const targetCwd = reactExports.useMemo(() => String(cwd || "").trim() || parentDir(filePath), [cwd, filePath]);
+  const stats = reactExports.useMemo(() => countDiffLines(diff), [diff]);
+  reactExports.useEffect(() => {
+    if (!filePath) return void 0;
+    let cancelled = false;
+    async function loadDiff() {
+      if (!targetCwd || !window.kendrAPI?.git?.diff) {
+        setDiff("");
+        setError("No git workspace available for diff preview.");
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      setDiff("");
+      setError("");
+      try {
+        const result = await window.kendrAPI.git.diff(targetCwd, filePath);
+        if (cancelled) return;
+        if (result?.error) {
+          setError(String(result.error));
+          setDiff("");
+        } else {
+          setDiff(String(result?.diff || ""));
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setError(String(err?.message || err || "Failed to load diff preview."));
+        setDiff("");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    loadDiff();
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath, targetCwd]);
+  if (!filePath) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "gdp-overlay", onClick: (event) => {
+    if (event.target === event.currentTarget) onClose?.();
+  }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "gdp-sheet", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "gdp-header", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "gdp-header-main", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "gdp-eyebrow", children: "Diff Preview" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "gdp-title", children: basename$2(filePath) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "gdp-path", children: filePath })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "gdp-actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "gdp-btn", onClick: () => onOpenFile?.(filePath), children: "Open file" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "gdp-btn gdp-btn--close", onClick: () => onClose?.(), children: "Close" })
+      ] })
+    ] }),
+    !!diff && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "gdp-stats", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "gdp-stat gdp-stat--add", children: [
+        "+",
+        stats.adds
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "gdp-stat gdp-stat--remove", children: [
+        "-",
+        stats.removes
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "gdp-body", children: loading ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "gdp-empty", children: "Loading diff…" }) : error ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "gdp-empty gdp-empty--error", children: error }) : !diff ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "gdp-empty", children: "No git diff for this file." }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "gdp-code", children: diff.split("\n").map((line, index2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `gdp-line gdp-line--${classifyDiffLine(line)}`, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "gdp-line-no", children: index2 + 1 }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { className: "gdp-line-text", children: line || " " })
+    ] }, `${index2}-${line}`)) }) })
+  ] }) });
 }
 function resolveSelectedModel(selectedModel) {
   const raw = String(selectedModel || "").trim();
@@ -7861,8 +8141,341 @@ function resolveAgentCapability(selectedModel, modelInventory) {
   if (typeof provider?.agent_capable === "boolean" && String(provider?.model || "").trim() === selected.model) return provider.agent_capable;
   return selected.provider !== "ollama";
 }
-function basename(path) {
+function basename$1(path) {
   return String(path || "").split(/[\\/]/).pop() || "";
+}
+function normalizeStageRow(stage) {
+  if (!stage || typeof stage !== "object" || Array.isArray(stage)) return null;
+  return {
+    stage: String(stage.stage || "").trim(),
+    label: String(stage.label || "").trim(),
+    provider: String(stage.provider || "").trim(),
+    model: String(stage.model || "").trim(),
+    reason: String(stage.reason || "").trim()
+  };
+}
+function normalizeStageCandidate(candidate) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const provider = String(candidate.provider || "").trim();
+  const model = String(candidate.model || "").trim();
+  if (!provider || !model) return null;
+  return {
+    stage: String(candidate.stage || "").trim(),
+    label: String(candidate.label || "").trim(),
+    provider,
+    model,
+    value: `${provider}/${model}`,
+    labelFull: String(candidate.label_full || "").trim(),
+    reason: String(candidate.reason || "").trim(),
+    costBand: String(candidate.cost_band || candidate.costBand || "unknown").trim() || "unknown",
+    qualityScore: Number(candidate.quality_score || candidate.qualityScore || 0) || 0
+  };
+}
+function normalizeWorkflowCombo(combo) {
+  if (!combo || typeof combo !== "object" || Array.isArray(combo)) {
+    return {
+      available: false,
+      summary: "",
+      estimatedCostBand: "unknown",
+      estimated_cost_band: "unknown",
+      stages: []
+    };
+  }
+  const estimatedCostBand = String(combo.estimated_cost_band || combo.estimatedCostBand || "unknown").trim() || "unknown";
+  return {
+    available: Boolean(combo.available),
+    summary: String(combo.summary || "").trim(),
+    estimatedCostBand,
+    estimated_cost_band: estimatedCostBand,
+    stages: Array.isArray(combo.stages) ? combo.stages.map(normalizeStageRow).filter(Boolean) : []
+  };
+}
+function normalizeWorkflowStageOptions(stageOptions) {
+  const raw = Array.isArray(stageOptions) ? stageOptions : [];
+  return raw.map((stageOption) => {
+    if (!stageOption || typeof stageOption !== "object" || Array.isArray(stageOption)) return null;
+    return {
+      stage: String(stageOption.stage || "").trim(),
+      label: String(stageOption.label || "").trim(),
+      candidates: Array.isArray(stageOption.candidates) ? stageOption.candidates.map(normalizeStageCandidate).filter(Boolean) : []
+    };
+  }).filter(Boolean);
+}
+function resolveWorkflowRecommendation(modelInventory, workflowId) {
+  const normalizedId = String(workflowId).trim();
+  if (!normalizedId) return null;
+  const payload = modelInventory?.workflow_recommendations;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const workflowList = Array.isArray(payload.workflows) ? payload.workflows : payload.workflows && typeof payload.workflows === "object" && !Array.isArray(payload.workflows) ? Object.values(payload.workflows) : [];
+  const directMatch = workflowList.find((item) => item && typeof item === "object" && !Array.isArray(item) && String(item.id || "").trim() === normalizedId);
+  if (directMatch) return directMatch;
+  const legacyEntry = payload[normalizedId];
+  if (legacyEntry && typeof legacyEntry === "object" && !Array.isArray(legacyEntry)) {
+    return {
+      id: normalizedId,
+      ...legacyEntry
+    };
+  }
+  return null;
+}
+function basename(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const normalized = raw.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : normalized;
+}
+function pushUniqueLabel(list, value, limit = 4) {
+  const next = String(value || "").trim();
+  if (!next || list.some((item) => item.label === next) || list.length >= limit) return;
+  list.push({ label: next, path: "" });
+}
+function pushUniqueItem(list, item, limit = 4) {
+  const label = String(item?.label || "").trim();
+  const path = String(item?.path || "").trim();
+  if (!label || list.length >= limit) return;
+  if (list.some((entry) => entry.label === label && String(entry.path || "").trim() === path)) return;
+  list.push({
+    label,
+    path,
+    name: String(item?.name || label).trim(),
+    kind: String(item?.kind || "").trim(),
+    ext: String(item?.ext || "").trim(),
+    downloadUrl: String(item?.downloadUrl || "").trim(),
+    viewUrl: String(item?.viewUrl || "").trim()
+  });
+}
+function normalizeArtifactItem$1(artifact) {
+  if (!artifact) return null;
+  if (typeof artifact === "string") {
+    const raw = artifact.trim();
+    if (!raw) return null;
+    return {
+      label: basename(raw),
+      name: basename(raw),
+      path: raw,
+      kind: "",
+      ext: raw.includes(".") ? raw.split(".").pop().toLowerCase() : "",
+      downloadUrl: "",
+      viewUrl: ""
+    };
+  }
+  if (typeof artifact !== "object") return null;
+  const path = String(artifact.path || artifact.file_path || "").trim();
+  const name = String(artifact.name || artifact.label || "").trim();
+  const label = name || basename(path);
+  if (!label) return null;
+  const ext = String(artifact.ext || (label.includes(".") ? label.split(".").pop() : "")).trim().toLowerCase();
+  return {
+    label,
+    name: label,
+    path,
+    kind: String(artifact.kind || "").trim().toLowerCase(),
+    ext,
+    downloadUrl: String(artifact.download_url || artifact.downloadUrl || "").trim(),
+    viewUrl: String(artifact.view_url || artifact.viewUrl || "").trim()
+  };
+}
+function extractFileRefs(text) {
+  const raw = String(text || "");
+  if (!raw) return [];
+  const matches = raw.match(/(?:[A-Za-z]:)?[A-Za-z0-9._@\-\\/ ]+\.[A-Za-z0-9]{1,8}/g) || [];
+  const files = [];
+  for (const match of matches) {
+    const rawMatch = match.replace(/^["'`]+|["'`.,:;!?]+$/g, "").trim();
+    const cleaned = basename(rawMatch);
+    if (!cleaned) continue;
+    pushUniqueItem(files, {
+      label: cleaned,
+      path: /[\\/]/.test(rawMatch) || /^[A-Za-z]:/.test(rawMatch) ? rawMatch : ""
+    }, 6);
+  }
+  return files;
+}
+function normalizeChecklistStatus$1(value) {
+  const status = String(value || "").trim().toLowerCase();
+  if (["completed", "done", "success", "ok"].includes(status)) return "completed";
+  if (["running", "in_progress", "started", "active"].includes(status)) return "running";
+  if (["awaiting_approval", "awaiting_input", "awaiting"].includes(status)) return "awaiting";
+  if (["failed", "error"].includes(status)) return "failed";
+  if (["blocked"].includes(status)) return "blocked";
+  if (["skipped"].includes(status)) return "skipped";
+  return status || "pending";
+}
+function extractChecklist$1(result) {
+  if (!result || typeof result !== "object") return [];
+  const shellSteps = Array.isArray(result.shell_plan_steps) ? result.shell_plan_steps : [];
+  if (shellSteps.length) {
+    return shellSteps.map((step, index2) => ({
+      step: Number(step.step || index2 + 1),
+      title: String(step.title || step.description || `Step ${index2 + 1}`).trim() || `Step ${index2 + 1}`,
+      status: normalizeChecklistStatus$1(step.status || (step.done ? "completed" : "pending")),
+      detail: String(step.detail || step.reason || "").trim(),
+      command: String(step.command || "").trim(),
+      stdout: String(step.stdout || "").trim(),
+      stderr: String(step.stderr || "").trim(),
+      reason: String(step.reason || "").trim(),
+      optional: !!step.optional,
+      done: !!step.done || ["completed", "skipped"].includes(normalizeChecklistStatus$1(step.status)),
+      returnCode: step.return_code
+    }));
+  }
+  const planSteps = Array.isArray(result.plan_steps) ? result.plan_steps : [];
+  if (planSteps.length) {
+    const activeIndex = Math.max(0, Number(result.plan_step_index || 0));
+    return planSteps.map((step, index2) => {
+      const rawStatus = normalizeChecklistStatus$1(step.status || "");
+      const status = rawStatus || (index2 < activeIndex ? "completed" : index2 === activeIndex ? "running" : "pending");
+      return {
+        step: index2 + 1,
+        title: String(step.title || step.name || step.description || `Step ${index2 + 1}`).trim() || `Step ${index2 + 1}`,
+        status,
+        detail: String(step.success_criteria || step.description || "").trim(),
+        command: "",
+        stdout: "",
+        stderr: "",
+        reason: String(step.reason || "").trim(),
+        optional: false,
+        done: ["completed", "skipped"].includes(status),
+        returnCode: null
+      };
+    });
+  }
+  return [];
+}
+function isPlanApprovalScope(scope, kind = "", request = null) {
+  const joined = [
+    scope,
+    kind,
+    request?.title,
+    request?.summary,
+    request?.metadata?.approval_mode
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+  return /\bplan\b|project_blueprint|blueprint|deep_research_confirmation/.test(joined);
+}
+function isSkillApproval(kind = "", request = null) {
+  const approvalMode = String(request?.metadata?.approval_mode || "").trim().toLowerCase();
+  const joined = [kind, approvalMode, request?.title].map((value) => String(value || "").toLowerCase()).join(" ");
+  return /\bskill_approval\b|skill permission/.test(joined) || approvalMode === "skill_permission_grant";
+}
+function shouldMirrorActivityMessage(msg) {
+  if (!msg || msg.role !== "assistant") return false;
+  return !!(String(msg.runId || "").trim() || Array.isArray(msg.progress) && msg.progress.length || Array.isArray(msg.checklist) && msg.checklist.length || Array.isArray(msg.steps) && msg.steps.length || Array.isArray(msg.artifacts) && msg.artifacts.length || ["thinking", "streaming", "awaiting", "done", "error"].includes(String(msg.status || "").trim().toLowerCase()));
+}
+function buildActivityEntry(msg, { id: id2, source = "studio" } = {}) {
+  if (!msg || typeof msg !== "object") return null;
+  return {
+    id: String(id2 || msg.id || "").trim(),
+    source,
+    runId: String(msg.runId || "").trim(),
+    mode: String(msg.mode || "").trim(),
+    modeLabel: String(msg.modeLabel || "").trim(),
+    status: String(msg.status || "").trim(),
+    content: String(msg.content || "").trim(),
+    progress: Array.isArray(msg.progress) ? msg.progress : [],
+    checklist: Array.isArray(msg.checklist) ? msg.checklist : [],
+    steps: Array.isArray(msg.steps) ? msg.steps : [],
+    artifacts: Array.isArray(msg.artifacts) ? msg.artifacts : [],
+    approvalRequest: msg.approvalRequest && typeof msg.approvalRequest === "object" ? msg.approvalRequest : null,
+    approvalScope: String(msg.approvalScope || "").trim(),
+    approvalKind: String(msg.approvalKind || "").trim(),
+    approvalState: String(msg.approvalState || "").trim(),
+    statusText: String(msg.statusText || "").trim(),
+    ts: msg.ts || (/* @__PURE__ */ new Date()).toISOString(),
+    runStartedAt: msg.runStartedAt || msg.ts || (/* @__PURE__ */ new Date()).toISOString(),
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function classifyRunActivityKind(item) {
+  if (!item || typeof item !== "object") return "task";
+  const kind = String(item.kind || "").toLowerCase();
+  const title = String(item.title || "").toLowerCase();
+  const detail = String(item.detail || "").toLowerCase();
+  const text = `${kind} ${title} ${detail}`;
+  if (String(item.command || "").trim()) return "command";
+  if (kind.includes("command") || kind.includes("shell")) return "command";
+  if (/\b(search|query|grep|ripgrep|find in files|look up|browse|web search)\b/.test(text)) return "search";
+  if (/\b(read|open|inspect|scan|inventory|load file|review file|explore file)\b/.test(text)) return "read";
+  if (/\b(edit|write|modify|patch|rewrite|update file|create file|save file|refactor)\b/.test(text)) return "edit";
+  if (/\b(test|verify|review|check|lint)\b/.test(text)) return "review";
+  return "task";
+}
+function summarizeRunArtifacts(progress = [], artifacts = []) {
+  const counts = {
+    search: 0,
+    read: 0,
+    edit: 0,
+    artifact: 0,
+    command: 0,
+    review: 0
+  };
+  const samples = {
+    search: [],
+    read: [],
+    edit: [],
+    artifact: [],
+    command: [],
+    review: []
+  };
+  for (const item of Array.isArray(progress) ? progress : []) {
+    const kind = classifyRunActivityKind(item);
+    if (counts[kind] !== void 0) counts[kind] += 1;
+    const candidates = [
+      ...extractFileRefs(item.title),
+      ...extractFileRefs(item.detail),
+      ...extractFileRefs(item.command)
+    ];
+    for (const candidate of candidates) pushUniqueItem(samples[kind] || [], candidate);
+    if (!(samples[kind] || []).length) {
+      const fallback = String(item.detail || item.title || item.command || "").trim();
+      if (fallback) pushUniqueLabel(samples[kind] || [], fallback, 3);
+    }
+  }
+  const artifactList = [...Array.isArray(artifacts) ? artifacts : []].sort((left, right) => {
+    const normalize = (item) => normalizeArtifactItem$1(item) || {};
+    const priority = (item) => {
+      const normalized = normalize(item);
+      const name = String(normalized.name || normalized.label || "").toLowerCase();
+      const ext = String(normalized.ext || "").toLowerCase();
+      if (/^report\.(pdf|docx|html|md)$/.test(name)) {
+        return { pdf: 0, docx: 1, html: 2, md: 3 }[ext] ?? 4;
+      }
+      return 10;
+    };
+    return priority(left) - priority(right);
+  });
+  const reportItems = [];
+  for (const artifact of artifactList) {
+    const normalized = normalizeArtifactItem$1(artifact);
+    if (!normalized) continue;
+    counts.artifact += 1;
+    if (/^report\.(pdf|docx|html|md)$/i.test(String(normalized.name || normalized.label || ""))) {
+      pushUniqueItem(reportItems, normalized, 6);
+    } else {
+      pushUniqueItem(samples.artifact, normalized, 6);
+    }
+  }
+  const makeCard = (kind, title) => ({
+    kind,
+    title,
+    items: samples[kind]
+  });
+  const cards = [];
+  const nonReportArtifactCount = Math.max(0, counts.artifact - reportItems.length);
+  if (reportItems.length > 0) {
+    cards.push({
+      kind: "artifact",
+      title: "Report downloads",
+      items: reportItems
+    });
+  }
+  if (counts.search > 0) cards.push(makeCard("search", `Searched ${counts.search} source${counts.search === 1 ? "" : "s"}`));
+  if (counts.read > 0) cards.push(makeCard("read", `Read ${counts.read} file${counts.read === 1 ? "" : "s"}`));
+  if (counts.edit > 0) cards.push(makeCard("edit", `Changed ${counts.edit} file${counts.edit === 1 ? "" : "s"}`));
+  if (nonReportArtifactCount > 0) cards.push(makeCard("artifact", `Created ${nonReportArtifactCount} artifact${nonReportArtifactCount === 1 ? "" : "s"}`));
+  if (counts.command > 0) cards.push(makeCard("command", `Ran ${counts.command} command${counts.command === 1 ? "" : "s"}`));
+  if (counts.review > 0) cards.push(makeCard("review", `Checked ${counts.review} task${counts.review === 1 ? "" : "s"}`));
+  return cards.slice(0, 4);
 }
 const CHAT_HISTORY_KEY = "kendr_chat_history_v1";
 const SESSIONS_KEY$1 = "kendr_sessions_v1";
@@ -7918,13 +8531,244 @@ function formatRelTime(dateStr) {
   if (diff < 864e5) return `${Math.floor(diff / 36e5)}h ago`;
   return d.toLocaleDateString(void 0, { month: "short", day: "numeric" });
 }
+function logTimestampMs(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return Number.NaN;
+  const direct = Date.parse(raw);
+  if (Number.isFinite(direct)) return direct;
+  const normalized = raw.replace(" ", "T").replace(",", ".");
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+function providerDisplayLabel(provider = "") {
+  const normalized = String(provider || "").trim().toLowerCase();
+  if (!normalized) return "Model";
+  if (normalized === "ollama") return "Local";
+  if (normalized === "xai") return "xAI";
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+function hasNativeWebSearchCapability(provider = "", model = "", capabilities = null) {
+  if (capabilities && Object.prototype.hasOwnProperty.call(capabilities, "native_web_search")) {
+    return !!capabilities.native_web_search;
+  }
+  const normalizedProvider = String(provider || "").trim().toLowerCase();
+  if (normalizedProvider !== "openai") return false;
+  const name = String(model || "").trim().toLowerCase();
+  if (!name || name.includes("gpt-4.1-nano")) return false;
+  if (name.includes("deep-research")) return true;
+  return ["gpt-5", "gpt-4o", "gpt-4.1", "o3", "o4-"].some((needle) => name.includes(needle));
+}
+function synthesizeDeepResearchOption(rawValue, modelInventory) {
+  const resolved = resolveSelectedModel(rawValue);
+  if (!resolved.provider || !resolved.model) return null;
+  const capabilities = {
+    native_web_search: hasNativeWebSearchCapability(resolved.provider, resolved.model)
+  };
+  return {
+    value: `${resolved.provider}/${resolved.model}`,
+    provider: resolved.provider,
+    model: resolved.model,
+    label: resolved.label,
+    shortLabel: `${providerDisplayLabel(resolved.provider)} · ${resolved.model}`,
+    isLocal: resolved.isLocal,
+    ready: true,
+    contextWindow: resolveContextWindow(rawValue, modelInventory),
+    capabilities,
+    note: ""
+  };
+}
+function buildDeepResearchModelOptions(modelInventory, inheritedModel = "") {
+  const providers = Array.isArray(modelInventory?.providers) ? modelInventory.providers : [];
+  const options = [];
+  const seen2 = /* @__PURE__ */ new Set();
+  for (const providerEntry of providers) {
+    const provider = String(providerEntry?.provider || "").trim().toLowerCase();
+    if (!provider) continue;
+    const ready = provider === "ollama" ? !!providerEntry?.ready : providerEntry?.ready !== false;
+    const details = Array.isArray(providerEntry?.selectable_model_details) && providerEntry.selectable_model_details.length ? providerEntry.selectable_model_details : String(providerEntry?.model || "").trim() ? [{
+      name: String(providerEntry.model).trim(),
+      context_window: Number(providerEntry?.context_window || 0),
+      capabilities: providerEntry?.model_capabilities || {}
+    }] : [];
+    for (const detail of details) {
+      const model = String(detail?.name || "").trim();
+      if (!model) continue;
+      const value = `${provider}/${model}`;
+      if (seen2.has(value)) continue;
+      seen2.add(value);
+      const detailCapabilities = detail?.capabilities && typeof detail.capabilities === "object" ? detail.capabilities : {};
+      options.push({
+        value,
+        provider,
+        model,
+        label: `${providerDisplayLabel(provider)} · ${model}`,
+        shortLabel: `${providerDisplayLabel(provider)} · ${model}`,
+        isLocal: provider === "ollama",
+        ready,
+        contextWindow: Number(detail?.context_window || providerEntry?.context_window || 0),
+        capabilities: {
+          ...detailCapabilities,
+          native_web_search: hasNativeWebSearchCapability(provider, model, detailCapabilities)
+        },
+        note: String(providerEntry?.note || "").trim()
+      });
+    }
+  }
+  const inheritedOption = synthesizeDeepResearchOption(inheritedModel, modelInventory);
+  if (inheritedOption && !seen2.has(inheritedOption.value)) options.unshift(inheritedOption);
+  return options;
+}
+function deepResearchModelDisabledReason(option, webSearchEnabled) {
+  if (!option) return "Choose a model.";
+  if (!option.ready) {
+    if (option.provider === "ollama") return "Local model runtime is not ready.";
+    return option.note || `${providerDisplayLabel(option.provider)} is not configured.`;
+  }
+  const modelName = String(option.model || "").trim().toLowerCase();
+  if (modelName.includes("image-")) return "Image-only models are not supported for report writing.";
+  if (Number(option.contextWindow || 0) > 0 && Number(option.contextWindow || 0) < 32e3) {
+    return "Context window is too small for long-form deep research.";
+  }
+  return "";
+}
+function scoreDeepResearchOption(option, { webSearchEnabled = true, preferredValue = "" } = {}) {
+  if (!option) return Number.NEGATIVE_INFINITY;
+  let score = 0;
+  const capabilities = option.capabilities && typeof option.capabilities === "object" ? option.capabilities : {};
+  const contextWindow = Number(option.contextWindow || 0);
+  if (option.value === preferredValue) score += 1e3;
+  if (!webSearchEnabled && option.isLocal) score += 240;
+  if (webSearchEnabled && hasNativeWebSearchCapability(option.provider, option.model, capabilities)) score += 220;
+  else if (webSearchEnabled && capabilities.tool_calling) score += 90;
+  if (capabilities.reasoning) score += 140;
+  if (capabilities.structured_output) score += 80;
+  if (capabilities.tool_calling) score += 70;
+  if (!option.isLocal) score += 20;
+  const name = String(option.model || "").trim().toLowerCase();
+  if (name.includes("gpt-5")) score += 160;
+  else if (name.includes("o3")) score += 145;
+  else if (name.includes("gpt-4.1")) score += 135;
+  else if (name.includes("gpt-4o")) score += 125;
+  else if (name.includes("claude")) score += 110;
+  else if (name.includes("gemini")) score += 100;
+  else if (name.includes("grok")) score += 95;
+  else if (name.includes("llama") || name.includes("qwen") || name.includes("mistral")) score += 80;
+  if (contextWindow >= 2e5) score += 55;
+  else if (contextWindow >= 128e3) score += 35;
+  else if (contextWindow >= 64e3) score += 15;
+  else if (contextWindow > 0 && contextWindow < 32e3) score -= 180;
+  score += Math.min(contextWindow, 2e6) / 24e3;
+  return score;
+}
+function resolveDeepResearchModelSelection({ requestedValue = "", inheritedValue = "", modelInventory = null, webSearchEnabled = true }) {
+  const options = buildDeepResearchModelOptions(modelInventory, inheritedValue);
+  const optionByValue = new Map(options.map((option) => [option.value, option]));
+  const requestedOption = requestedValue ? optionByValue.get(requestedValue) || synthesizeDeepResearchOption(requestedValue, modelInventory) : null;
+  const inheritedOption = inheritedValue ? optionByValue.get(inheritedValue) || synthesizeDeepResearchOption(inheritedValue, modelInventory) : null;
+  const optionsWithState = options.map((option) => ({
+    ...option,
+    disabledReason: deepResearchModelDisabledReason(option)
+  }));
+  const enabledOptions = optionsWithState.filter((option) => !option.disabledReason);
+  const requestedReason = deepResearchModelDisabledReason(requestedOption);
+  const inheritedReason = deepResearchModelDisabledReason(inheritedOption);
+  const recommendedOption = enabledOptions.length ? [...enabledOptions].sort((left, right) => scoreDeepResearchOption(right, { webSearchEnabled, preferredValue: inheritedValue }) - scoreDeepResearchOption(left, { webSearchEnabled, preferredValue: inheritedValue }))[0] : null;
+  const effectiveOption = requestedOption && !requestedReason ? requestedOption : inheritedOption && !inheritedReason ? inheritedOption : recommendedOption;
+  const effectiveSource = requestedOption && !requestedReason ? "explicit" : inheritedOption && !inheritedReason ? "header" : recommendedOption ? "recommended" : "none";
+  return {
+    options: optionsWithState,
+    requestedOption,
+    requestedReason,
+    inheritedOption,
+    inheritedReason,
+    recommendedOption,
+    effectiveOption,
+    effectiveSource
+  };
+}
+const DEFAULT_SEARCH_PROVIDER_OPTIONS = [
+  {
+    id: "auto",
+    label: "Auto",
+    enabled: true,
+    authenticated: false,
+    rate_limited: false,
+    note: "Prefer the strongest configured backend, then fall back automatically.",
+    warning: ""
+  },
+  {
+    id: "duckduckgo",
+    label: "DuckDuckGo (DDGS)",
+    enabled: false,
+    authenticated: false,
+    rate_limited: true,
+    note: "No API key required.",
+    warning: "Unauthenticated DDGS search can hit rate limits on heavier runs."
+  },
+  {
+    id: "serpapi",
+    label: "SerpAPI",
+    enabled: false,
+    authenticated: true,
+    rate_limited: false,
+    note: "Requires SERP_API_KEY.",
+    warning: ""
+  },
+  {
+    id: "browser_use_mcp",
+    label: "Browser-Use MCP",
+    enabled: false,
+    authenticated: false,
+    rate_limited: false,
+    note: "Requires a running browser-use MCP server.",
+    warning: ""
+  },
+  {
+    id: "playwright_browser",
+    label: "Playwright Browser",
+    enabled: false,
+    authenticated: false,
+    rate_limited: false,
+    note: "Requires Playwright plus an installed browser runtime.",
+    warning: ""
+  }
+];
+function buildDeepResearchSearchProviders(modelInventory) {
+  const rows = Array.isArray(modelInventory?.search_providers) && modelInventory.search_providers.length ? modelInventory.search_providers : DEFAULT_SEARCH_PROVIDER_OPTIONS;
+  const seen2 = /* @__PURE__ */ new Set();
+  const options = [];
+  for (const row of rows) {
+    const id2 = String(row?.id || "").trim().toLowerCase();
+    if (!id2 || seen2.has(id2)) continue;
+    seen2.add(id2);
+    options.push({
+      id: id2,
+      label: String(row?.label || id2).trim() || id2,
+      enabled: row?.enabled !== false || id2 === "auto",
+      authenticated: !!row?.authenticated,
+      rateLimited: !!row?.rate_limited,
+      note: String(row?.note || row?.description || "").trim(),
+      warning: String(row?.warning || "").trim()
+    });
+  }
+  if (!seen2.has("auto")) options.unshift({ ...DEFAULT_SEARCH_PROVIDER_OPTIONS[0] });
+  return options;
+}
+function resolveDeepResearchSearchProviderSelection(searchProviders, requestedId = "") {
+  const options = Array.isArray(searchProviders) ? searchProviders : DEFAULT_SEARCH_PROVIDER_OPTIONS;
+  const normalized = String(requestedId || "auto").trim().toLowerCase() || "auto";
+  const optionById = new Map(options.map((option) => [option.id, option]));
+  const requested = optionById.get(normalized) || optionById.get("auto") || options[0] || null;
+  const effective = requested && requested.enabled ? requested : options.find((option) => option.id === "auto") || options.find((option) => option.enabled) || requested;
+  return { options, requested, effective };
+}
 const initChat = {
   messages: [],
   // [{id,role,content,steps,status,runId,artifacts,progress,ts}]
   streaming: false,
   activeRunId: null,
   mode: "chat",
-  // chat | agent | research | security
+  // chat | plan | agent | research | security
   awaitingContext: null
   // {runId,workflowId,prompt,kind}
 };
@@ -7956,6 +8800,7 @@ function chatReducer(s, a) {
         if (m2.id !== a.msgId) return m2;
         const item = {
           id: String(a.item?.id || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+          slot: String(a.item?.slot || "").trim(),
           ts: a.item?.ts || (/* @__PURE__ */ new Date()).toISOString(),
           title: String(a.item?.title || "").trim(),
           detail: String(a.item?.detail || "").trim(),
@@ -7969,10 +8814,42 @@ function chatReducer(s, a) {
         };
         if (!item.title && !item.detail) return m2;
         const prev = Array.isArray(m2.progress) ? m2.progress : [];
+        const existingIndex = prev.findIndex((entry) => String(entry?.id || "").trim() === item.id || item.slot && String(entry?.slot || "").trim() === item.slot);
+        if (existingIndex >= 0) {
+          const existing = prev[existingIndex] || {};
+          const nextItem = { ...existing, ...item, id: existing.id || item.id };
+          if (String(existing.title || "") === nextItem.title && String(existing.detail || "") === nextItem.detail && String(existing.status || "") === nextItem.status) return m2;
+          const rest = prev.filter((_2, idx) => idx !== existingIndex);
+          return { ...m2, progress: [nextItem, ...rest].slice(0, 14) };
+        }
         const last = prev[0];
         if (last && last.title === item.title && last.detail === item.detail) return m2;
         const next = [item, ...prev].slice(0, 14);
         return { ...m2, progress: next };
+      });
+      return { ...s, messages: msgs };
+    }
+    case "ADD_LOG_ENTRY": {
+      const msgs = s.messages.map((m2) => {
+        if (m2.id !== a.msgId) return m2;
+        const item = {
+          id: String(a.item?.id || `l-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+          ts: String(a.item?.ts || a.item?.timestamp || (/* @__PURE__ */ new Date()).toISOString()).trim(),
+          clock: String(a.item?.clock || "").trim(),
+          text: String(a.item?.text || "").trim(),
+          category: String(a.item?.category || "info").trim()
+        };
+        if (!item.text) return m2;
+        const prev = Array.isArray(m2.logs) ? m2.logs : [];
+        if (prev.some((entry) => entry && entry.text === item.text && entry.ts === item.ts)) return m2;
+        const next = [...prev, item].sort((left, right) => {
+          const leftMs = logTimestampMs(left?.ts || left?.timestamp || "");
+          const rightMs = logTimestampMs(right?.ts || right?.timestamp || "");
+          if (Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs !== rightMs) return leftMs - rightMs;
+          if (Number.isFinite(leftMs) !== Number.isFinite(rightMs)) return Number.isFinite(leftMs) ? -1 : 1;
+          return String(left?.ts || left?.timestamp || "").localeCompare(String(right?.ts || right?.timestamp || ""));
+        }).slice(-1e3);
+        return { ...m2, logs: next };
       });
       return { ...s, messages: msgs };
     }
@@ -7998,6 +8875,8 @@ function buildPayload(text, chatId, runId, projectRoot, mode, dr, attachments = 
   const localPaths = Array.isArray(attachments) ? attachments.map((item) => item.path).filter(Boolean) : [];
   const normalizedText = mode === "agent" ? `Handle this in agent mode. Do the detailed work, think step by step, use attached local files/folders if relevant, and return a concise final answer.
 
+User request: ${text}` : mode === "plan" ? `Use planning mode. Create a concrete execution plan first, keep it concise, ask for approval before implementation, and wait for the user before making changes.
+
 User request: ${text}` : text;
   const base = {
     text: normalizedText,
@@ -8008,11 +8887,14 @@ User request: ${text}` : text;
     working_directory: studioMode ? void 0 : projectRoot || void 0,
     use_mcp: useMcp
   };
-  if (mode === "agent") {
+  if (mode === "agent" || mode === "plan") {
     return {
       ...base,
       local_drive_paths: localPaths.length ? localPaths : void 0,
-      local_drive_recursive: localPaths.length ? true : void 0
+      local_drive_recursive: localPaths.length ? true : void 0,
+      execution_mode: mode === "plan" ? "plan" : void 0,
+      planner_mode: mode === "plan" ? "always" : void 0,
+      auto_approve_plan: mode === "plan" ? false : void 0
     };
   }
   if (mode !== "research") {
@@ -8023,26 +8905,50 @@ User request: ${text}` : text;
     };
   }
   const links = (dr.links || "").split(/[\n,\s]+/).map((s) => s.trim()).filter((s) => /^https?:\/\//i.test(s));
-  const webLinks = dr.webSearchEnabled ? links : [];
+  const webLinks = links;
   const remoteSources = dr.webSearchEnabled ? dr.sources : [];
   const mergedLocalPaths = Array.from(/* @__PURE__ */ new Set([...dr.localPaths || [], ...localPaths]));
   const allSources = mergedLocalPaths.length ? Array.from(/* @__PURE__ */ new Set([...remoteSources, "local"])) : remoteSources;
+  const depthPreset = resolveDeepResearchDepthPreset(dr.depthMode, dr.pages);
   const payload = {
     ...base,
     deep_research_mode: true,
     long_document_mode: true,
     workflow_type: "deep_research",
-    long_document_pages: dr.pages,
+    long_document_pages: depthPreset.pages,
+    research_depth_mode: depthPreset.id,
     research_output_formats: dr.outputFormats,
     research_citation_style: dr.citationStyle,
     research_enable_plagiarism_check: dr.plagiarismCheck,
     research_web_search_enabled: dr.webSearchEnabled,
+    research_search_backend: dr.searchBackend || "auto",
     research_date_range: dr.dateRange,
     research_sources: allSources,
     research_max_sources: dr.maxSources || 0,
     research_checkpoint_enabled: dr.checkpointing,
+    research_kb_enabled: !!dr.kbEnabled,
+    research_kb_id: dr.kbEnabled ? dr.kbId || "" : "",
+    research_kb_top_k: dr.kbTopK || 8,
     deep_research_source_urls: webLinks
   };
+  if (dr.multiModelEnabled) {
+    payload.multi_model_enabled = true;
+    payload.multi_model_strategy = dr.multiModelStrategy === "cheapest" ? "cheapest" : "best";
+    const stageOverrides = Object.fromEntries(
+      Object.entries(dr.multiModelStageOverrides && typeof dr.multiModelStageOverrides === "object" ? dr.multiModelStageOverrides : {}).map(([stageName, value]) => {
+        const resolved = resolveSelectedModel(value);
+        if (!resolved.provider || !resolved.model) return null;
+        return [
+          String(stageName || "").trim(),
+          {
+            provider: resolved.provider,
+            model: resolved.model
+          }
+        ];
+      }).filter(Boolean)
+    );
+    if (Object.keys(stageOverrides).length) payload.multi_model_stage_overrides = stageOverrides;
+  }
   if (mergedLocalPaths.length) {
     payload.local_drive_paths = mergedLocalPaths;
     payload.local_drive_recursive = true;
@@ -8051,6 +8957,7 @@ User request: ${text}` : text;
   return payload;
 }
 function modeLabel(mode) {
+  if (mode === "plan") return "Plan";
   if (mode === "agent") return "Agent";
   if (mode === "research") return "Deep Research";
   return "Chat";
@@ -8124,6 +9031,10 @@ function latestChecklistMessage(messages) {
   }
   return null;
 }
+function shouldInlineAwaitingContext(ctx) {
+  if (!ctx || typeof ctx !== "object") return false;
+  return hasConcreteAwaitingContext(ctx) && !isSkillApproval(ctx.kind, ctx.approvalRequest);
+}
 function buildSimpleHistory(messages, maxTurns = 12) {
   const safe = Array.isArray(messages) ? messages : [];
   return safe.filter((m2) => (m2?.role === "user" || m2?.role === "assistant") && String(m2?.content || "").trim() && !["thinking", "streaming"].includes(String(m2?.status || ""))).slice(-maxTurns).map((m2) => ({
@@ -8139,7 +9050,7 @@ function estimateObjectTokens(value) {
     return 0;
   }
 }
-function formatDuration(totalSeconds) {
+function formatDuration$2(totalSeconds) {
   const s = Math.max(0, Number(totalSeconds) || 0);
   const h2 = Math.floor(s / 3600);
   const m2 = Math.floor(s % 3600 / 60);
@@ -8148,7 +9059,621 @@ function formatDuration(totalSeconds) {
   if (m2 > 0) return `${m2}m ${sec}s`;
   return `${sec}s`;
 }
-function isShellProgressItem(item) {
+function summarizeLogFeed(logs = []) {
+  const items = Array.isArray(logs) ? logs : [];
+  if (!items.length) return "Waiting for execution log output...";
+  const latest = String(items[items.length - 1]?.text || "").trim();
+  if (!latest) return `${items.length} log update${items.length === 1 ? "" : "s"} captured`;
+  const clipped = latest.length > 120 ? `${latest.slice(0, 117)}...` : latest;
+  return `${items.length} log update${items.length === 1 ? "" : "s"} captured. Latest: ${clipped}`;
+}
+const GENERIC_PROGRESS_TITLES = /* @__PURE__ */ new Set(["runtime update", "activity"]);
+function normalizeLiveProgressItem(item = null) {
+  const safe = item && typeof item === "object" ? item : {};
+  const rawTitle = String(safe.title || "").trim();
+  const rawDetail = String(safe.detail || "").trim();
+  const genericTitle = GENERIC_PROGRESS_TITLES.has(rawTitle.toLowerCase());
+  const title = genericTitle && rawDetail ? rawDetail : rawTitle || rawDetail;
+  const detail = genericTitle && rawDetail ? "" : rawDetail && rawDetail !== title ? rawDetail : "";
+  return {
+    ...safe,
+    title,
+    detail,
+    kind: String(safe.kind || "activity").trim().toLowerCase(),
+    status: String(safe.status || "running").trim().toLowerCase(),
+    actor: String(safe.actor || "").trim(),
+    durationLabel: String(safe.durationLabel || "").trim(),
+    cwd: String(safe.cwd || "").trim(),
+    command: String(safe.command || "").trim()
+  };
+}
+function buildLiveProgressItem(progress = [], statusText = "", fallbackStatus = "") {
+  const items = Array.isArray(progress) ? progress : [];
+  for (const item of items) {
+    const normalized = normalizeLiveProgressItem(item);
+    if (normalized.title) return normalized;
+  }
+  const detail = sanitizeStatusMessage(statusText);
+  if (!detail) return null;
+  return {
+    id: "runtime-status-fallback",
+    slot: "runtime-status",
+    title: detail,
+    detail: "",
+    kind: "status",
+    status: String(fallbackStatus || "running").trim().toLowerCase(),
+    actor: "",
+    durationLabel: "",
+    cwd: "",
+    command: ""
+  };
+}
+function liveProgressLabel(item = null) {
+  const kind = String(item?.kind || "").trim().toLowerCase();
+  if (kind === "status") return "Runtime";
+  if (kind === "step") return "Current Step";
+  if (kind === "intent") return "Research Intent";
+  if (kind === "source_strategy") return "Source Strategy";
+  if (kind === "coverage") return "Coverage";
+  if (kind === "artifact_created") return "Artifacts";
+  if (kind === "quality_gate") return "Quality Check";
+  if (kind === "gap_detected") return "Gap Review";
+  return "Current Step";
+}
+function isPendingRunStatus(status) {
+  return ["thinking", "streaming", "awaiting"].includes(String(status || "").trim().toLowerCase());
+}
+function isStreamingRunStatus(status) {
+  return ["thinking", "streaming"].includes(String(status || "").trim().toLowerCase());
+}
+function failureMessageForRecoveredRun(runId, status = "") {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "failed") return `Run ${runId} failed while the app was offline.`;
+  if (normalized === "cancelled") return `Run ${runId} was cancelled while the app was offline.`;
+  return `Run ${runId} could not be recovered after the app restarted.`;
+}
+const EXECUTION_LOG_LINE_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - ([A-Z]+) - (.*)$/;
+function executionLogClockLabel(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const match = raw.match(/\b(\d{2}:\d{2}:\d{2})\b/);
+  return match ? match[1] : raw;
+}
+function compactExecutionLogText(value, limit = 220) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > limit ? `${text.slice(0, limit - 3).trimEnd()}...` : text;
+}
+function executionLogDisplayName(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.replace(/_agent$/i, "").replace(/_/g, " ").trim();
+}
+function executionLogBasename(value) {
+  const text = String(value || "").trim().replace(/^["']|["']$/g, "");
+  if (!text) return "";
+  const normalized = text.replace(/\\/g, "/").replace(/\/+$/, "");
+  const idx = normalized.lastIndexOf("/");
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
+}
+function summarizeExecutionLogMessage(message) {
+  const raw = String(message || "").trim();
+  if (!raw || raw === "[LLM Prompt]") return null;
+  if (raw.startsWith("[LLM Call]")) {
+    const agent = raw.match(/agent=([^|]+)/i)?.[1]?.trim();
+    const model = raw.match(/model=([^|]+)/i)?.[1]?.trim();
+    const promptChars = raw.match(/prompt_chars=(\d+)/i)?.[1]?.trim();
+    const parts = ["LLM call"];
+    if (agent) parts.push(executionLogDisplayName(agent));
+    if (model) parts.push(model);
+    if (promptChars) parts.push(`${Number(promptChars).toLocaleString()} prompt chars`);
+    return { text: parts.filter(Boolean).join(" · "), category: "llm_call" };
+  }
+  if (raw.startsWith("[LLM OK]")) {
+    const agent = raw.match(/agent=([^|]+)/i)?.[1]?.trim();
+    const model = raw.match(/model=([^|]+)/i)?.[1]?.trim();
+    const elapsed = raw.match(/elapsed_ms=(\d+)/i)?.[1]?.trim();
+    const parts = ["LLM response"];
+    if (agent) parts.push(executionLogDisplayName(agent));
+    if (model) parts.push(model);
+    if (elapsed) parts.push(`${Math.round(Number(elapsed))} ms`);
+    return { text: parts.filter(Boolean).join(" · "), category: "llm_ok" };
+  }
+  if (raw.startsWith("[files] wrote:")) {
+    const path = raw.split(":").slice(1).join(":").trim();
+    return {
+      text: `Wrote artifact · ${executionLogBasename(path) || compactExecutionLogText(path)}`,
+      category: "artifact"
+    };
+  }
+  return {
+    text: compactExecutionLogText(raw.replace(/^\[([^\]]+)\]\s*/, "$1 · ")),
+    category: "info"
+  };
+}
+function summarizeExecutionLogContinuation(line) {
+  const raw = String(line || "").trim();
+  if (!raw) return null;
+  if (/^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("/")) {
+    const name = executionLogBasename(raw);
+    return name ? { text: `File · ${name}`, category: "file" } : null;
+  }
+  if (/^characters:/i.test(raw)) {
+    return { text: compactExecutionLogText(raw, 120), category: "meta" };
+  }
+  if (/^reason:/i.test(raw)) {
+    return { text: `Reason · ${compactExecutionLogText(raw.replace(/^reason:/i, ""), 160)}`, category: "meta" };
+  }
+  return null;
+}
+function parseExecutionLogLine(line, state = {}) {
+  const raw = String(line || "").replace(/\r?\n$/, "");
+  if (!raw.trim()) return null;
+  const match = raw.match(EXECUTION_LOG_LINE_RE);
+  if (match) {
+    state.skipMultiline = false;
+    state.lastTimestamp = match[1];
+    const message = String(match[3] || "").trim();
+    if (message === "[LLM Prompt]") {
+      state.skipMultiline = true;
+      return null;
+    }
+    const summary2 = summarizeExecutionLogMessage(message);
+    if (!summary2?.text) return null;
+    return {
+      ts: state.lastTimestamp || "",
+      clock: executionLogClockLabel(state.lastTimestamp || ""),
+      text: summary2.text,
+      category: summary2.category || "info"
+    };
+  }
+  if (state.skipMultiline) return null;
+  const summary = summarizeExecutionLogContinuation(raw);
+  if (!summary?.text) return null;
+  return {
+    ts: String(state.lastTimestamp || "").trim(),
+    clock: executionLogClockLabel(state.lastTimestamp || ""),
+    text: summary.text,
+    category: summary.category || "info"
+  };
+}
+function buildExecutionLogSignature(item = {}) {
+  return `${String(item.ts || item.timestamp || "").trim()}|${String(item.text || "").trim()}`;
+}
+const GENERIC_AWAITING_TEXTS = /* @__PURE__ */ new Set([
+  "waiting for your input",
+  "waiting for your input.",
+  "need clarification",
+  "need confirmation",
+  "approval required",
+  "permission required",
+  "plan approval needed",
+  "run paused for your input. reply here to continue the same workflow.",
+  "kendr paused this run, but the backend did not provide the exact question. review the latest execution log and reply with what should happen next.",
+  "waiting for your reply above...",
+  "waiting for execution log output..."
+]);
+function normalizeAwaitingText(value = "") {
+  return String(value || "").replace(/\u2026/g, "...").replace(/\s+/g, " ").trim().toLowerCase();
+}
+function isMeaningfulAwaitingText(value = "") {
+  const normalized = normalizeAwaitingText(value);
+  return !!normalized && !GENERIC_AWAITING_TEXTS.has(normalized);
+}
+function sectionHasMeaningfulAwaitingText(section = {}) {
+  if (!section || typeof section !== "object") return false;
+  if (isMeaningfulAwaitingText(section.title)) return true;
+  const items = Array.isArray(section.items) ? section.items : [];
+  return items.some((item) => {
+    if (typeof item === "string") return isMeaningfulAwaitingText(item);
+    if (!item || typeof item !== "object") return false;
+    return isMeaningfulAwaitingText(item.title) || isMeaningfulAwaitingText(item.text) || isMeaningfulAwaitingText(item.label) || isMeaningfulAwaitingText(item.value);
+  });
+}
+function hasConcreteAwaitingRequest(request = null) {
+  const safe = request && typeof request === "object" ? request : {};
+  const sections = Array.isArray(safe.sections) ? safe.sections : [];
+  return !!(isMeaningfulAwaitingText(safe.summary) || isMeaningfulAwaitingText(safe.title) || isMeaningfulAwaitingText(safe.help_text) || sections.some(sectionHasMeaningfulAwaitingText));
+}
+const ACTIVE_RUN_STATUSES = /* @__PURE__ */ new Set(["running", "started", "cancelling"]);
+const TERMINAL_RUN_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "cancelled"]);
+function runSnapshotState(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const directResult = data.result && typeof data.result === "object" ? data.result : {};
+  const directState = data.state_snapshot && typeof data.state_snapshot === "object" ? data.state_snapshot : {};
+  const resultState = directResult.state_snapshot && typeof directResult.state_snapshot === "object" ? directResult.state_snapshot : {};
+  return {
+    ...directState,
+    ...resultState,
+    ...directResult
+  };
+}
+function runSnapshotResult(snapshot) {
+  return runSnapshotState(snapshot);
+}
+function runSnapshotStatus(snapshot, fallbackStatus = "") {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  return String(data.status || result.status || fallbackStatus || "").trim().toLowerCase();
+}
+function runSnapshotApprovalRequest(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  return result.approval_request && typeof result.approval_request === "object" ? result.approval_request : data.approval_request && typeof data.approval_request === "object" ? data.approval_request : {};
+}
+function runSnapshotSignalsAwaiting(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  const status = runSnapshotStatus(data);
+  if (ACTIVE_RUN_STATUSES.has(status) || TERMINAL_RUN_STATUSES.has(status)) return false;
+  return !!(status === "awaiting_user_input" || result.awaiting_user_input || data.awaiting_user_input || result.plan_waiting_for_approval || result.plan_needs_clarification || result.pending_user_input_kind || data.pending_user_input_kind || result.approval_pending_scope || data.approval_pending_scope || result.pending_user_question || data.pending_user_question || Object.keys(runSnapshotApprovalRequest(data)).length > 0);
+}
+function runSnapshotAwaitingPrompt(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  return String(result.pending_user_question || data.pending_user_question || "").trim();
+}
+function runSnapshotAwaitingScope(snapshot, fallbackScope = "") {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  return String(result.approval_pending_scope || data.approval_pending_scope || fallbackScope || "").trim();
+}
+function runSnapshotAwaitingKind(snapshot, fallbackKind = "") {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  return String(result.pending_user_input_kind || data.pending_user_input_kind || fallbackKind || "").trim();
+}
+function normalizeAwaitingRequest(request = null, prompt2 = "", scope = "", kind = "") {
+  const safe = request && typeof request === "object" ? request : {};
+  const sections = Array.isArray(safe.sections) ? safe.sections.filter(sectionHasMeaningfulAwaitingText) : [];
+  const actions = safe.actions && typeof safe.actions === "object" ? safe.actions : {};
+  const summary = String(safe.summary || prompt2 || "").trim();
+  const helpText = String(safe.help_text || "").trim();
+  const explicitTitle = String(safe.title || "").trim();
+  const derivedTitle = explicitTitle || awaitingTitleFromContext(scope, kind, safe);
+  const normalized = {
+    ...safe,
+    actions
+  };
+  if (summary) normalized.summary = summary;
+  else delete normalized.summary;
+  if (helpText) normalized.help_text = helpText;
+  else delete normalized.help_text;
+  if (explicitTitle) normalized.title = explicitTitle;
+  else if (isMeaningfulAwaitingText(derivedTitle) && (summary || helpText || sections.length || hasExplicitAwaitingActions(safe))) normalized.title = derivedTitle;
+  else delete normalized.title;
+  if (sections.length) normalized.sections = sections;
+  else delete normalized.sections;
+  return normalized;
+}
+function resolveRunSnapshotLogPath(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  const logPaths = data.log_paths && typeof data.log_paths === "object" ? data.log_paths : {};
+  const direct = String(logPaths.execution_log || "").trim();
+  if (direct) return direct;
+  const runDir = String(
+    data.run_output_dir || data.output_dir || data.resume_output_dir || result.run_output_dir || result.output_dir || result.resume_output_dir || ""
+  ).trim();
+  if (!runDir) return "";
+  const normalized = runDir.replace(/[\\/]+$/, "");
+  const separator = normalized.includes("\\") ? "\\" : "/";
+  return `${normalized}${separator}execution.log`;
+}
+function runSnapshotOutputText(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  return String(
+    result.final_output || result.output || result.draft_response || result.response || data.final_output || data.output || data.response || ""
+  ).trim();
+}
+function runSnapshotErrorText(snapshot, runId, fallbackStatus = "") {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  const status = runSnapshotStatus(data, fallbackStatus);
+  const detail = String(
+    data.last_error || result.last_error || data.error || result.error || runSnapshotOutputText(snapshot)
+  ).trim();
+  if (detail) return detail;
+  if (status === "failed" || status === "cancelled") return failureMessageForRecoveredRun(runId, status);
+  return "";
+}
+function runSnapshotArtifacts(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  const artifacts = [];
+  const seen2 = /* @__PURE__ */ new Set();
+  const appendArtifact = (artifact) => {
+    const normalized = normalizeArtifactItem(artifact);
+    if (!normalized) return;
+    const key = [
+      String(normalized.name || "").trim(),
+      String(normalized.path || "").trim(),
+      String(normalized.downloadUrl || "").trim(),
+      String(normalized.viewUrl || "").trim()
+    ].join("::");
+    if (seen2.has(key)) return;
+    seen2.add(key);
+    artifacts.push(normalized);
+  };
+  const appendArtifactList = (items) => {
+    if (!Array.isArray(items)) return;
+    for (const item of items) appendArtifact(item);
+  };
+  const appendCardArtifacts = (card) => {
+    const safeCard = card && typeof card === "object" ? card : {};
+    appendArtifactList(safeCard.created_artifacts);
+    appendArtifactList(safeCard.downloadable_reports);
+  };
+  appendArtifactList(result.artifact_files);
+  appendArtifactList(data.artifact_files);
+  appendCardArtifacts(result.deep_research_result_card);
+  appendCardArtifacts(data.deep_research_result_card);
+  const appendManifestArtifacts = (manifest) => {
+    if (!manifest || typeof manifest !== "object") return;
+    appendArtifactList(manifest.created_artifacts);
+  };
+  appendManifestArtifacts(result.deep_research_artifacts_manifest);
+  appendManifestArtifacts(data.deep_research_artifacts_manifest);
+  const appendExportHints = (items) => {
+    if (!Array.isArray(items)) return;
+    for (const item of items) {
+      const safe = item && typeof item === "object" ? item : {};
+      const ext = String(safe.ext || "").trim().toLowerCase();
+      const name = String(safe.name || safe.label || (ext ? `report.${ext}` : "")).trim();
+      if (!name) continue;
+      appendArtifact({
+        name,
+        label: String(safe.label || name).trim(),
+        ext,
+        kind: "report",
+        download_url: safe.download_url || safe.downloadUrl || "",
+        view_url: safe.view_url || safe.viewUrl || ""
+      });
+    }
+  };
+  appendExportHints(result.long_document_exports);
+  appendExportHints(data.long_document_exports);
+  for (const key of [
+    "long_document_compiled_path",
+    "long_document_compiled_html_path",
+    "long_document_compiled_pdf_path",
+    "long_document_compiled_docx_path"
+  ]) {
+    const candidate = String(result[key] || data[key] || "").trim();
+    if (!candidate) continue;
+    appendArtifact({
+      name: basename$1(candidate),
+      path: candidate,
+      kind: "report"
+    });
+  }
+  return artifacts;
+}
+const REPORT_ARTIFACT_NAMES = /* @__PURE__ */ new Set([
+  "report.md",
+  "report.html",
+  "report.pdf",
+  "report.docx",
+  "deep_research_report.md",
+  "deep_research_report.html",
+  "deep_research_report.pdf",
+  "deep_research_report.docx"
+]);
+function isReportArtifactItem(item) {
+  const safe = item && typeof item === "object" ? item : {};
+  const name = String(safe.name || safe.label || safe.path || "").trim().toLowerCase();
+  if (!name) return false;
+  const base = basename$1(name).toLowerCase();
+  if (REPORT_ARTIFACT_NAMES.has(base)) return true;
+  const ext = String(safe.ext || "").trim().toLowerCase();
+  return !!ext && ["md", "html", "pdf", "docx"].includes(ext) && (base.startsWith("report.") || base.startsWith("deep_research_report."));
+}
+function hasReportArtifacts(items) {
+  if (!Array.isArray(items) || !items.length) return false;
+  return items.some((item) => isReportArtifactItem(item));
+}
+function stripReportArtifacts(items) {
+  if (!Array.isArray(items) || !items.length) return [];
+  return items.filter((item) => !isReportArtifactItem(item));
+}
+function snapshotOwnsReportArtifacts(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  const card = result.deep_research_result_card && typeof result.deep_research_result_card === "object" ? result.deep_research_result_card : data.deep_research_result_card && typeof data.deep_research_result_card === "object" ? data.deep_research_result_card : {};
+  const kind = String(card.kind || "").trim().toLowerCase();
+  if (kind === "result") return true;
+  for (const key of [
+    "long_document_compiled_path",
+    "long_document_compiled_html_path",
+    "long_document_compiled_pdf_path",
+    "long_document_compiled_docx_path"
+  ]) {
+    if (String(result[key] || data[key] || "").trim()) return true;
+  }
+  const manifest = result.deep_research_artifacts_manifest && typeof result.deep_research_artifacts_manifest === "object" ? result.deep_research_artifacts_manifest : data.deep_research_artifacts_manifest && typeof data.deep_research_artifacts_manifest === "object" ? data.deep_research_artifacts_manifest : {};
+  const createdArtifacts = Array.isArray(manifest.created_artifacts) ? manifest.created_artifacts : [];
+  return createdArtifacts.some((item) => isReportArtifactItem(item));
+}
+function runSnapshotChecklist(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  return extractChecklist(Object.keys(result).length ? result : data);
+}
+function runSnapshotMessageMeta(snapshot) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  const status = runSnapshotStatus(data);
+  const logPath = resolveRunSnapshotLogPath(data);
+  return {
+    runStartedAt: data.started_at || data.created_at || "",
+    runOutputDir: String(
+      data.run_output_dir || data.output_dir || data.resume_output_dir || result.run_output_dir || result.output_dir || result.resume_output_dir || ""
+    ).trim(),
+    executionLogPath: logPath,
+    lastKnownRunStatus: status,
+    lastError: runSnapshotErrorText(data, String(data.run_id || "").trim(), status)
+  };
+}
+function approvalScopeLabel(scope = "") {
+  return String(scope || "").trim().replace(/[_-]+/g, " ");
+}
+function awaitingTitleFromContext(scope = "", kind = "", request = null) {
+  const explicit = String(request?.title || "").trim();
+  if (explicit) return explicit;
+  const scopeText = String(scope || "").trim().toLowerCase();
+  const kindText = String(kind || "").trim().toLowerCase();
+  if (kindText.includes("clar") || scopeText.includes("clar")) return "Need clarification";
+  if (kindText.includes("confirm") || scopeText.includes("confirm")) return "Need confirmation";
+  if (kindText.includes("approval") || scopeText.includes("approval")) return "Approval required";
+  if (kindText.includes("permission") || scopeText.includes("permission")) return "Permission required";
+  if (scopeText.includes("plan")) return "Plan approval needed";
+  return "Waiting for your input";
+}
+function hasExplicitAwaitingActions(request = null) {
+  const actions = request && typeof request === "object" && request.actions && typeof request.actions === "object" ? request.actions : {};
+  return !!(String(actions.accept_label || "").trim() || String(actions.reject_label || "").trim() || String(actions.suggest_label || "").trim());
+}
+function isApprovalLikeAwaiting(scope = "", kind = "", request = null) {
+  if (hasExplicitAwaitingActions(request)) return true;
+  const scopeText = String(scope || "").trim().toLowerCase();
+  const kindText = String(kind || "").trim().toLowerCase();
+  return scopeText.includes("approval") || scopeText.includes("permission") || scopeText.includes("plan") || kindText.includes("approval") || kindText.includes("permission") || kindText.includes("confirm");
+}
+function buildAwaitingState(snapshot, fallback = {}) {
+  if (!runSnapshotSignalsAwaiting(snapshot)) return null;
+  const prompt2 = runSnapshotAwaitingPrompt(snapshot);
+  const scope = runSnapshotAwaitingScope(snapshot, fallback?.approvalScope || "");
+  const kind = runSnapshotAwaitingKind(snapshot, fallback?.approvalKind || "");
+  const normalizedRequest = normalizeAwaitingRequest(runSnapshotApprovalRequest(snapshot), prompt2, scope, kind);
+  const summary = String(normalizedRequest.summary || prompt2 || "").trim();
+  const helpText = String(normalizedRequest.help_text || "").trim();
+  const title = String(normalizedRequest.title || "").trim();
+  if (!isMeaningfulAwaitingText(prompt2) && !hasConcreteAwaitingRequest(normalizedRequest)) return null;
+  return {
+    content: summary,
+    status: "awaiting",
+    statusText: summary || helpText || title || "Waiting for your input.",
+    approvalScope: scope,
+    approvalKind: kind,
+    approvalRequest: normalizedRequest,
+    approvalState: "pending",
+    awaitingDecision: isApprovalLikeAwaiting(scope, kind, normalizedRequest) ? "approval" : "reply"
+  };
+}
+function buildAwaitingContext(snapshot, runId, messageId, awaitingState = null) {
+  const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const result = runSnapshotResult(data);
+  const awaiting = awaitingState || buildAwaitingState(data);
+  if (!awaiting) return null;
+  return {
+    runId,
+    workflowId: String(data.workflow_id || result.workflow_id || runId),
+    messageId,
+    prompt: awaiting.content || awaiting.statusText || "",
+    kind: awaiting.approvalKind || "",
+    scope: awaiting.approvalScope || "",
+    approvalRequest: awaiting.approvalRequest || null
+  };
+}
+function invalidAwaitingMessage(snapshot, runId, fallback = {}) {
+  const latestLog = String((Array.isArray(fallback?.logs) ? fallback.logs[0]?.text : "") || "").trim();
+  const scope = approvalScopeLabel(
+    snapshot?.result?.approval_pending_scope || snapshot?.approval_pending_scope || fallback?.approvalScope || ""
+  );
+  const parts = [`Run ${runId} paused without asking a concrete question.`];
+  if (scope) parts.push(`Reported scope: ${scope}.`);
+  if (latestLog) parts.push(`Latest log: ${latestLog}`);
+  else {
+    const detail = runSnapshotErrorText(snapshot, runId, String(snapshot?.status || snapshot?.result?.status || ""));
+    if (detail) parts.push(detail);
+  }
+  return parts.join(" ");
+}
+function messageHasConcreteAwaitingPrompt(msg) {
+  const approvalRequest = msg?.approvalRequest && typeof msg.approvalRequest === "object" ? msg.approvalRequest : {};
+  return !!(isMeaningfulAwaitingText(msg?.content || "") || hasConcreteAwaitingRequest(approvalRequest));
+}
+function hasConcreteAwaitingContext(ctx) {
+  if (!ctx || typeof ctx !== "object") return false;
+  return isMeaningfulAwaitingText(ctx.prompt) || hasConcreteAwaitingRequest(ctx.approvalRequest);
+}
+function hasDisplayableAwaitingContext(ctx) {
+  if (!ctx || typeof ctx !== "object") return false;
+  return isSkillApproval(ctx.kind, ctx.approvalRequest) || hasConcreteAwaitingContext(ctx);
+}
+function clearAwaitingMessageFields(patch = {}) {
+  return {
+    ...patch,
+    approvalScope: "",
+    approvalKind: "",
+    approvalRequest: null,
+    awaitingDecision: "",
+    approvalState: ""
+  };
+}
+function buildRunningMessagePatch(snapshot, fallback = {}) {
+  const latestLog = String((Array.isArray(fallback?.logs) ? fallback.logs[0]?.text : "") || "").trim();
+  const fallbackWasAwaiting = String(fallback?.status || "").trim().toLowerCase() === "awaiting";
+  const fallbackStatusText = !fallbackWasAwaiting && isMeaningfulAwaitingText(fallback?.statusText) ? String(fallback.statusText).trim() : "";
+  const fallbackContent = !fallbackWasAwaiting && isMeaningfulAwaitingText(fallback?.content) ? String(fallback.content).trim() : "";
+  return clearAwaitingMessageFields({
+    ...runSnapshotMessageMeta(snapshot),
+    content: fallbackContent,
+    status: "streaming",
+    statusText: isMeaningfulAwaitingText(latestLog) ? latestLog : fallbackStatusText
+  });
+}
+function snapshotArtifactsOrFallback(snapshot, fallback = {}) {
+  const artifacts = runSnapshotArtifacts(snapshot);
+  if (artifacts.length > 0) return artifacts;
+  return Array.isArray(fallback?.artifacts) ? fallback.artifacts : [];
+}
+function snapshotChecklistOrFallback(snapshot, fallback = {}) {
+  const checklist = runSnapshotChecklist(snapshot);
+  if (checklist.length > 0) return checklist;
+  return Array.isArray(fallback?.checklist) ? fallback.checklist : [];
+}
+function buildCompletedMessagePatch(snapshot, fallback = {}) {
+  const fallbackWasAwaiting = String(fallback?.status || "").trim().toLowerCase() === "awaiting";
+  return clearAwaitingMessageFields({
+    ...runSnapshotMessageMeta(snapshot),
+    content: runSnapshotOutputText(snapshot) || (fallbackWasAwaiting ? "" : String(fallback?.content || "").trim()),
+    status: "done",
+    statusText: "",
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback)
+  });
+}
+function buildFailedMessagePatch(snapshot, runId, fallbackStatus = "", fallback = {}) {
+  return clearAwaitingMessageFields({
+    ...runSnapshotMessageMeta(snapshot),
+    content: runSnapshotErrorText(snapshot, runId, fallbackStatus) || invalidAwaitingMessage(snapshot, runId, fallback),
+    status: "error",
+    statusText: "",
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback)
+  });
+}
+function buildInvalidAwaitingErrorPatch(snapshot, runId, fallback = {}) {
+  return clearAwaitingMessageFields({
+    ...runSnapshotMessageMeta(snapshot),
+    content: invalidAwaitingMessage(snapshot, runId, fallback),
+    status: "error",
+    statusText: "",
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback)
+  });
+}
+function buildInvalidAwaitingRunningPatch(snapshot, fallback = {}, statusText = "Run sent an invalid pause signal. Rechecking backend status...") {
+  return {
+    ...buildRunningMessagePatch(snapshot, fallback),
+    statusText,
+    artifacts: snapshotArtifactsOrFallback(snapshot, fallback),
+    checklist: snapshotChecklistOrFallback(snapshot, fallback)
+  };
+}
+function isShellProgressItem$2(item) {
   if (!item || typeof item !== "object") return false;
   const kind = String(item.kind || "").toLowerCase();
   const title = String(item.title || "").toLowerCase();
@@ -8159,7 +9684,7 @@ function isShellProgressItem(item) {
   return /\bshell command\b|\brunning command\b|\bos[_\s-]?agent\b/.test(`${title} ${detail}`);
 }
 function shellCardFromProgress(progress = []) {
-  const items = (Array.isArray(progress) ? progress : []).filter(isShellProgressItem);
+  const items = (Array.isArray(progress) ? progress : []).filter(isShellProgressItem$2);
   if (!items.length) return null;
   const running = items.find((it) => ["running", "started", "in_progress"].includes(String(it.status || "").toLowerCase()));
   const primary = running || items[0];
@@ -8269,7 +9794,10 @@ function attachmentPreviewSrc(item) {
   return rawPath;
 }
 const DR_DEFAULTS = {
+  depthMode: "standard",
   pages: 25,
+  researchModel: "",
+  searchBackend: "auto",
   citationStyle: "apa",
   dateRange: "all_time",
   maxSources: 0,
@@ -8282,10 +9810,59 @@ const DR_DEFAULTS = {
   // native FS paths (Electron folder picker)
   links: "",
   // newline-separated URLs
+  kbEnabled: false,
+  kbId: "",
+  kbTopK: 8,
+  multiModelEnabled: false,
+  multiModelStrategy: "best",
+  multiModelStageOverrides: {},
   collapsed: false
 };
-function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }) {
-  const { state: appState, dispatch: appDispatch, refreshModelInventory } = useApp();
+const DEEP_RESEARCH_DEPTH_PRESETS = [
+  {
+    id: "brief",
+    pages: 10,
+    label: "Focused Brief",
+    summary: "Focused",
+    hint: "Fastest run for a narrower scope and the most important findings."
+  },
+  {
+    id: "standard",
+    pages: 25,
+    label: "Standard Report",
+    summary: "Standard",
+    hint: "Balanced depth for most multi-section research tasks."
+  },
+  {
+    id: "comprehensive",
+    pages: 50,
+    label: "Comprehensive Study",
+    summary: "Comprehensive",
+    hint: "Broader source sweep and deeper synthesis across sections."
+  },
+  {
+    id: "exhaustive",
+    pages: 100,
+    label: "Exhaustive Dossier",
+    summary: "Exhaustive",
+    hint: "Maximum breadth and depth; slower and more resource-intensive."
+  }
+];
+function normalizeDeepResearchDepthMode(value, pages) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (DEEP_RESEARCH_DEPTH_PRESETS.some((item) => item.id === normalized)) return normalized;
+  const numericPages = Number(pages || 0);
+  if (numericPages >= 100) return "exhaustive";
+  if (numericPages >= 50) return "comprehensive";
+  if (numericPages >= 20) return "standard";
+  return "brief";
+}
+function resolveDeepResearchDepthPreset(value, pages) {
+  const mode = normalizeDeepResearchDepthMode(value, pages);
+  return DEEP_RESEARCH_DEPTH_PRESETS.find((item) => item.id === mode) || DEEP_RESEARCH_DEPTH_PRESETS[1];
+}
+function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false, minimalStudio = false, studioAccessory = null }) {
+  const { state: appState, dispatch: appDispatch, openFile, refreshModelInventory } = useApp();
   const api = window.kendrAPI;
   const [chat, dispatch] = reactExports.useReducer(chatReducer, void 0, () => ({ ...initChat, messages: loadHistory() }));
   const [input, setInput] = reactExports.useState("");
@@ -8293,25 +9870,53 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
   const [chatId, setChatId] = reactExports.useState(() => `chat-${Date.now()}`);
   const [dr, setDr] = reactExports.useState(DR_DEFAULTS);
   const [attachments, setAttachments] = reactExports.useState([]);
+  const [researchKbs, setResearchKbs] = reactExports.useState([]);
   const [mcpEnabled, setMcpEnabled] = reactExports.useState(false);
   const [mcpServerCount, setMcpServerCount] = reactExports.useState(0);
   const [mcpUndiscovered, setMcpUndiscovered] = reactExports.useState(0);
   const [machineStatus, setMachineStatus] = reactExports.useState(null);
   const [machineStatusLoaded, setMachineStatusLoaded] = reactExports.useState(false);
   const [machineSyncRunning, setMachineSyncRunning] = reactExports.useState(false);
+  const [diffPreviewPath, setDiffPreviewPath] = reactExports.useState("");
   const [showHistory, setShowHistory] = reactExports.useState(false);
   const [sessions, setSessions] = reactExports.useState(() => loadSessions());
+  const [composerMenuOpen, setComposerMenuOpen] = reactExports.useState(false);
   const messagesEndRef = reactExports.useRef(null);
   const inputRef = reactExports.useRef(null);
+  const composerMenuRef = reactExports.useRef(null);
   const esRef = reactExports.useRef(null);
   const resumeAttemptedRunRef = reactExports.useRef("");
+  const staleRunRecoveryRef = reactExports.useRef("");
+  const artifactRecoveryRef = reactExports.useRef(/* @__PURE__ */ new Set());
+  const mirroredActivityIdsRef = reactExports.useRef([]);
   const apiBase = appState.backendUrl || "http://127.0.0.1:2151";
   const updateDr = (patch) => setDr((s) => ({ ...s, ...patch }));
+  resolveDeepResearchDepthPreset(dr.depthMode, dr.pages);
   const selectedModelMeta = resolveSelectedModel(appState.selectedModel);
   const isSimpleStudioChat = studioMode && chat.mode === "chat";
   const modelInventory = appState.modelInventory;
+  const deepResearchModelState = reactExports.useMemo(() => resolveDeepResearchModelSelection({
+    requestedValue: dr.researchModel,
+    inheritedValue: appState.selectedModel || "",
+    modelInventory,
+    webSearchEnabled: !!dr.webSearchEnabled
+  }), [dr.researchModel, dr.webSearchEnabled, appState.selectedModel, modelInventory]);
+  const deepResearchSearchProviderState = reactExports.useMemo(() => resolveDeepResearchSearchProviderSelection(
+    buildDeepResearchSearchProviders(modelInventory),
+    dr.searchBackend
+  ), [dr.searchBackend, modelInventory]);
+  const effectiveDeepResearchModel = deepResearchModelState.effectiveOption;
+  const recommendedDeepResearchModel = deepResearchModelState.recommendedOption;
+  const effectiveDeepResearchSearchProvider = deepResearchSearchProviderState.effective;
+  reactExports.useEffect(() => {
+    const effectiveId = effectiveDeepResearchSearchProvider?.id || "auto";
+    const requestedId = dr.searchBackend || "auto";
+    if (requestedId !== effectiveId) updateDr({ searchBackend: effectiveId });
+  }, [dr.searchBackend, effectiveDeepResearchSearchProvider?.id]);
+  const composerModelRaw = chat.mode === "research" ? effectiveDeepResearchModel?.value || appState.selectedModel || "" : appState.selectedModel || "";
+  const composerModelMeta = resolveSelectedModel(composerModelRaw);
   const selectedModelAgentCapable = resolveAgentCapability(appState.selectedModel, modelInventory);
-  const contextLimit = resolveContextWindow(appState.selectedModel, modelInventory);
+  const contextLimit = resolveContextWindow(composerModelRaw, modelInventory);
   const payloadPreview = reactExports.useMemo(() => {
     const draftText = String(input || "").trim();
     const body = buildPayload(
@@ -8326,18 +9931,142 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
       mcpEnabled
     );
     body.history = buildSimpleHistory(chat.messages, 14);
-    if (appState.selectedModel) {
-      const selected = resolveSelectedModel(appState.selectedModel);
+    const activePayloadModel = chat.mode === "research" ? effectiveDeepResearchModel : appState.selectedModel ? resolveSelectedModel(appState.selectedModel) : null;
+    if (activePayloadModel) {
+      const selected = activePayloadModel;
       if (selected.provider) body.provider = selected.provider;
       if (selected.model) body.model = selected.model;
     }
+    if (chat.mode === "research" && effectiveDeepResearchModel?.model) {
+      body.research_model = effectiveDeepResearchModel.model;
+    }
+    body.context_limit = contextLimit;
     if (isSimpleStudioChat) body.stream = true;
     return body;
-  }, [input, chatId, appState.projectRoot, chat.mode, dr, attachments, studioMode, mcpEnabled, chat.messages, appState.selectedModel, isSimpleStudioChat]);
+  }, [input, chatId, appState.projectRoot, chat.mode, dr, attachments, studioMode, mcpEnabled, chat.messages, appState.selectedModel, isSimpleStudioChat, contextLimit, effectiveDeepResearchModel]);
   const estimatedContextTokens = estimateObjectTokens(payloadPreview);
   const contextPct = Math.min(100, Math.round(estimatedContextTokens / Math.max(contextLimit, 1) * 100));
   const stickyChecklistMsg = reactExports.useMemo(() => latestChecklistMessage(chat.messages), [chat.messages]);
   const stickyChecklist = Array.isArray(stickyChecklistMsg?.checklist) ? stickyChecklistMsg.checklist : [];
+  const latestStreamingRunMsg = reactExports.useMemo(() => [...chat.messages || []].reverse().find((msg) => msg?.role === "assistant" && String(msg?.runId || "").trim() && isStreamingRunStatus(msg?.status)) || null, [chat.messages]);
+  const activeRunId = String(chat.activeRunId || appState.activeRunId || latestStreamingRunMsg?.runId || "").trim();
+  const awaitingRunId = String(chat.awaitingContext?.runId || "").trim();
+  const stopTargetRunId = activeRunId || awaitingRunId;
+  const composerRunActive = !chat.awaitingContext && !!activeRunId;
+  const inlineAwaiting = shouldInlineAwaitingContext(chat.awaitingContext);
+  const displayableAwaitingContext = hasDisplayableAwaitingContext(chat.awaitingContext);
+  const hasMessages = chat.messages.length > 0;
+  const showInlineAttachmentTools = !minimalStudio;
+  const showInlineContextTools = !minimalStudio;
+  const showInlineFlowStrip = !minimalStudio;
+  const indexedResearchKbs = reactExports.useMemo(
+    () => Array.isArray(researchKbs) ? researchKbs.filter((kb2) => String(kb2?.status || "").trim().toLowerCase() === "indexed") : [],
+    [researchKbs]
+  );
+  const activeResearchKb = reactExports.useMemo(
+    () => Array.isArray(researchKbs) ? researchKbs.find((kb2) => !!kb2?.is_active) || null : null,
+    [researchKbs]
+  );
+  const selectedResearchKb = reactExports.useMemo(() => {
+    if (!dr.kbEnabled) return null;
+    if (dr.kbId) return indexedResearchKbs.find((kb2) => kb2.id === dr.kbId) || null;
+    return activeResearchKb;
+  }, [dr.kbEnabled, dr.kbId, indexedResearchKbs, activeResearchKb]);
+  const deepResearchWorkflowRecommendation = reactExports.useMemo(() => {
+    return resolveWorkflowRecommendation(modelInventory, "deep_research_report");
+  }, [modelInventory]);
+  const deepResearchWorkflowStageOptions = reactExports.useMemo(() => normalizeWorkflowStageOptions(deepResearchWorkflowRecommendation?.stage_options), [deepResearchWorkflowRecommendation]);
+  const activeDeepResearchWorkflowCombo = reactExports.useMemo(() => {
+    if (!dr.multiModelEnabled || !deepResearchWorkflowRecommendation) return null;
+    const rawCombo = dr.multiModelStrategy === "cheapest" ? deepResearchWorkflowRecommendation.cheapest : deepResearchWorkflowRecommendation.best;
+    return normalizeWorkflowCombo(rawCombo);
+  }, [dr.multiModelEnabled, dr.multiModelStrategy, deepResearchWorkflowRecommendation]);
+  const recommendedDeepResearchEvidenceStage = reactExports.useMemo(() => {
+    if (!activeDeepResearchWorkflowCombo) return null;
+    return activeDeepResearchWorkflowCombo.stages.find((stage) => stage?.stage === "evidence") || null;
+  }, [activeDeepResearchWorkflowCombo]);
+  reactExports.useEffect(() => {
+    if (!dr.researchModel) return;
+    if (!deepResearchModelState.requestedReason) return;
+    setDr((current) => current.researchModel === dr.researchModel ? { ...current, researchModel: "" } : current);
+  }, [dr.researchModel, deepResearchModelState.requestedReason]);
+  const loadResearchKbs = reactExports.useCallback(async () => {
+    try {
+      const resp = await fetch(`${apiBase}/api/rag/kbs`);
+      const data = await resp.json().catch(() => []);
+      const next = Array.isArray(data) ? data : [];
+      setResearchKbs(next);
+      return next;
+    } catch (_2) {
+      setResearchKbs([]);
+      return [];
+    }
+  }, [apiBase]);
+  reactExports.useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const resp = await fetch(`${apiBase}/api/rag/kbs`);
+        const data = await resp.json().catch(() => []);
+        if (!cancelled) setResearchKbs(Array.isArray(data) ? data : []);
+      } catch (_2) {
+        if (!cancelled) setResearchKbs([]);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase]);
+  const planKeywordsDetected = /\b(plan|roadmap|outline|steps|milestones|strategy)\b/i.test(input);
+  const showPlanSuggestion = minimalStudio && selectedModelAgentCapable && !composerRunActive && chat.mode === "chat" && planKeywordsDetected;
+  const showActiveWorkflowChip = minimalStudio && chat.mode !== "chat";
+  const resolveArtifactActionUrl = reactExports.useCallback((item, runId, action = "download") => {
+    const direct = String(
+      action === "view" ? item?.viewUrl || item?.view_url || "" : item?.downloadUrl || item?.download_url || ""
+    ).trim();
+    if (direct) {
+      try {
+        return new URL(direct, apiBase || window.location.origin).toString();
+      } catch (_2) {
+        return direct;
+      }
+    }
+    const resolvedRunId = String(runId || "").trim();
+    const artifactName = String(item?.name || item?.label || basename$1(item?.path || "")).trim();
+    if (!resolvedRunId || !artifactName) return "";
+    const base = String(apiBase).replace(/\/$/, "");
+    return `${base}/api/artifacts/${action}?run_id=${encodeURIComponent(resolvedRunId)}&name=${encodeURIComponent(artifactName)}`;
+  }, [apiBase]);
+  const openArtifact = reactExports.useCallback(async (item) => {
+    const filePath = String(item?.path || "").trim();
+    if (!filePath) return;
+    appDispatch({ type: "SET_VIEW", view: "developer" });
+    await openFile(filePath);
+  }, [appDispatch, openFile]);
+  const downloadArtifact = reactExports.useCallback((item, runId) => {
+    const url = resolveArtifactActionUrl(item, runId, "download");
+    if (!url) return;
+    const link = document.createElement("a");
+    link.href = url;
+    const artifactName = String(item?.name || item?.label || "").trim();
+    if (artifactName) link.setAttribute("download", artifactName);
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }, [resolveArtifactActionUrl]);
+  const reviewArtifact = reactExports.useCallback((item) => {
+    const filePath = String(item?.path || "").trim();
+    if (!filePath) return;
+    setDiffPreviewPath(filePath);
+  }, []);
+  const clearActiveRunState = reactExports.useCallback(() => {
+    dispatch({ type: "SET_STREAMING", val: false });
+    dispatch({ type: "SET_RUN", id: null });
+    appDispatch({ type: "SET_STREAMING", streaming: false });
+    appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
+  }, [appDispatch]);
   reactExports.useEffect(() => {
     return () => {
       esRef.current?.close();
@@ -8347,13 +10076,204 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     if (!appState.activeRunId) resumeAttemptedRunRef.current = "";
   }, [appState.activeRunId]);
   reactExports.useEffect(() => {
-    if (chat.mode === "agent" && !selectedModelAgentCapable) {
+    if (!chat.awaitingContext || displayableAwaitingContext) return;
+    dispatch({ type: "CLEAR_AWAITING" });
+  }, [chat.awaitingContext, displayableAwaitingContext]);
+  reactExports.useEffect(() => {
+    const candidates = (chat.messages || []).filter((msg) => msg?.role === "assistant" && String(msg?.runId || "").trim() && !isPendingRunStatus(msg?.status) && (!Array.isArray(msg?.artifacts) || !hasReportArtifacts(msg.artifacts)));
+    if (!candidates.length) return;
+    let cancelled = false;
+    (async () => {
+      for (const msg of candidates.slice(-8)) {
+        const runId = String(msg.runId || "").trim();
+        if (!runId || artifactRecoveryRef.current.has(runId)) continue;
+        try {
+          let recoveredArtifacts = [];
+          let runSnapshot = {};
+          const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}`);
+          runSnapshot = await resp.json().catch(() => ({}));
+          if (cancelled) return;
+          if (resp.ok) recoveredArtifacts = runSnapshotArtifacts(runSnapshot);
+          if (!recoveredArtifacts.length && snapshotOwnsReportArtifacts(runSnapshot)) {
+            const artifactResp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}/artifacts`);
+            const artifactData = await artifactResp.json().catch(() => ({}));
+            if (cancelled) return;
+            if (artifactResp.ok && Array.isArray(artifactData?.files)) {
+              recoveredArtifacts = artifactData.files;
+            }
+          }
+          if (!recoveredArtifacts.length) continue;
+          if (Array.isArray(msg?.artifacts) && msg.artifacts.length) {
+            recoveredArtifacts = [...msg.artifacts, ...recoveredArtifacts];
+          }
+          artifactRecoveryRef.current.add(runId);
+          dispatch({
+            type: "UPD_MSG",
+            id: msg.id,
+            patch: {
+              ...runSnapshotMessageMeta(runSnapshot),
+              artifacts: recoveredArtifacts
+            }
+          });
+        } catch (_2) {
+          continue;
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chat.messages, apiBase]);
+  reactExports.useEffect(() => {
+    const staleAwaiting = (chat.messages || []).filter((msg) => msg?.role === "assistant" && String(msg?.status || "").trim().toLowerCase() === "awaiting" && String(msg?.runId || "").trim() && !messageHasConcreteAwaitingPrompt(msg));
+    if (!staleAwaiting.length) return;
+    for (const msg of staleAwaiting) {
+      const status = String(msg.lastKnownRunStatus || "").trim().toLowerCase();
+      const snapshot = {
+        status: status || "running",
+        run_id: msg.runId,
+        started_at: msg.runStartedAt,
+        run_output_dir: msg.runOutputDir,
+        log_paths: msg.executionLogPath ? { execution_log: msg.executionLogPath } : {},
+        last_error: msg.lastError,
+        final_output: msg.content
+      };
+      const patch = ACTIVE_RUN_STATUSES.has(status) || !status ? buildRunningMessagePatch(snapshot, msg) : status === "awaiting_user_input" ? buildInvalidAwaitingErrorPatch(snapshot, msg.runId, msg) : status === "completed" ? buildCompletedMessagePatch(snapshot, msg) : buildFailedMessagePatch(snapshot, msg.runId, status || "failed", msg);
+      dispatch({ type: "UPD_MSG", id: msg.id, patch });
+    }
+  }, [chat.messages]);
+  reactExports.useEffect(() => {
+    if (chat.streaming || appState.activeRunId) return;
+    const pendingMsg = [...chat.messages || []].reverse().find((msg) => msg?.role === "assistant" && String(msg?.runId || "").trim() && isPendingRunStatus(msg?.status));
+    if (!pendingMsg) {
+      staleRunRecoveryRef.current = "";
+      return;
+    }
+    const runId = String(pendingMsg.runId || "").trim();
+    const recoveryKey = `${pendingMsg.id}:${runId}:${pendingMsg.status || ""}`;
+    if (!runId || staleRunRecoveryRef.current === recoveryKey) return;
+    staleRunRecoveryRef.current = recoveryKey;
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}`);
+        const data = await resp.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!resp.ok) {
+          dispatch({
+            type: "UPD_MSG",
+            id: pendingMsg.id,
+            patch: {
+              status: "error",
+              statusText: "",
+              content: pendingMsg.lastError || failureMessageForRecoveredRun(runId)
+            }
+          });
+          clearActiveRunState();
+          return;
+        }
+        dispatch({
+          type: "UPD_MSG",
+          id: pendingMsg.id,
+          patch: {
+            ...runSnapshotMessageMeta(data),
+            runStartedAt: data?.started_at || pendingMsg.runStartedAt || (/* @__PURE__ */ new Date()).toISOString()
+          }
+        });
+        const status = runSnapshotStatus(data);
+        if (ACTIVE_RUN_STATUSES.has(status)) {
+          dispatch({
+            type: "UPD_MSG",
+            id: pendingMsg.id,
+            patch: {
+              ...buildRunningMessagePatch(data, pendingMsg),
+              runStartedAt: data?.started_at || pendingMsg.runStartedAt || (/* @__PURE__ */ new Date()).toISOString()
+            }
+          });
+          dispatch({ type: "CLEAR_AWAITING" });
+          dispatch({ type: "SET_RUN", id: runId });
+          appDispatch({ type: "SET_ACTIVE_RUN", runId });
+          appDispatch({ type: "SET_STREAMING", streaming: true });
+          return;
+        }
+        if (status === "awaiting_user_input") {
+          const awaitingPatch = buildAwaitingState(data, pendingMsg);
+          if (!awaitingPatch) {
+            dispatch({
+              type: "UPD_MSG",
+              id: pendingMsg.id,
+              patch: buildInvalidAwaitingErrorPatch(data, runId, pendingMsg)
+            });
+            dispatch({ type: "CLEAR_AWAITING" });
+            return;
+          }
+          dispatch({
+            type: "UPD_MSG",
+            id: pendingMsg.id,
+            patch: {
+              runStartedAt: data?.started_at || pendingMsg.runStartedAt || (/* @__PURE__ */ new Date()).toISOString(),
+              ...awaitingPatch
+            }
+          });
+          return;
+        }
+        dispatch({
+          type: "UPD_MSG",
+          id: pendingMsg.id,
+          patch: status === "completed" ? buildCompletedMessagePatch(data, pendingMsg) : buildFailedMessagePatch(data, runId, status, pendingMsg)
+        });
+        dispatch({ type: "CLEAR_AWAITING" });
+        clearActiveRunState();
+      } catch (_2) {
+        if (cancelled) return;
+        dispatch({
+          type: "UPD_MSG",
+          id: pendingMsg.id,
+          patch: {
+            status: "error",
+            statusText: "",
+            content: pendingMsg.lastError || failureMessageForRecoveredRun(runId)
+          }
+        });
+        dispatch({ type: "CLEAR_AWAITING" });
+        clearActiveRunState();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chat.messages, chat.streaming, appState.activeRunId, apiBase, appDispatch, clearActiveRunState]);
+  reactExports.useEffect(() => {
+    if ((chat.mode === "agent" || chat.mode === "plan") && !selectedModelAgentCapable) {
       dispatch({ type: "SET_MODE", mode: "chat" });
     }
   }, [chat.mode, selectedModelAgentCapable]);
   reactExports.useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chat.messages]);
+  reactExports.useEffect(() => {
+    if (!composerMenuOpen) return void 0;
+    const onMouseDown = (event) => {
+      if (composerMenuRef.current && !composerMenuRef.current.contains(event.target)) setComposerMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [composerMenuOpen]);
+  reactExports.useEffect(() => {
+    if (composerRunActive) setComposerMenuOpen(false);
+  }, [composerRunActive]);
+  reactExports.useEffect(() => {
+    const entries = chat.messages.filter(shouldMirrorActivityMessage).map((msg) => buildActivityEntry(msg, { id: `studio:${msg.id}`, source: studioMode ? "studio" : "chat" })).filter(Boolean);
+    const nextIds = new Set(entries.map((entry) => entry.id));
+    for (const entry of entries) {
+      appDispatch({ type: "UPSERT_ACTIVITY_ENTRY", entry });
+    }
+    const removedIds = mirroredActivityIdsRef.current.filter((id2) => !nextIds.has(id2));
+    if (removedIds.length) {
+      appDispatch({ type: "REMOVE_ACTIVITY_ENTRIES", ids: removedIds });
+    }
+    mirroredActivityIdsRef.current = Array.from(nextIds);
+  }, [chat.messages, appDispatch, studioMode]);
   reactExports.useEffect(() => {
     saveHistory(chat.messages);
   }, [chat.messages]);
@@ -8393,38 +10313,49 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     setResumeInput("");
     setChatId(`chat-${Date.now()}`);
   }, [saveCurrentSession]);
-  const compactContext = reactExports.useCallback(() => {
-    if (!chat.messages.length) return;
+  const compactContext = reactExports.useCallback(async () => {
+    if (!chat.messages.length || composerRunActive) return;
     saveCurrentSession();
-    const preserve = chat.messages.slice(-6);
-    const older = chat.messages.slice(0, -6).filter((m2) => String(m2?.content || "").trim());
-    const compactedAt = /* @__PURE__ */ new Date();
-    const summaryLines = older.slice(-24).map((m2) => {
-      const who = m2.role === "user" ? "User" : "Assistant";
-      const snippet = String(m2.content || "").replace(/\s+/g, " ").trim().slice(0, 180);
-      return `- ${who}: ${snippet}${snippet.length >= 180 ? "…" : ""}`;
-    });
-    const summary = [
-      `Context compacted at ${compactedAt.toLocaleString()}.`,
-      `Summarized ${older.length} earlier message(s) and kept the latest ${preserve.length}.`,
-      "",
-      "Compressed summary:",
-      ...summaryLines.length ? summaryLines : ["- No prior content to summarize."]
-    ].join("\n");
-    const summaryMsg = {
-      id: `c-${Date.now()}`,
-      role: "assistant",
-      content: summary,
-      status: "done",
-      mode: "chat",
-      modeLabel: "Compacted",
-      ts: compactedAt
-    };
-    dispatch({ type: "LOAD_MSGS", messages: [summaryMsg, ...preserve] });
-    saveHistory([summaryMsg, ...preserve]);
-    setChatId(`chat-${Date.now()}`);
-    setShowHistory(false);
-  }, [chat.messages, saveCurrentSession]);
+    try {
+      const resp = await fetch(`${apiBase}/api/chat/compact`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channel: "webchat",
+          sender_id: "desktop_user",
+          chat_id: chatId,
+          history: buildSimpleHistory(chat.messages, 200),
+          context_limit: contextLimit
+        })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.error) throw new Error(data.error || data.detail || resp.statusText);
+      const note = {
+        id: `c-${Date.now()}`,
+        role: "assistant",
+        content: `Context compacted into ${data.summary_file || "summary.md"} (${Number(data.summary_tokens || 0).toLocaleString()} tokens, level ${data.compaction_level || 0}).`,
+        status: "done",
+        mode: "chat",
+        modeLabel: "Compacted",
+        ts: /* @__PURE__ */ new Date()
+      };
+      dispatch({ type: "ADD_MSG", msg: note });
+      saveHistory([...chat.messages, note]);
+      setShowHistory(false);
+    } catch (err) {
+      const note = {
+        id: `c-${Date.now()}`,
+        role: "assistant",
+        content: `Context compaction failed: ${err.message}`,
+        status: "error",
+        mode: "chat",
+        modeLabel: "Compacted",
+        ts: /* @__PURE__ */ new Date()
+      };
+      dispatch({ type: "ADD_MSG", msg: note });
+      saveHistory([...chat.messages, note]);
+    }
+  }, [apiBase, chat.messages, composerRunActive, chatId, contextLimit, saveCurrentSession]);
   const loadSession = reactExports.useCallback((session) => {
     esRef.current?.close();
     saveCurrentSession();
@@ -8443,7 +10374,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     });
   }, []);
   reactExports.useEffect(() => {
-    if (chat.mode === "agent") setMcpEnabled(true);
+    if (chat.mode === "agent" || chat.mode === "plan") setMcpEnabled(true);
   }, [chat.mode]);
   reactExports.useEffect(() => {
     fetch(`${apiBase}/api/mcp/servers`).then((r2) => r2.ok ? r2.json() : []).then((data) => {
@@ -8524,13 +10455,31 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
   }, [appState.settings, machineSyncRunning, triggerMachineSync]);
   const send = reactExports.useCallback(async (text, isResume = false) => {
     const msg = (typeof text === "string" ? text.trim() : "") || input.trim();
-    if (!msg || chat.streaming) return;
+    if (!msg || composerRunActive) return;
+    if (!isResume && chat.mode === "research" && dr.kbEnabled) {
+      if (!researchKbs.length) {
+        window.alert("No knowledge bases found. Create and index one in Super-RAG or `kendr rag` first.");
+        return;
+      }
+      const targetKb = dr.kbId ? researchKbs.find((kb2) => kb2.id === dr.kbId) : activeResearchKb;
+      if (!targetKb) {
+        window.alert("No active indexed knowledge base is available. Select an indexed KB or set one active in Super-RAG.");
+        return;
+      }
+      if (String(targetKb.status || "").trim().toLowerCase() !== "indexed") {
+        window.alert(`Knowledge base "${targetKb.name || targetKb.id}" is not indexed yet.`);
+        return;
+      }
+    }
     setInput("");
     setResumeInput("");
     const runId = `ui-${Date.now().toString(36)}`;
     const userMsgId = `u-${runId}`;
-    const resumeMessageId = String(chat.awaitingContext?.messageId || "").trim();
-    const asstMsgId = isResume && resumeMessageId ? resumeMessageId : `a-${runId}`;
+    const currentAwaitingContext = chat.awaitingContext || null;
+    const resumeMessageId = String(currentAwaitingContext?.messageId || "").trim();
+    const resumeMessage = resumeMessageId ? (chat.messages || []).find((item) => item?.id === resumeMessageId) || null : null;
+    isResume && resumeMessageId && shouldInlineAwaitingContext(currentAwaitingContext);
+    const asstMsgId = `a-${runId}`;
     const currentMode = chat.mode;
     const currentModeLabel = modeLabel(currentMode);
     const sentAttachments = Array.isArray(attachments) ? attachments.map((item) => ({ ...item })) : [];
@@ -8551,54 +10500,63 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     dispatch({ type: "CLEAR_AWAITING" });
     setAttachments([]);
     if (isResume && resumeMessageId) {
+      const normalizedReply = msg.toLowerCase();
+      const approvalState = normalizedReply === "approve" ? "approved" : normalizedReply === "cancel" ? "rejected" : "suggested";
       dispatch({
         type: "UPD_MSG",
-        id: asstMsgId,
+        id: resumeMessageId,
         patch: {
-          content: "",
-          status: "thinking",
-          runId: isSimpleStudioChat ? null : runId,
-          runStartedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          mode: currentMode,
-          modeLabel: currentModeLabel,
-          statusText: "Continuing approved plan..."
-        }
-      });
-    } else {
-      dispatch({
-        type: "ADD_MSG",
-        msg: {
-          id: asstMsgId,
-          role: "assistant",
-          content: "",
-          steps: [],
-          progress: [],
-          checklist: [],
-          status: "thinking",
-          runId: isSimpleStudioChat ? null : runId,
-          runStartedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          mode: currentMode,
-          modeLabel: currentModeLabel,
-          ts: /* @__PURE__ */ new Date()
+          status: "done",
+          approvalState,
+          artifacts: stripReportArtifacts(resumeMessage?.artifacts)
         }
       });
     }
+    dispatch({
+      type: "ADD_MSG",
+      msg: {
+        id: asstMsgId,
+        role: "assistant",
+        content: "",
+        steps: [],
+        progress: [],
+        logs: [],
+        checklist: [],
+        status: "thinking",
+        runId: isSimpleStudioChat ? null : runId,
+        runStartedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        mode: currentMode,
+        modeLabel: currentModeLabel,
+        statusText: isResume ? "Continuing approved plan..." : "",
+        approvalScope: "",
+        approvalKind: "",
+        approvalRequest: null,
+        awaitingDecision: "",
+        approvalState: "",
+        ts: /* @__PURE__ */ new Date()
+      }
+    });
     appDispatch({ type: "SET_STREAMING", streaming: true });
     try {
-      const endpoint = isResume && chat.awaitingContext ? `${apiBase}/api/chat/resume` : isSimpleStudioChat ? `${apiBase}/api/chat/simple` : `${apiBase}/api/chat`;
-      const body = isResume && chat.awaitingContext ? {
-        run_id: chat.awaitingContext.runId,
-        workflow_id: chat.awaitingContext.workflowId,
+      const endpoint = isResume && currentAwaitingContext ? `${apiBase}/api/chat/resume` : isSimpleStudioChat ? `${apiBase}/api/chat/simple` : `${apiBase}/api/chat`;
+      const body = isResume && currentAwaitingContext ? {
+        run_id: currentAwaitingContext.runId,
+        workflow_id: currentAwaitingContext.workflowId,
         text: msg,
         channel: "webchat"
       } : buildPayload(msg, chatId, runId, appState.projectRoot, chat.mode, dr, sentAttachments, studioMode, mcpEnabled);
-      if (!isResume && appState.selectedModel) {
-        const selected = resolveSelectedModel(appState.selectedModel);
+      const activePayloadModel = !isResume ? chat.mode === "research" ? effectiveDeepResearchModel : appState.selectedModel ? resolveSelectedModel(appState.selectedModel) : null : null;
+      if (!isResume && activePayloadModel) {
+        const selected = activePayloadModel;
         if (selected.provider) body.provider = selected.provider;
         if (selected.model) body.model = selected.model;
       }
+      if (!isResume && chat.mode === "research" && effectiveDeepResearchModel?.model) {
+        body.research_model = effectiveDeepResearchModel.model;
+      }
       if (!isResume) {
         body.history = buildSimpleHistory(chat.messages, 14);
+        body.context_limit = contextLimit;
       }
       if (isSimpleStudioChat && !isResume) {
         body.stream = true;
@@ -8611,8 +10569,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
         if (!resp2.ok) {
           refreshModelInventory(true);
           dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: data.error || data.detail || resp2.statusText, status: "error", runId: null } });
-          dispatch({ type: "SET_STREAMING", val: false });
-          appDispatch({ type: "SET_STREAMING", streaming: false });
+          clearActiveRunState();
           return;
         }
         if (data.streaming) {
@@ -8624,8 +10581,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
           return;
         } else {
           dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: data.answer || "", status: "done", runId: null, artifacts: [] } });
-          dispatch({ type: "SET_STREAMING", val: false });
-          appDispatch({ type: "SET_STREAMING", streaming: false });
+          clearActiveRunState();
           return;
         }
       }
@@ -8638,8 +10594,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
         const err = await resp.json().catch(() => ({}));
         refreshModelInventory(true);
         dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: err.error || err.detail || resp.statusText, status: "error" } });
-        dispatch({ type: "SET_STREAMING", val: false });
-        appDispatch({ type: "SET_STREAMING", streaming: false });
+        clearActiveRunState();
         return;
       }
       const { run_id: srvRunId } = await resp.json().catch(() => ({}));
@@ -8651,30 +10606,223 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     } catch (err) {
       refreshModelInventory(true);
       dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: `Cannot reach backend: ${err.message}`, status: "error" } });
-      dispatch({ type: "SET_STREAMING", val: false });
-      appDispatch({ type: "SET_STREAMING", streaming: false });
+      clearActiveRunState();
     }
-  }, [input, chat.streaming, chat.awaitingContext, chat.mode, apiBase, appState.projectRoot, appState.selectedModel, chatId, dr, attachments, studioMode, isSimpleStudioChat, mcpEnabled, appDispatch, refreshModelInventory]);
+  }, [input, composerRunActive, chat.awaitingContext, chat.mode, apiBase, appState.projectRoot, appState.selectedModel, chatId, dr, attachments, studioMode, isSimpleStudioChat, mcpEnabled, appDispatch, refreshModelInventory, contextLimit, researchKbs, activeResearchKb, clearActiveRunState]);
   const openStream = reactExports.useCallback((runId, asstMsgId) => {
     esRef.current?.close();
     const es = new EventSource(`${apiBase}/api/stream?run_id=${encodeURIComponent(runId)}`);
-    esRef.current = es;
     let stepCounter = 0;
     let closed = false;
-    const closeClean = () => {
-      closed = true;
-      es.close();
+    let statusPollTimer = null;
+    const existingMsg = (chat.messages || []).find((msg) => msg?.id === asstMsgId || String(msg?.runId || "").trim() === runId);
+    const seenLogSignatures = new Set(
+      (Array.isArray(existingMsg?.logs) ? existingMsg.logs : []).map((item) => buildExecutionLogSignature(item)).filter(Boolean)
+    );
+    const fallback = {
+      transportErrored: false,
+      syncingFile: false,
+      logPath: "",
+      logContentLength: 0,
+      logMtime: 0,
+      logBuffer: "",
+      parserState: {}
     };
+    const closeClean = () => {
+      if (closed) return;
+      closed = true;
+      if (statusPollTimer) window.clearInterval(statusPollTimer);
+      es.close();
+      if (esRef.current?.close === closeClean) esRef.current = null;
+    };
+    esRef.current = { close: closeClean };
+    const finishStream = () => {
+      closeClean();
+      clearActiveRunState();
+    };
+    const pushLogEntry = (item) => {
+      const text = String(item?.text || "").trim();
+      if (!text) return false;
+      const entry = {
+        id: String(item?.id || `log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
+        ts: String(item?.ts || item?.timestamp || (/* @__PURE__ */ new Date()).toISOString()),
+        clock: String(item?.clock || executionLogClockLabel(item?.ts || item?.timestamp || "")).trim(),
+        text,
+        category: String(item?.category || "info").trim() || "info"
+      };
+      const signature = buildExecutionLogSignature(entry);
+      if (signature && seenLogSignatures.has(signature)) return false;
+      if (signature) seenLogSignatures.add(signature);
+      dispatch({ type: "ADD_LOG_ENTRY", msgId: asstMsgId, item: entry });
+      dispatch({
+        type: "UPD_MSG",
+        id: asstMsgId,
+        patch: {
+          status: "streaming",
+          statusText: text
+        }
+      });
+      return true;
+    };
+    const applyRunSnapshot = (snapshot, fallbackStatus = "") => {
+      if (closed) return;
+      const data = snapshot && typeof snapshot === "object" ? snapshot : {};
+      const status = runSnapshotStatus(data, fallbackStatus);
+      if (status === "awaiting_user_input") {
+        const awaitingPatch = buildAwaitingState(data, existingMsg || {});
+        if (!awaitingPatch) {
+          dispatch({
+            type: "UPD_MSG",
+            id: asstMsgId,
+            patch: buildInvalidAwaitingErrorPatch(data, runId, existingMsg || {})
+          });
+          dispatch({ type: "CLEAR_AWAITING" });
+          finishStream();
+          return;
+        }
+        dispatch({
+          type: "SET_AWAITING",
+          ctx: buildAwaitingContext(data, runId, asstMsgId, awaitingPatch)
+        });
+        dispatch({
+          type: "UPD_MSG",
+          id: asstMsgId,
+          patch: {
+            ...runSnapshotMessageMeta(data),
+            ...awaitingPatch,
+            artifacts: runSnapshotArtifacts(data),
+            checklist: runSnapshotChecklist(data)
+          }
+        });
+        finishStream();
+        return;
+      }
+      dispatch({
+        type: "UPD_MSG",
+        id: asstMsgId,
+        patch: status === "completed" ? buildCompletedMessagePatch(data, existingMsg || {}) : buildFailedMessagePatch(data, runId, status, existingMsg || {})
+      });
+      dispatch({ type: "CLEAR_AWAITING" });
+      finishStream();
+    };
+    const syncExecutionLogFromFile = async (logPath) => {
+      const fileApi = window.kendrAPI?.fs;
+      if (closed || !fileApi?.readFile) return;
+      const targetPath = String(logPath || "").trim();
+      if (!targetPath || fallback.syncingFile) return;
+      if (targetPath !== fallback.logPath) {
+        fallback.logPath = targetPath;
+        fallback.logContentLength = 0;
+        fallback.logMtime = 0;
+        fallback.logBuffer = "";
+        fallback.parserState = {};
+      }
+      fallback.syncingFile = true;
+      try {
+        if (fileApi?.stat) {
+          const stats = await fileApi.stat(targetPath);
+          const nextSize = Number(stats?.size || 0);
+          const nextMtime = Number(stats?.mtime || 0);
+          if (!stats?.error && nextSize === fallback.logContentLength && nextMtime === fallback.logMtime) return;
+          if (!stats?.error && nextSize < fallback.logContentLength) {
+            fallback.logContentLength = 0;
+            fallback.logMtime = 0;
+            fallback.logBuffer = "";
+            fallback.parserState = {};
+          }
+        }
+        const result = await fileApi.readFile(targetPath);
+        if (result?.error) return;
+        const content = String(result?.content || "");
+        if (closed || !content) return;
+        if (content.length < fallback.logContentLength) {
+          fallback.logContentLength = 0;
+          fallback.logMtime = 0;
+          fallback.logBuffer = "";
+          fallback.parserState = {};
+        }
+        if (content.length === fallback.logContentLength) return;
+        const delta = content.slice(fallback.logContentLength);
+        fallback.logContentLength = content.length;
+        if (fileApi?.stat) {
+          const stats = await fileApi.stat(targetPath);
+          if (!stats?.error) fallback.logMtime = Number(stats?.mtime || fallback.logMtime || 0);
+        }
+        fallback.logBuffer += delta;
+        const lines = fallback.logBuffer.split(/\r?\n/);
+        fallback.logBuffer = lines.pop() || "";
+        for (const line of lines) {
+          const entry = parseExecutionLogLine(line, fallback.parserState);
+          if (entry) pushLogEntry(entry);
+        }
+      } catch (_2) {
+      } finally {
+        fallback.syncingFile = false;
+      }
+    };
+    const refreshRunSnapshot = async () => {
+      if (closed) return;
+      try {
+        const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(runId)}`);
+        const data = await resp.json().catch(() => ({}));
+        if (closed) return;
+        if (!resp.ok) {
+          dispatch({
+            type: "UPD_MSG",
+            id: asstMsgId,
+            patch: buildFailedMessagePatch(data, runId, "failed", existingMsg || {})
+          });
+          dispatch({ type: "CLEAR_AWAITING" });
+          finishStream();
+          return;
+        }
+        dispatch({
+          type: "UPD_MSG",
+          id: asstMsgId,
+          patch: {
+            ...runSnapshotMessageMeta(data)
+          }
+        });
+        const logPath = resolveRunSnapshotLogPath(data);
+        if (logPath) await syncExecutionLogFromFile(logPath);
+        const status = runSnapshotStatus(data);
+        if (TERMINAL_RUN_STATUSES.has(status) || status === "awaiting_user_input") {
+          applyRunSnapshot(data, status);
+          return;
+        }
+        if (ACTIVE_RUN_STATUSES.has(status)) {
+          dispatch({
+            type: "UPD_MSG",
+            id: asstMsgId,
+            patch: {
+              ...buildRunningMessagePatch(data, {
+                ...existingMsg || {},
+                statusText: fallback.transportErrored ? "Reconnected to background run. Checking execution log..." : existingMsg?.statusText
+              })
+            }
+          });
+          dispatch({ type: "CLEAR_AWAITING" });
+          fallback.transportErrored = false;
+        }
+      } catch (_2) {
+      }
+    };
+    statusPollTimer = window.setInterval(() => {
+      refreshRunSnapshot();
+    }, 2e3);
+    refreshRunSnapshot();
     es.addEventListener("status", (e) => {
       try {
         const d = JSON.parse(e.data);
         if (d.status && d.status !== "connected") {
+          fallback.transportErrored = false;
           dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { statusText: sanitizeStatusMessage(d.message || d.status) } });
           dispatch({
             type: "ADD_PROGRESS",
             msgId: asstMsgId,
             item: {
-              id: `status-${Date.now()}`,
+              id: "runtime-status",
+              slot: "runtime-status",
               title: "Runtime update",
               detail: sanitizeStatusMessage(d.message || d.status || ""),
               kind: "status",
@@ -8745,10 +10893,25 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
       } catch (_2) {
       }
     });
+    es.addEventListener("log", (e) => {
+      try {
+        const item = JSON.parse(e.data);
+        fallback.transportErrored = false;
+        pushLogEntry({
+          id: item.id || `log-${Date.now()}`,
+          ts: item.timestamp || (/* @__PURE__ */ new Date()).toISOString(),
+          clock: item.clock || "",
+          text: item.text || "",
+          category: item.category || "info"
+        });
+      } catch (_2) {
+      }
+    });
     es.addEventListener("delta", (e) => {
       try {
         const d = JSON.parse(e.data);
         if (!d.delta) return;
+        fallback.transportErrored = false;
         dispatch({ type: "APPEND_MSG_CONTENT", id: asstMsgId, delta: String(d.delta) });
         dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { status: "streaming" } });
       } catch (_2) {
@@ -8757,93 +10920,210 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
     es.addEventListener("result", (e) => {
       try {
         const d = JSON.parse(e.data);
-        const output = d.final_output || d.output || d.draft_response || d.response || "";
-        const awaiting = !!(d.awaiting_user_input || d.plan_waiting_for_approval || d.plan_needs_clarification || d.pending_user_input_kind || d.approval_pending_scope || d.pending_user_question || d.approval_request && Object.keys(d.approval_request).length > 0);
-        if (awaiting) {
-          const checklist = extractChecklist(d);
+        const awaitingSignal = runSnapshotSignalsAwaiting(d);
+        if (awaitingSignal) {
+          const awaitingSnapshot = { ...d, status: "awaiting_user_input", run_id: runId };
+          const awaitingPatch = buildAwaitingState(awaitingSnapshot, existingMsg || {});
+          if (!awaitingPatch) {
+            dispatch({
+              type: "UPD_MSG",
+              id: asstMsgId,
+              patch: buildInvalidAwaitingRunningPatch(
+                { ...d, status: "running", run_id: runId },
+                existingMsg || {}
+              )
+            });
+            dispatch({ type: "CLEAR_AWAITING" });
+            refreshRunSnapshot();
+            return;
+          }
           dispatch({
             type: "SET_AWAITING",
-            ctx: {
-              runId,
-              workflowId: d.workflow_id || runId,
-              messageId: asstMsgId,
-              prompt: d.pending_user_question || output || "Waiting for your input.",
-              kind: d.pending_user_input_kind || "",
-              scope: d.approval_pending_scope || "",
-              approvalRequest: d.approval_request || null
+            ctx: buildAwaitingContext(awaitingSnapshot, runId, asstMsgId, awaitingPatch)
+          });
+          dispatch({
+            type: "UPD_MSG",
+            id: asstMsgId,
+            patch: {
+              ...runSnapshotMessageMeta(awaitingSnapshot),
+              ...awaitingPatch,
+              artifacts: d.artifact_files || [],
+              checklist: runSnapshotChecklist(d)
             }
           });
-          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: output, status: "awaiting", artifacts: d.artifact_files || [], checklist } });
-        } else {
-          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: output, status: "done", artifacts: d.artifact_files || [], checklist: extractChecklist(d) } });
+          return;
         }
+        dispatch({
+          type: "UPD_MSG",
+          id: asstMsgId,
+          patch: buildCompletedMessagePatch({ ...d, status: "completed", run_id: runId }, existingMsg || {})
+        });
+        dispatch({ type: "CLEAR_AWAITING" });
       } catch (_2) {
       }
     });
     es.addEventListener("done", (e) => {
+      let shouldFinish = true;
       try {
         const d = JSON.parse(e.data);
-        if (d.awaiting_user_input || String(d.status).toLowerCase() === "awaiting_user_input") {
-          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { status: "awaiting" } });
-        } else {
-          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { status: d.status === "failed" ? "error" : "done" } });
-          dispatch({ type: "CLEAR_AWAITING" });
+        const awaitingSignal = runSnapshotSignalsAwaiting(d);
+        if (awaitingSignal) {
+          const awaitingSnapshot = { ...d, status: "awaiting_user_input", run_id: runId };
+          const awaitingPatch = buildAwaitingState(awaitingSnapshot, existingMsg || {});
+          if (!awaitingPatch) {
+            dispatch({
+              type: "UPD_MSG",
+              id: asstMsgId,
+              patch: buildInvalidAwaitingRunningPatch(
+                { ...d, status: "running", run_id: runId },
+                existingMsg || {}
+              )
+            });
+            dispatch({ type: "CLEAR_AWAITING" });
+            shouldFinish = false;
+            refreshRunSnapshot();
+            return;
+          }
+          dispatch({
+            type: "SET_AWAITING",
+            ctx: buildAwaitingContext(awaitingSnapshot, runId, asstMsgId, awaitingPatch)
+          });
+          dispatch({
+            type: "UPD_MSG",
+            id: asstMsgId,
+            patch: {
+              ...runSnapshotMessageMeta(awaitingSnapshot),
+              ...awaitingPatch
+            }
+          });
+          return;
         }
+        const normalized = runSnapshotStatus({ ...d, run_id: runId });
+        dispatch({
+          type: "UPD_MSG",
+          id: asstMsgId,
+          patch: normalized === "completed" ? buildCompletedMessagePatch({ ...d, status: "completed", run_id: runId }, existingMsg || {}) : buildFailedMessagePatch({ ...d, status: normalized, run_id: runId }, runId, normalized, existingMsg || {})
+        });
+        dispatch({ type: "CLEAR_AWAITING" });
       } catch (_2) {
       }
-      closeClean();
-      dispatch({ type: "SET_STREAMING", val: false });
-      appDispatch({ type: "SET_STREAMING", streaming: false });
-      appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
+      if (shouldFinish) finishStream();
     });
     es.addEventListener("error", (e) => {
+      const payload = String(e?.data || "").trim();
+      if (!payload) return;
       try {
-        const d = JSON.parse(e.data);
-        dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { content: d.message || "Run failed.", status: "error" } });
+        const d = JSON.parse(payload);
+        dispatch({
+          type: "UPD_MSG",
+          id: asstMsgId,
+          patch: {
+            ...runSnapshotMessageMeta({ ...d, status: "failed", run_id: runId }),
+            content: d.message || "Run failed.",
+            status: "error"
+          }
+        });
       } catch (_2) {
-        dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { status: "error" } });
+        dispatch({
+          type: "UPD_MSG",
+          id: asstMsgId,
+          patch: {
+            ...runSnapshotMessageMeta({ status: "failed", run_id: runId }),
+            status: "error"
+          }
+        });
       }
       refreshModelInventory(true);
-      closeClean();
-      dispatch({ type: "SET_STREAMING", val: false });
-      appDispatch({ type: "SET_STREAMING", streaming: false });
-      appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
+      finishStream();
     });
     es.onerror = () => {
       if (closed) return;
-      refreshModelInventory(true);
-      dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { status: "error" } });
-      closeClean();
-      dispatch({ type: "SET_STREAMING", val: false });
-      appDispatch({ type: "SET_STREAMING", streaming: false });
-      appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
+      fallback.transportErrored = true;
+      dispatch({
+        type: "UPD_MSG",
+        id: asstMsgId,
+        patch: {
+          status: "streaming",
+          statusText: "Run stream interrupted. Checking backend status..."
+        }
+      });
+      refreshRunSnapshot();
     };
-  }, [apiBase, appDispatch, refreshModelInventory]);
+  }, [apiBase, appDispatch, refreshModelInventory, chat.messages, clearActiveRunState]);
   reactExports.useEffect(() => {
-    const activeRunId = String(appState.activeRunId || "").trim();
-    if (!activeRunId) return;
-    if (resumeAttemptedRunRef.current === activeRunId) return;
-    resumeAttemptedRunRef.current = activeRunId;
+    const activeRunId2 = String(appState.activeRunId || "").trim();
+    if (!activeRunId2) return;
+    if (resumeAttemptedRunRef.current === activeRunId2) return;
+    resumeAttemptedRunRef.current = activeRunId2;
     let cancelled = false;
     (async () => {
       try {
-        const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(activeRunId)}`);
+        const existing = (chat.messages || []).find((m2) => String(m2.runId || "") === activeRunId2);
+        const resp = await fetch(`${apiBase}/api/runs/${encodeURIComponent(activeRunId2)}`);
         const data = await resp.json().catch(() => ({}));
         if (cancelled) return;
-        if (!resp.ok) return;
-        const status = String(data?.status || "").toLowerCase();
-        if (["completed", "failed", "cancelled"].includes(status)) {
-          appDispatch({ type: "SET_STREAMING", streaming: false });
-          appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
+        if (!resp.ok) {
+          if (existing?.id) {
+            dispatch({
+              type: "UPD_MSG",
+              id: existing.id,
+              patch: buildFailedMessagePatch(data, activeRunId2, "failed", existing)
+            });
+          }
+          dispatch({ type: "CLEAR_AWAITING" });
+          clearActiveRunState();
+          return;
+        }
+        const status = runSnapshotStatus(data);
+        if (TERMINAL_RUN_STATUSES.has(status)) {
+          if (existing?.id) {
+            dispatch({
+              type: "UPD_MSG",
+              id: existing.id,
+              patch: status === "completed" ? buildCompletedMessagePatch(data, existing) : buildFailedMessagePatch(data, activeRunId2, status, existing)
+            });
+          }
+          dispatch({ type: "CLEAR_AWAITING" });
+          clearActiveRunState();
           return;
         }
         let asstMsgId = "";
-        const existing = (chat.messages || []).find((m2) => String(m2.runId || "") === activeRunId);
+        if (status === "awaiting_user_input" && !buildAwaitingState(data, existing || {})) {
+          if (existing?.id) {
+            dispatch({
+              type: "UPD_MSG",
+              id: existing.id,
+              patch: buildInvalidAwaitingErrorPatch(data, activeRunId2, existing)
+            });
+          }
+          dispatch({ type: "CLEAR_AWAITING" });
+          clearActiveRunState();
+          return;
+        }
         if (existing?.id) {
+          const awaitingPatch = status === "awaiting_user_input" ? buildAwaitingState(data, existing) : null;
           asstMsgId = existing.id;
-          dispatch({ type: "UPD_MSG", id: asstMsgId, patch: { status: status === "awaiting_user_input" ? "awaiting" : "streaming" } });
+          dispatch({
+            type: "UPD_MSG",
+            id: asstMsgId,
+            patch: {
+              ...status === "awaiting_user_input" ? {
+                ...runSnapshotMessageMeta(data),
+                ...awaitingPatch,
+                status: "awaiting"
+              } : buildRunningMessagePatch(data, existing)
+            }
+          });
+          if (status === "awaiting_user_input" && awaitingPatch) {
+            dispatch({
+              type: "SET_AWAITING",
+              ctx: buildAwaitingContext(data, activeRunId2, asstMsgId, awaitingPatch)
+            });
+          }
+          if (status !== "awaiting_user_input") dispatch({ type: "CLEAR_AWAITING" });
         } else {
-          asstMsgId = `a-${activeRunId}-resume`;
+          const awaitingPatch = status === "awaiting_user_input" ? buildAwaitingState(data) : null;
+          asstMsgId = `a-${activeRunId2}-resume`;
           dispatch({
             type: "ADD_MSG",
             msg: {
@@ -8852,45 +11132,63 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
               content: "",
               steps: [],
               progress: [],
-              status: status === "awaiting_user_input" ? "awaiting" : "thinking",
-              runId: activeRunId,
+              logs: [],
+              status: status === "awaiting_user_input" ? "awaiting" : "streaming",
+              runId: activeRunId2,
               runStartedAt: data?.started_at || (/* @__PURE__ */ new Date()).toISOString(),
+              runOutputDir: String(data?.run_output_dir || data?.output_dir || data?.resume_output_dir || "").trim(),
+              executionLogPath: resolveRunSnapshotLogPath(data),
+              lastKnownRunStatus: runSnapshotStatus(data),
+              lastError: runSnapshotErrorText(data, activeRunId2, status),
               mode: chat.mode,
               modeLabel: modeLabel(chat.mode),
-              ts: /* @__PURE__ */ new Date()
+              approvalScope: awaitingPatch?.approvalScope || "",
+              approvalKind: awaitingPatch?.approvalKind || "",
+              approvalRequest: awaitingPatch?.approvalRequest || null,
+              awaitingDecision: awaitingPatch?.awaitingDecision || "reply",
+              approvalState: awaitingPatch?.approvalState || "",
+              ts: /* @__PURE__ */ new Date(),
+              ...status === "awaiting_user_input" ? awaitingPatch : {}
             }
           });
+          if (status === "awaiting_user_input" && awaitingPatch) {
+            dispatch({
+              type: "SET_AWAITING",
+              ctx: buildAwaitingContext(data, activeRunId2, asstMsgId, awaitingPatch)
+            });
+          }
         }
-        dispatch({ type: "SET_RUN", id: activeRunId });
+        dispatch({ type: "SET_RUN", id: activeRunId2 });
+        if (status !== "awaiting_user_input") dispatch({ type: "CLEAR_AWAITING" });
         dispatch({ type: "SET_STREAMING", val: status !== "awaiting_user_input" });
         appDispatch({ type: "SET_STREAMING", streaming: status !== "awaiting_user_input" });
-        openStream(activeRunId, asstMsgId);
+        openStream(activeRunId2, asstMsgId);
       } catch (_2) {
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [appState.activeRunId, apiBase, openStream, chat.messages, chat.mode, appDispatch]);
+  }, [appState.activeRunId, apiBase, openStream, chat.messages, chat.mode, appDispatch, clearActiveRunState]);
   const stopRun = reactExports.useCallback(async () => {
+    const runId = String(stopTargetRunId || "").trim();
+    if (!runId) return;
     esRef.current?.close();
-    const activeMsg = chat.messages.find((m2) => m2.status === "streaming" || m2.status === "thinking");
+    const activeMsg = [...chat.messages || []].reverse().find((msg) => String(msg?.runId || "").trim() === runId && isPendingRunStatus(msg?.status));
     if (activeMsg) {
       dispatch({ type: "UPD_MSG", id: activeMsg.id, patch: { status: "done" } });
     }
     dispatch({ type: "CLEAR_AWAITING" });
-    if (chat.activeRunId) {
+    if (runId) {
       await fetch(`${apiBase}/api/runs/stop`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ run_id: chat.activeRunId })
+        body: JSON.stringify({ run_id: runId })
       }).catch(() => {
       });
     }
-    dispatch({ type: "SET_STREAMING", val: false });
-    appDispatch({ type: "SET_STREAMING", streaming: false });
-    appDispatch({ type: "SET_ACTIVE_RUN", runId: null });
-  }, [chat.activeRunId, chat.messages, apiBase, appDispatch]);
+    clearActiveRunState();
+  }, [stopTargetRunId, chat.messages, apiBase, clearActiveRunState]);
   const submitSkillApproval = reactExports.useCallback(async (scope, note = "") => {
     const ctx = chat.awaitingContext || {};
     const request = ctx.approvalRequest && typeof ctx.approvalRequest === "object" ? ctx.approvalRequest : {};
@@ -8922,6 +11220,9 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
   };
   const isOnline = appState.backendStatus === "running";
   const studioModelLabel = (() => {
+    if (chat.mode === "research" && effectiveDeepResearchModel?.model) {
+      return `Research · ${effectiveDeepResearchModel.shortLabel || composerModelMeta.label}`;
+    }
     if (selectedModelMeta.model) return `Selected · ${selectedModelMeta.label}`;
     const provider = String(modelInventory?.configured_provider || "").trim();
     const model = String(modelInventory?.configured_model || "").trim();
@@ -8936,7 +11237,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
       const next = [...prev];
       for (const filePath of paths) {
         if (seen2.has(filePath)) continue;
-        next.push({ path: filePath, type: detectAttachmentType(filePath), name: basename(filePath) });
+        next.push({ path: filePath, type: detectAttachmentType(filePath), name: basename$1(filePath) });
         seen2.add(filePath);
       }
       return next;
@@ -8945,7 +11246,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
   const attachFolder = reactExports.useCallback(async () => {
     const dir = await window.kendrAPI?.dialog.openDirectory();
     if (!dir) return;
-    setAttachments((prev) => prev.some((item) => item.path === dir) ? prev : [...prev, { path: dir, type: "folder", name: basename(dir) }]);
+    setAttachments((prev) => prev.some((item) => item.path === dir) ? prev : [...prev, { path: dir, type: "folder", name: basename$1(dir) }]);
   }, []);
   const removeAttachment = reactExports.useCallback((path) => {
     setAttachments((prev) => prev.filter((item) => item.path !== path));
@@ -8970,7 +11271,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
           saved.push({
             path: result.path,
             type: "image",
-            name: basename(result.path)
+            name: basename$1(result.path)
           });
         }
       } catch (_2) {
@@ -8990,19 +11291,22 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
   }, []);
   const MODES = [
     { id: "chat", label: "💬 Chat" },
+    { id: "plan", label: "🗺 Plan" },
     { id: "agent", label: "✨ Agent" },
     { id: "research", label: "🔬 Deep Research" }
   ];
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-panel${fullWidth ? " kc-panel--full" : ""}`, children: [
+  const showLandingLayout = minimalStudio && !hasMessages;
+  const composerBanner = composerRunActive ? "Run active. Live execution log updates are streaming in the current run bubble. Stop the run before sending another message." : displayableAwaitingContext ? "Run paused for your input. Reply here to continue the same workflow." : "";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-panel${fullWidth ? " kc-panel--full" : ""}${showLandingLayout ? " kc-panel--landing" : ""}${chat.mode === "research" ? " kc-panel--research-active" : ""}`, children: [
     !hideHeader && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-header", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-logo", children: [
         "K",
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "endr" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-header-model", title: studioModelLabel, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `kc-header-model-dot ${selectedModelMeta.isLocal || String(modelInventory?.configured_provider || "").toLowerCase() === "ollama" ? "local" : ""}` }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `kc-header-model-dot ${composerModelMeta.isLocal || String(modelInventory?.configured_provider || "").toLowerCase() === "ollama" ? "local" : ""}` }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: studioModelLabel }),
-        !studioMode && appState.projectRoot && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-header-model-project", children: basename(appState.projectRoot) })
+        !studioMode && appState.projectRoot && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-header-model-project", children: basename$1(appState.projectRoot) })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-header-status", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `kc-dot ${isOnline ? "kc-dot--on" : ""}` }),
@@ -9014,31 +11318,74 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
         !fullWidth && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-icon-btn", title: "Close", onClick: () => appDispatch({ type: "TOGGLE_CHAT" }), children: "✕" })
       ] })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-mode-bar", children: MODES.map((m2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
-      "button",
-      {
-        className: `kc-mode-pill ${chat.mode === m2.id ? "kc-mode-pill--active" : ""} ${m2.id === "agent" && !selectedModelAgentCapable ? "kc-mode-pill--disabled" : ""}`,
-        onClick: () => {
-          if (m2.id === "agent" && !selectedModelAgentCapable) return;
-          dispatch({ type: "SET_MODE", mode: m2.id });
+    !minimalStudio && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-mode-bar", children: MODES.map((m2) => {
+      const requiresAgent = m2.id === "agent" || m2.id === "plan";
+      const disabled = requiresAgent && !selectedModelAgentCapable;
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: `kc-mode-pill ${chat.mode === m2.id ? "kc-mode-pill--active" : ""} ${disabled ? "kc-mode-pill--disabled" : ""}`,
+          onClick: () => {
+            if (disabled) return;
+            dispatch({ type: "SET_MODE", mode: m2.id });
+          },
+          title: disabled ? "Selected model cannot run planning or agent workflows." : "",
+          children: m2.label
         },
-        title: m2.id === "agent" && !selectedModelAgentCapable ? "Selected model cannot run as agent." : "",
-        children: m2.label
-      },
-      m2.id
-    )) }),
-    chat.mode === "research" && /* @__PURE__ */ jsxRuntimeExports.jsx(DeepResearchPanel, { dr, updateDr }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-messages", children: [
-      chat.messages.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(WelcomeScreen, { onSuggest: (s) => {
-        setInput(s);
-        inputRef.current?.focus();
-      } }),
-      chat.messages.map(
-        (msg) => msg.role === "user" ? /* @__PURE__ */ jsxRuntimeExports.jsx(UserMessage, { msg }, msg.id) : /* @__PURE__ */ jsxRuntimeExports.jsx(AssistantMessage, { msg }, msg.id)
-      ),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: messagesEndRef })
+        m2.id
+      );
+    }) }),
+    minimalStudio && hasMessages && studioAccessory && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-compact-toolbar", children: studioAccessory }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-conversation-shell${chat.mode === "research" ? " kc-conversation-shell--research" : ""}`, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-messages", children: [
+        chat.messages.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          minimalStudio && studioAccessory && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-landing-accessory", children: studioAccessory }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(WelcomeScreen, { minimal: minimalStudio, onSuggest: (s) => {
+            setInput(s);
+            inputRef.current?.focus();
+          } })
+        ] }),
+        chat.messages.map(
+          (msg) => msg.role === "user" ? /* @__PURE__ */ jsxRuntimeExports.jsx(UserMessage, { msg }, msg.id) : /* @__PURE__ */ jsxRuntimeExports.jsx(AssistantMessage, { msg, onQuickReply: (reply) => send(reply, true), onSendSuggestion: (reply) => send(reply, true), onOpenArtifact: openArtifact, onDownloadArtifact: downloadArtifact, onReviewArtifact: reviewArtifact }, msg.id)
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: messagesEndRef })
+      ] }),
+      chat.mode === "research" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        DeepResearchPanel,
+        {
+          dr,
+          updateDr,
+          collapsed: dr.collapsed,
+          modelOptions: deepResearchModelState.options,
+          inheritedModel: deepResearchModelState.inheritedOption,
+          inheritedReason: deepResearchModelState.inheritedReason,
+          effectiveModel: deepResearchModelState.effectiveOption,
+          effectiveModelSource: deepResearchModelState.effectiveSource,
+          recommendedDeepResearchModel,
+          recommendedDeepResearchEvidenceStage,
+          searchProviderState: deepResearchSearchProviderState,
+          effectiveSearchProvider: effectiveDeepResearchSearchProvider,
+          indexedKbs: indexedResearchKbs,
+          activeKb: activeResearchKb,
+          selectedKb: selectedResearchKb,
+          projectRoot: appState.projectRoot,
+          apiBase,
+          refreshKbs: loadResearchKbs,
+          activeDeepResearchWorkflowCombo,
+          workflowStageOptions: deepResearchWorkflowStageOptions
+        }
+      )
     ] }),
-    chat.awaitingContext && /* @__PURE__ */ jsxRuntimeExports.jsx(
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      GitDiffPreview,
+      {
+        cwd: appState.projectRoot,
+        filePath: diffPreviewPath,
+        onClose: () => setDiffPreviewPath(""),
+        onOpenFile: (filePath) => openArtifact({ path: filePath })
+      }
+    ),
+    displayableAwaitingContext && !inlineAwaiting && /* @__PURE__ */ jsxRuntimeExports.jsx(
       AgentApprovalModal,
       {
         ctx: chat.awaitingContext,
@@ -9074,11 +11421,12 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
       }
     ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-input-area", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-attach-bar", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-attach-actions", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-attach-btn", onClick: attachFiles, children: "+ Files" }),
-          studioMode && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-attach-btn", onClick: attachFolder, children: "+ Folder" }),
-          chat.mode === "agent" ? /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      !!composerBanner && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `kc-composer-state${composerRunActive ? " kc-composer-state--running" : " kc-composer-state--awaiting"}`, children: composerBanner }),
+      (showInlineAttachmentTools || attachments.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-attach-bar", children: [
+        showInlineAttachmentTools && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-attach-actions", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-attach-btn", onClick: attachFiles, disabled: composerRunActive, children: "+ Files" }),
+          studioMode && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-attach-btn", onClick: attachFolder, disabled: composerRunActive, children: "+ Folder" }),
+          chat.mode === "agent" || chat.mode === "plan" ? /* @__PURE__ */ jsxRuntimeExports.jsxs(
             "span",
             {
               className: `kc-mcp-indicator${mcpEnabled && mcpUndiscovered > 0 ? " kc-mcp-indicator--warn" : ""}`,
@@ -9094,6 +11442,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
             {
               className: `kc-attach-btn kc-mcp-toggle${mcpEnabled ? " kc-mcp-toggle--on" : ""}${mcpEnabled && mcpUndiscovered > 0 ? " kc-mcp-toggle--warn" : ""}`,
               onClick: () => setMcpEnabled((v2) => !v2),
+              disabled: composerRunActive,
               title: mcpEnabled && mcpUndiscovered > 0 ? `${mcpUndiscovered} server${mcpUndiscovered !== 1 ? "s have" : " has"} no tools discovered — open MCP Settings to run discovery` : mcpEnabled ? "Disable MCP tools for this chat" : `Enable MCP tools (${mcpServerCount} server${mcpServerCount !== 1 ? "s" : ""} available)`,
               children: [
                 "🔌 MCP ",
@@ -9116,7 +11465,7 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
         "📁 ",
         appState.projectRoot.split(/[\\/]/).pop()
       ] }) }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-context-row", children: [
+      showInlineContextTools && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-context-row", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-context-badge", title: `Estimated context usage: ${estimatedContextTokens} / ${contextLimit} tokens (${contextPct}%)`, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-context-icon", children: "🧠" }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-context-text", children: [
@@ -9133,39 +11482,199 @@ function ChatPanel({ fullWidth = false, hideHeader = false, studioMode = false }
             }
           ) })
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-attach-btn", onClick: compactContext, title: "Compact context and continue in a fresh backend session", children: "Compact" })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-attach-btn", onClick: compactContext, title: "Compact context and continue in a fresh backend session", disabled: composerRunActive, children: "Compact" })
+      ] }),
+      (showPlanSuggestion || showActiveWorkflowChip) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-smart-tools", children: [
+        showPlanSuggestion && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-smart-chip kc-smart-chip--suggest", onClick: () => dispatch({ type: "SET_MODE", mode: "plan" }), children: "Create a plan" }),
+        showActiveWorkflowChip && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: "kc-smart-chip kc-smart-chip--active",
+            onClick: () => dispatch({ type: "SET_MODE", mode: "chat" }),
+            children: chat.mode === "plan" ? "Plan mode on" : chat.mode === "agent" ? "Agent mode on" : "Deep research on"
+          }
+        )
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-input-row", children: [
+        minimalStudio && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-composer-menu", ref: composerMenuRef, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-composer-plus", onClick: () => setComposerMenuOpen((value) => !value), title: "Add files or tools", disabled: composerRunActive, children: "+" }),
+          composerMenuOpen && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-composer-pop", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-composer-pop-item", onClick: () => {
+              setComposerMenuOpen(false);
+              attachFiles();
+            }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-composer-pop-main", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(PaperclipIcon, {}),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Add files" })
+            ] }) }),
+            studioMode && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-composer-pop-item", onClick: () => {
+              setComposerMenuOpen(false);
+              attachFolder();
+            }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-composer-pop-main", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(FolderIcon, {}),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Add folder" })
+            ] }) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-composer-pop-sep" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                className: `kc-composer-pop-item ${chat.mode === "plan" ? "active" : ""}${!selectedModelAgentCapable ? " kc-composer-pop-item--disabled" : ""}`,
+                onClick: () => {
+                  if (!selectedModelAgentCapable) return;
+                  dispatch({ type: "SET_MODE", mode: chat.mode === "plan" ? "chat" : "plan" });
+                  setComposerMenuOpen(false);
+                },
+                title: !selectedModelAgentCapable ? "Selected model cannot run planning workflows." : "",
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-composer-pop-main", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(PlanModeIcon, {}),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Plan mode" })
+                  ] }),
+                  chat.mode === "plan" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-composer-pop-badge", children: "On" })
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                className: `kc-composer-pop-item ${chat.mode === "agent" ? "active" : ""}${!selectedModelAgentCapable ? " kc-composer-pop-item--disabled" : ""}`,
+                onClick: () => {
+                  if (!selectedModelAgentCapable) return;
+                  dispatch({ type: "SET_MODE", mode: chat.mode === "agent" ? "chat" : "agent" });
+                  setComposerMenuOpen(false);
+                },
+                title: !selectedModelAgentCapable ? "Selected model cannot run agent workflows." : "",
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-composer-pop-main", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(AgentModeIcon, {}),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Agent mode" })
+                  ] }),
+                  chat.mode === "agent" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-composer-pop-badge", children: "On" })
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                className: `kc-composer-pop-item ${chat.mode === "research" ? "active" : ""}`,
+                onClick: () => {
+                  dispatch({ type: "SET_MODE", mode: chat.mode === "research" ? "chat" : "research" });
+                  setComposerMenuOpen(false);
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-composer-pop-main", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(ResearchModeIcon, {}),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Deep research" })
+                  ] }),
+                  chat.mode === "research" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-composer-pop-badge", children: "On" })
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-composer-pop-sep" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: `kc-composer-pop-item ${mcpEnabled ? "active" : ""}`,
+                onClick: () => {
+                  setMcpEnabled((value) => !value);
+                  setComposerMenuOpen(false);
+                },
+                children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-composer-pop-main", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(PlugModeIcon, {}),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                    "MCP ",
+                    mcpEnabled ? "on" : "off"
+                  ] })
+                ] })
+              }
+            )
+          ] })
+        ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           "textarea",
           {
             ref: inputRef,
             className: "kc-input",
-            placeholder: chat.mode === "research" ? "Describe the deep research task, scope, and output you want…" : chat.mode === "security" ? "Describe the target and scope…" : chat.mode === "agent" ? "Ask the agent to investigate, reason step by step, and do the detailed work… (Ctrl+Enter)" : "Ask a direct question… (Ctrl+Enter)",
+            placeholder: minimalStudio ? chat.mode === "plan" ? "Ask for a plan first. Kendr will outline the steps before doing the work…" : "Search, ask, or tell Kendr what to do…" : chat.mode === "research" ? "Describe the deep research task, scope, and output you want…" : chat.mode === "plan" ? "Ask for a plan first. Kendr will outline steps and wait before implementation… (Ctrl+Enter)" : chat.mode === "security" ? "Describe the target and scope…" : chat.mode === "agent" ? "Ask the agent to investigate, reason step by step, and do the detailed work… (Ctrl+Enter)" : "Ask a direct question… (Ctrl+Enter)",
             value: input,
             onChange: (e) => setInput(e.target.value),
             onPaste: handlePaste,
             onKeyDown: handleKey,
-            rows: 3,
-            disabled: chat.streaming
+            rows: minimalStudio ? 1 : 3,
+            disabled: composerRunActive
           }
         ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           "button",
           {
-            className: `kc-send-btn ${chat.streaming ? "kc-send-btn--stop" : ""}`,
-            onClick: chat.streaming ? () => stopRun() : () => send(),
-            disabled: !chat.streaming && !input.trim(),
-            title: chat.streaming ? "Stop (sends cancellation)" : "Send (Ctrl+Enter)",
-            children: chat.streaming ? /* @__PURE__ */ jsxRuntimeExports.jsx(StopIcon$1, {}) : /* @__PURE__ */ jsxRuntimeExports.jsx(SendIcon$1, {})
+            className: `kc-send-btn ${composerRunActive ? "kc-send-btn--stop" : ""}`,
+            onClick: composerRunActive ? () => stopRun() : () => send(),
+            disabled: !composerRunActive && !input.trim(),
+            title: composerRunActive ? "Stop active run" : "Send (Ctrl+Enter)",
+            children: composerRunActive ? "Stop" : /* @__PURE__ */ jsxRuntimeExports.jsx(SendIcon$1, {})
           }
         )
+      ] }),
+      showInlineFlowStrip && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-flow-strip", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `kc-flow-chip kc-flow-chip--${chat.mode}`, children: chat.mode === "plan" ? "Plan first" : chat.mode === "agent" ? "Agent run" : chat.mode === "research" ? "Research flow" : "Quick answer" }),
+        !studioMode && appState.projectRoot && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-flow-chip", children: [
+          "Workspace · ",
+          basename$1(appState.projectRoot)
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-flow-chip", children: composerModelMeta.model ? composerModelMeta.label : "Backend auto" }),
+        chat.mode === "plan" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-flow-chip kc-flow-chip--muted", children: "waits before implement" })
       ] })
     ] })
   ] });
 }
-function DeepResearchPanel({ dr, updateDr }) {
+function DeepResearchPanel({
+  dr,
+  updateDr,
+  collapsed = false,
+  modelOptions = [],
+  inheritedModel = null,
+  inheritedReason = "",
+  effectiveModel = null,
+  effectiveModelSource = "none",
+  recommendedDeepResearchModel = null,
+  recommendedDeepResearchEvidenceStage = null,
+  searchProviderState = { options: [] },
+  effectiveSearchProvider = null,
+  indexedKbs = [],
+  activeKb = null,
+  selectedKb = null,
+  projectRoot = "",
+  apiBase = "",
+  refreshKbs = null,
+  activeDeepResearchWorkflowCombo = null,
+  workflowStageOptions = []
+}) {
   const api = window.kendrAPI;
+  const [kbSetupState, setKbSetupState] = reactExports.useState({ status: "idle", message: "" });
+  const depthPreset = resolveDeepResearchDepthPreset(dr.depthMode, dr.pages);
+  const recommendedStageSelections = reactExports.useMemo(() => {
+    const next = {};
+    const stages = Array.isArray(activeDeepResearchWorkflowCombo?.stages) ? activeDeepResearchWorkflowCombo.stages : [];
+    for (const stage of stages) {
+      const stageName = String(stage?.stage || "").trim();
+      const provider = String(stage?.provider || "").trim();
+      const model = String(stage?.model || "").trim();
+      if (stageName && provider && model) next[stageName] = `${provider}/${model}`;
+    }
+    return next;
+  }, [activeDeepResearchWorkflowCombo]);
+  const actionableWorkflowStageOptions = reactExports.useMemo(() => (Array.isArray(workflowStageOptions) ? workflowStageOptions : []).filter((stageOption) => ["router", "merge", "verify"].includes(String(stageOption?.stage || "").trim())), [workflowStageOptions]);
+  const stageOverrideSelections = dr.multiModelStageOverrides && typeof dr.multiModelStageOverrides === "object" ? dr.multiModelStageOverrides : {};
+  const updateStageOverride = (stageName, value) => {
+    const normalizedStage = String(stageName || "").trim();
+    if (!normalizedStage) return;
+    const normalizedValue = String(value || "").trim();
+    const recommendedValue = String(recommendedStageSelections[normalizedStage] || "").trim();
+    const nextOverrides = { ...stageOverrideSelections };
+    if (!normalizedValue || normalizedValue === recommendedValue) delete nextOverrides[normalizedStage];
+    else nextOverrides[normalizedStage] = normalizedValue;
+    updateDr({ multiModelStageOverrides: nextOverrides });
+  };
+  const clearStageOverrides = () => updateDr({ multiModelStageOverrides: {} });
   const toggleFormat = (fmt) => {
     const cur = dr.outputFormats;
     const next = cur.includes(fmt) ? cur.filter((f2) => f2 !== fmt) : [...cur, fmt];
@@ -9183,17 +11692,135 @@ function DeepResearchPanel({ dr, updateDr }) {
     }
   };
   const removeLocalPath = (p2) => updateDr({ localPaths: dr.localPaths.filter((x2) => x2 !== p2) });
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-panel", children: [
+  const defaultKbName = (() => {
+    const seed = dr.localPaths[0] || projectRoot || "Research";
+    const base = basename$1(seed).replace(/\.[^.]+$/, "").trim() || "Research";
+    return `${base} KB`;
+  })();
+  const openSuperRag = (params = {}) => {
+    const target = new URL("/rag", apiBase || window.location.origin);
+    Object.entries(params).forEach(([key, value]) => {
+      if (value == null || value === "") return;
+      target.searchParams.set(key, String(value));
+    });
+    window.open(target.toString(), "_blank", "noopener,noreferrer");
+  };
+  const watchKbIndex = reactExports.useCallback(async (kbId, kbName) => {
+    const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    for (let attempt = 0; attempt < 48; attempt += 1) {
+      await pause(2500);
+      try {
+        const statusResp = await fetch(`${apiBase}/api/rag/kbs/${encodeURIComponent(kbId)}/index/status`);
+        const statusData = await statusResp.json().catch(() => ({}));
+        const latest = typeof refreshKbs === "function" ? await refreshKbs() : [];
+        const latestKb = Array.isArray(latest) ? latest.find((kb2) => kb2.id === kbId) : null;
+        const kbStatus = String(latestKb?.status || "").trim().toLowerCase();
+        if (statusData?.status === "running" || kbStatus === "indexing") {
+          setKbSetupState({
+            status: "indexing",
+            message: `Active KB "${kbName}" is indexing${statusData?.chunks_indexed ? ` (${statusData.chunks_indexed} chunks so far)` : ""}.`
+          });
+          continue;
+        }
+        if (statusData?.status === "done" || statusData?.status === "done_with_errors" || kbStatus === "indexed") {
+          setKbSetupState({
+            status: kbStatus === "indexed" ? "ready" : "warning",
+            message: kbStatus === "indexed" ? `Active KB "${kbName}" is ready for Deep Research.` : `KB "${kbName}" finished indexing with warnings. Check Super-RAG if results look incomplete.`
+          });
+          return;
+        }
+        if (statusData?.status === "error") {
+          setKbSetupState({
+            status: "error",
+            message: `KB "${kbName}" failed to index. Open Super-RAG to inspect the source setup.`
+          });
+          return;
+        }
+      } catch (_2) {
+      }
+    }
+    setKbSetupState({
+      status: "indexing",
+      message: `KB setup started for "${kbName}". Indexing is still running; you can monitor it in Super-RAG.`
+    });
+  }, [apiBase, refreshKbs]);
+  const quickCreateActiveKb = reactExports.useCallback(async () => {
+    const promptName = window.prompt("Name for the new active knowledge base:", defaultKbName);
+    const kbName = String(promptName || "").trim();
+    if (!kbName) return;
+    setKbSetupState({ status: "working", message: `Creating "${kbName}"…` });
+    try {
+      const createResp = await fetch(`${apiBase}/api/rag/kbs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: kbName,
+          description: "Created from Deep Research quick setup."
+        })
+      });
+      const createdKb = await createResp.json().catch(() => ({}));
+      if (!createResp.ok || createdKb?.error || !createdKb?.id) {
+        throw new Error(createdKb?.error || "Failed to create knowledge base.");
+      }
+      for (const path of dr.localPaths || []) {
+        const sourceResp = await fetch(`${apiBase}/api/rag/kbs/${encodeURIComponent(createdKb.id)}/sources`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: "folder",
+            path,
+            label: basename$1(path) || path,
+            recursive: true,
+            max_files: 300
+          })
+        });
+        const sourceData = await sourceResp.json().catch(() => ({}));
+        if (!sourceResp.ok || sourceData?.error) {
+          throw new Error(sourceData?.error || `Failed to add source: ${path}`);
+        }
+      }
+      const activateResp = await fetch(`${apiBase}/api/rag/kbs/${encodeURIComponent(createdKb.id)}/activate`, { method: "POST" });
+      const activateData = await activateResp.json().catch(() => ({}));
+      if (!activateResp.ok || activateData?.error) {
+        throw new Error(activateData?.error || "Failed to activate knowledge base.");
+      }
+      updateDr({ kbEnabled: true, kbId: "" });
+      if (typeof refreshKbs === "function") await refreshKbs();
+      if ((dr.localPaths || []).length) {
+        const indexResp = await fetch(`${apiBase}/api/rag/kbs/${encodeURIComponent(createdKb.id)}/index`, { method: "POST" });
+        if (!indexResp.ok) {
+          throw new Error("Knowledge base created, but indexing could not be started.");
+        }
+        setKbSetupState({
+          status: "indexing",
+          message: `Active KB "${kbName}" created from ${dr.localPaths.length} folder${dr.localPaths.length === 1 ? "" : "s"}. Indexing started.`
+        });
+        watchKbIndex(createdKb.id, kbName);
+      } else {
+        setKbSetupState({
+          status: "warning",
+          message: `Active KB "${kbName}" was created, but it has no sources yet. Add a folder in Super-RAG to finish setup.`
+        });
+        openSuperRag({ kb: createdKb.id });
+      }
+    } catch (err) {
+      setKbSetupState({
+        status: "error",
+        message: String(err?.message || err || "KB setup failed.")
+      });
+    }
+  }, [apiBase, defaultKbName, dr.localPaths, openSuperRag, refreshKbs, updateDr, watchKbIndex]);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `dr-panel${collapsed ? " dr-panel--collapsed" : ""}`, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-panel-inner", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-panel-header", onClick: () => updateDr({ collapsed: !dr.collapsed }), children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-panel-title", children: "🔬 Deep Research Settings" }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-summary", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "dr-sum-pill", children: [
-          "~",
-          dr.pages,
-          "p"
-        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: depthPreset.summary }),
+        effectiveModel?.model && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: effectiveModel.model }),
+        dr.webSearchEnabled && effectiveSearchProvider?.label && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: effectiveSearchProvider.label }),
+        dr.multiModelEnabled && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: dr.multiModelStrategy === "cheapest" ? "Cheapest combo" : "Best combo" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: dr.citationStyle.toUpperCase() }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: dr.outputFormats.join("·") }),
+        dr.webSearchEnabled && effectiveModel?.model && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill", children: hasNativeWebSearchCapability(effectiveModel.provider, effectiveModel.model, effectiveModel.capabilities) ? "Native web" : "Kendr search" }),
         !dr.webSearchEnabled && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-sum-pill dr-sum-warn", children: "Local only" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "dr-collapse-btn", children: dr.collapsed ? "▸" : "▾" })
@@ -9201,14 +11828,60 @@ function DeepResearchPanel({ dr, updateDr }) {
     !dr.collapsed && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-body", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-grid", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Approx. Length" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { className: "dr-select", value: dr.pages, onChange: (e) => updateDr({ pages: +e.target.value }), children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 10, children: "~10 pages" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 25, children: "~25 pages" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 50, children: "~50 pages" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 100, children: "~100 pages" })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Research Depth" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "select",
+            {
+              className: "dr-select",
+              value: depthPreset.id,
+              onChange: (e) => {
+                const preset = resolveDeepResearchDepthPreset(e.target.value, 0);
+                updateDr({ depthMode: preset.id, pages: preset.pages });
+              },
+              children: DEEP_RESEARCH_DEPTH_PRESETS.map((preset) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: preset.id, children: preset.label }, preset.id))
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: depthPreset.hint }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Kendr uses this as an execution-depth hint. The final exports are sized automatically from source density, citations, and structure instead of targeting an exact page count." })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Deep Research Model" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "select",
+            {
+              className: "dr-select",
+              value: dr.researchModel || "",
+              onChange: (e) => updateDr({ researchModel: e.target.value }),
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "", children: inheritedModel?.shortLabel ? `Use selected chat model · ${inheritedModel.shortLabel}` : "Use the chat header model" }),
+                modelOptions.map((option) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "option",
+                  {
+                    value: option.value,
+                    disabled: !!option.disabledReason,
+                    children: option.disabledReason ? `${option.shortLabel} — ${option.disabledReason}` : option.shortLabel
+                  },
+                  option.value
+                ))
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: effectiveModel ? `Active for Deep Research: ${effectiveModel.shortLabel}${effectiveModelSource === "recommended" ? " (recommended)" : effectiveModelSource === "header" ? " (from header model)" : ""}.` : "No compatible Deep Research model is available with the current settings." }),
+          recommendedDeepResearchModel && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: effectiveModel && recommendedDeepResearchModel.value === effectiveModel.value ? `Best-fit suggestion: ${recommendedDeepResearchModel.shortLabel}.` : `Best-fit suggestion: ${recommendedDeepResearchModel.shortLabel}${effectiveModel ? `, while this run is currently using ${effectiveModel.shortLabel}.` : "."}` }),
+          dr.webSearchEnabled ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: effectiveModel && hasNativeWebSearchCapability(effectiveModel.provider, effectiveModel.model, effectiveModel.capabilities) ? "This model can use native web search for Deep Research." : "This model will use Kendr web search fallback: Kendr gathers sources, then the selected model synthesizes the report." }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Local-only runs can use local models or any configured provider with enough context." }),
+          dr.multiModelEnabled && recommendedDeepResearchEvidenceStage?.provider && recommendedDeepResearchEvidenceStage?.model && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-note", children: [
+            "Multi-model evidence-stage suggestion: ",
+            providerDisplayLabel(recommendedDeepResearchEvidenceStage.provider),
+            " · ",
+            recommendedDeepResearchEvidenceStage.model,
+            "."
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Aiming near this length; citations and formatting can shift the final page count." })
+          !dr.researchModel && inheritedReason && effectiveModel && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-note", children: [
+            "The current chat-header model is incompatible here, so this run will fall back to ",
+            effectiveModel.shortLabel,
+            "."
+          ] }),
+          dr.multiModelEnabled && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "The selected Deep Research model remains the base fallback. Route, evidence, draft, merge, and verification stages can be overridden by the multi-model workflow plan for this task." })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Citation Style" }),
@@ -9242,6 +11915,21 @@ function DeepResearchPanel({ dr, updateDr }) {
               placeholder: "0 = auto"
             }
           )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Search Backend" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "select",
+            {
+              className: "dr-select",
+              value: effectiveSearchProvider?.id || "auto",
+              onChange: (e) => updateDr({ searchBackend: e.target.value }),
+              disabled: !dr.webSearchEnabled,
+              children: searchProviderState.options.map((option) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: option.id, disabled: !option.enabled, children: option.enabled ? option.label : `${option.label} — not configured` }, option.id))
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: !dr.webSearchEnabled ? "Search backend selection is disabled while web search is off." : effectiveSearchProvider?.note || "Choose which backend Kendr should prefer while gathering external sources." }),
+          dr.webSearchEnabled && effectiveSearchProvider?.warning && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", style: { color: "var(--warn)" }, children: effectiveSearchProvider.warning })
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-grid", style: { marginTop: 8 }, children: [
@@ -9292,6 +11980,82 @@ function DeepResearchPanel({ dr, updateDr }) {
               "Checkpointing"
             ] })
           ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Model Allocation" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-checks", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "dr-check", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "input",
+              {
+                type: "checkbox",
+                checked: !!dr.multiModelEnabled,
+                onChange: (e) => updateDr({ multiModelEnabled: e.target.checked })
+              }
+            ),
+            "Use multi-model workflow"
+          ] }) }),
+          dr.multiModelEnabled ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "select",
+              {
+                className: "dr-select",
+                value: dr.multiModelStrategy || "best",
+                onChange: (e) => updateDr({ multiModelStrategy: e.target.value === "cheapest" ? "cheapest" : "best" }),
+                style: { marginTop: 8 },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "best", children: "Best combination" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "cheapest", children: "Cheapest combination" })
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Deep Research can split route, evidence, draft, merge, and verification across different models when the current task enables it." }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: activeDeepResearchWorkflowCombo?.available ? `${dr.multiModelStrategy === "cheapest" ? "Cheapest" : "Best"} combo: ${activeDeepResearchWorkflowCombo.summary || "Stage recommendations are available."}` : "No compatible multi-model Deep Research combination is currently available from the connected providers." }),
+            activeDeepResearchWorkflowCombo?.available && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-note", children: [
+              "Estimated cost band: ",
+              String(activeDeepResearchWorkflowCombo.estimated_cost_band || "unknown"),
+              "."
+            ] }),
+            activeDeepResearchWorkflowCombo?.available && actionableWorkflowStageOptions.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", style: { marginTop: 8 }, children: "The recommendation preset seeds the stage picks below. Change a stage only when you want to pin a different model for that part of the workflow." }),
+              actionableWorkflowStageOptions.map((stageOption) => {
+                const stageName = String(stageOption.stage || "").trim();
+                const selectedValue = String(stageOverrideSelections[stageName] || "").trim();
+                const recommendedValue = String(recommendedStageSelections[stageName] || "").trim();
+                const recommendedCandidate = (Array.isArray(stageOption.candidates) ? stageOption.candidates : []).find((candidate) => String(candidate?.value || "").trim() === recommendedValue) || null;
+                const manualCandidate = (Array.isArray(stageOption.candidates) ? stageOption.candidates : []).find((candidate) => String(candidate?.value || "").trim() === selectedValue) || null;
+                return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 10 }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "dr-label", children: [
+                    stageOption.label,
+                    " Model"
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "select",
+                    {
+                      className: "dr-select",
+                      value: selectedValue,
+                      onChange: (e) => updateStageOverride(stageName, e.target.value),
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "", children: recommendedCandidate ? `Use ${dr.multiModelStrategy === "cheapest" ? "cheapest" : "best"} recommendation · ${recommendedCandidate.labelFull || recommendedCandidate.value}` : "Use the recommendation preset" }),
+                        (Array.isArray(stageOption.candidates) ? stageOption.candidates : []).map((candidate) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: candidate.value, children: candidate.labelFull || candidate.value }, candidate.value))
+                      ]
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: manualCandidate ? `Pinned manually: ${manualCandidate.labelFull || manualCandidate.value}. ${manualCandidate.reason || ""}`.trim() : recommendedCandidate ? `Recommended: ${recommendedCandidate.labelFull || recommendedCandidate.value}. ${recommendedCandidate.reason || ""}`.trim() : "No compatible model candidates are available for this stage." })
+                ] }, stageName);
+              }),
+              Object.keys(stageOverrideSelections).length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  className: "dr-action-btn",
+                  style: { marginTop: 10 },
+                  onClick: clearStageOverrides,
+                  children: "Reset Stage Overrides"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", style: { marginTop: 8 }, children: "The Deep Research model above controls evidence collection. Section drafting currently follows the merge-stage model during long-document execution." })
+            ] })
+          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Single-model mode keeps the whole task on the selected Deep Research model." })
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", style: { marginTop: 8 }, children: [
@@ -9315,28 +12079,112 @@ function DeepResearchPanel({ dr, updateDr }) {
             rows: 3,
             placeholder: "https://example.com/report\nhttps://example.com/dataset",
             value: dr.links,
-            onChange: (e) => updateDr({ links: e.target.value }),
-            disabled: !dr.webSearchEnabled
+            onChange: (e) => updateDr({ links: e.target.value })
           }
         ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: dr.webSearchEnabled ? "These exact URLs will be fetched as part of the report." : "Enable Web Search to use explicit links." })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "These exact URLs will be fetched as part of the report, even if general web search is off." })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-field", style: { marginTop: 8 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "dr-label", children: "Private Knowledge" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-checks", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "dr-check", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              type: "checkbox",
+              checked: !!dr.kbEnabled,
+              onChange: (e) => updateDr({ kbEnabled: e.target.checked })
+            }
+          ),
+          "Use knowledge base"
+        ] }) }),
+        dr.kbEnabled && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-path-row", style: { marginTop: 8 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "select",
+              {
+                className: "dr-select",
+                value: dr.kbId || "",
+                disabled: !indexedKbs.length && !activeKb,
+                onChange: (e) => updateDr({ kbId: e.target.value }),
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "", children: activeKb ? `Active KB (${activeKb.name})` : "Active KB" }),
+                  indexedKbs.map((kb2) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: kb2.id, children: kb2.name }, kb2.id))
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "input",
+              {
+                className: "dr-input-sm",
+                type: "number",
+                min: 1,
+                max: 50,
+                step: 1,
+                value: dr.kbTopK || 8,
+                onChange: (e) => updateDr({ kbTopK: Math.max(1, Number(e.target.value || 8)) })
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Use private indexed docs with web research, local files, or a KB-only run. Empty selector means use the active KB." }),
+          !indexedKbs.length && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "No indexed knowledge bases found yet. Create one here in one step, or open Super-RAG for the full setup." }),
+          dr.kbEnabled && !selectedKb && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "No active indexed KB is available yet. Set one active in Super-RAG or pick an indexed KB here." }),
+          dr.kbEnabled && (!indexedKbs.length || !selectedKb) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-path-row", style: { marginTop: 8 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "dr-action-btn",
+                onClick: quickCreateActiveKb,
+                disabled: kbSetupState.status === "working" || kbSetupState.status === "indexing",
+                children: dr.localPaths.length ? "Create Active KB From Folders" : "Create Active KB"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "dr-action-btn",
+                onClick: () => openSuperRag({ quick: 1, name: defaultKbName }),
+                children: "Open Quick KB Setup"
+              }
+            )
+          ] }),
+          dr.kbEnabled && !dr.localPaths.length && (!indexedKbs.length || !selectedKb) && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: "Tip: add a local folder above, then one click can create, activate, and start indexing the KB for you." }),
+          kbSetupState.message && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "dr-note", children: kbSetupState.message }),
+          selectedKb && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dr-note", children: [
+            "KB ready: ",
+            selectedKb.name,
+            " · ",
+            selectedKb.stats?.total_chunks || 0,
+            " chunks · top ",
+            dr.kbTopK || 8,
+            " passages"
+          ] })
+        ] })
       ] })
     ] })
-  ] });
+  ] }) });
 }
-function WelcomeScreen({ onSuggest }) {
-  const SUGGESTIONS = [
+function WelcomeScreen({ onSuggest, minimal = false }) {
+  const SUGGESTIONS = minimal ? [
+    "Search files on my machine",
+    "Research this deeply",
+    "Turn this into a plan"
+  ] : [
     "Summarize the attached files for me",
     "Explain this topic simply",
+    "Make a plan before implementing this task",
     "Investigate this problem step by step",
     "Run a security assessment",
     "Write a detailed technical report",
     "Compare two approaches and recommend one"
   ];
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-welcome", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-welcome-logo", children: "⚡" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { className: "kc-welcome-title", children: "Kendr Studio" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "kc-welcome-sub", children: "Use Chat for direct answers. Use Agent when you want the assistant to do the detailed work and reason through the task." }),
+    minimal && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-welcome-brow", children: "Orchestrate deep work." }),
+    !minimal && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-welcome-logo", children: "⚡" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { className: `kc-welcome-title${minimal ? " kc-welcome-title--hero" : ""}`, children: minimal ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Kendr" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-welcome-title-accent", children: "." })
+    ] }) : "Kendr Studio" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "kc-welcome-sub", children: minimal ? "Research, route models, and run agents from one workspace." : "Use Chat for quick answers. Use Plan to outline the work first. Use Agent when you want Kendr to do the detailed work." }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-suggestions", children: SUGGESTIONS.map((s) => /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-suggest", onClick: () => onSuggest(s), children: s }, s)) })
   ] });
 }
@@ -9366,9 +12214,11 @@ function UserMessage({ msg }) {
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-avatar kc-avatar--user", children: "👤" })
   ] });
 }
-function AssistantMessage({ msg }) {
+function AssistantMessage({ msg, onQuickReply, onSendSuggestion, onOpenArtifact, onDownloadArtifact, onReviewArtifact }) {
   const [copied, setCopied] = reactExports.useState(false);
   const [nowMs, setNowMs] = reactExports.useState(Date.now());
+  const [logsExpanded, setLogsExpanded] = reactExports.useState(true);
+  const prevLogCountRef = reactExports.useRef(Array.isArray(msg?.logs) ? msg.logs.length : 0);
   const copy = () => {
     navigator.clipboard.writeText(msg.content);
     setCopied(true);
@@ -9380,27 +12230,27 @@ function AssistantMessage({ msg }) {
     const timer = setInterval(() => setNowMs(Date.now()), 1e3);
     return () => clearInterval(timer);
   }, [msg?.runId, msg?.status]);
+  reactExports.useEffect(() => {
+    const nextCount = Array.isArray(msg?.logs) ? msg.logs.length : 0;
+    const prevCount = prevLogCountRef.current;
+    if (nextCount > 0 && prevCount === 0 && ["thinking", "streaming", "awaiting"].includes(String(msg?.status || ""))) {
+      setLogsExpanded(true);
+    }
+    prevLogCountRef.current = nextCount;
+  }, [msg?.logs, msg?.status]);
   const elapsedSeconds = msg?.runId ? Math.max(0, Math.floor((nowMs - new Date(msg.runStartedAt || msg.ts || Date.now()).getTime()) / 1e3)) : 0;
   const progress = Array.isArray(msg.progress) ? msg.progress : [];
+  const logs = Array.isArray(msg.logs) ? msg.logs : [];
   const shellCard = shellCardFromProgress(progress);
-  const visibleProgress = progress.filter((item) => !isShellProgressItem(item));
+  const visibleProgress = progress.filter((item) => !isShellProgressItem$2(item));
+  const liveProgressItem = buildLiveProgressItem(visibleProgress, msg.statusText, msg.status);
   const checklist = Array.isArray(msg.checklist) ? msg.checklist : [];
+  const activityCards = summarizeRunArtifacts(visibleProgress, msg.artifacts);
+  const showActivityCards = activityCards.length > 0 && !isPendingRunStatus(msg.status);
+  const hasConcreteAwaiting = messageHasConcreteAwaitingPrompt(msg);
+  const inlineApprovalVisible = msg.status === "awaiting" && hasConcreteAwaiting && !isSkillApproval(msg.approvalKind, msg.approvalRequest);
+  const planCardVisible = checklist.length > 0 && (msg.mode === "plan" || isPlanApprovalScope(msg.approvalScope, msg.approvalKind, msg.approvalRequest));
   const blockerChips = inferExecutionBlockers({ msg, shellCard, progress: visibleProgress, checklist });
-  const progressSummary = (() => {
-    if (!visibleProgress.length) return "";
-    let searches = 0;
-    let files = 0;
-    for (const item of visibleProgress) {
-      const kind = String(item.kind || "").toLowerCase();
-      const text = `${item.title || ""} ${item.detail || ""}`.toLowerCase();
-      if (kind.includes("search") || /\b(search|query|grep|rg|ripgrep)\b/.test(text)) searches += 1;
-      if (kind.includes("file") || /\b(file|read|scan|inspect|inventory)\b/.test(text)) files += 1;
-    }
-    const parts = [];
-    if (files) parts.push(`${files} file${files === 1 ? "" : "s"}`);
-    if (searches) parts.push(`${searches} search${searches === 1 ? "" : "es"}`);
-    return parts.length ? `Exploring ${parts.join(", ")}` : "";
-  })();
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-row kc-row--assistant", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-avatar kc-avatar--kendr", children: "K" }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-bubble kc-bubble--assistant", children: [
@@ -9410,7 +12260,7 @@ function AssistantMessage({ msg }) {
         msg.modeLabel && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `kc-run-mode kc-run-mode--${String(msg.mode || "chat")}`, children: msg.modeLabel }),
         msg.runId && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-run-elapsed", children: [
           "⏱ ",
-          formatDuration(elapsedSeconds)
+          formatDuration$2(elapsedSeconds)
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `kc-run-badge kc-run-badge--${msg.status || "thinking"}`, children: { thinking: "Thinking", streaming: "Running", awaiting: "Awaiting Input", done: "Done", error: "Error" }[msg.status] || "Thinking" })
       ] }),
@@ -9440,20 +12290,51 @@ function AssistantMessage({ msg }) {
         ] })
       ] }),
       blockerChips.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-blocker-strip", children: blockerChips.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `kc-blocker-chip kc-blocker-chip--${item.tone || "warn"}`, children: item.label }, item.key)) }),
-      msg.runId && (["thinking", "streaming", "awaiting"].includes(String(msg.status || "")) || visibleProgress.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-worklog", children: [
+      showActivityCards && /* @__PURE__ */ jsxRuntimeExports.jsx(RunArtifactCards, { cards: activityCards, runId: msg.runId, onOpenItem: onOpenArtifact, onDownloadItem: onDownloadArtifact, onReviewItem: onReviewArtifact }),
+      msg.runId && ["thinking", "streaming", "awaiting"].includes(String(msg.status || "")) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-worklog", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-worklog-head", children: [
-          "Working for ",
-          formatDuration(elapsedSeconds)
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+            "Working for ",
+            formatDuration$2(elapsedSeconds)
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-worklog-pill", children: liveProgressLabel(liveProgressItem) })
         ] }),
-        progressSummary && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-worklog-summary", children: progressSummary }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-worklog-items", children: visibleProgress.slice(0, 6).map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-worklog-item", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-worklog-title", children: item.title }),
-          item.detail && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-worklog-detail", children: item.detail })
-        ] }, item.id)) })
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-worklog-current kc-worklog-current--${liveProgressItem?.status || "running"}`, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-worklog-current-title", children: liveProgressItem?.title || sanitizeStatusMessage(msg.statusText) || "Working..." }),
+          liveProgressItem?.detail && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-worklog-current-detail", children: liveProgressItem.detail }),
+          (liveProgressItem?.actor || liveProgressItem?.durationLabel || liveProgressItem?.cwd) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-worklog-current-meta", children: [
+            liveProgressItem?.actor && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: liveProgressItem.actor }),
+            liveProgressItem?.durationLabel && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: liveProgressItem.durationLabel }),
+            liveProgressItem?.cwd && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: liveProgressItem.cwd })
+          ] })
+        ] })
       ] }),
-      msg.steps?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-steps", children: msg.steps.map((step) => /* @__PURE__ */ jsxRuntimeExports.jsx(StepCard, { step }, step.stepId)) }),
-      checklist.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(ChecklistCard, { checklist }),
-      msg.content && msg.status !== "error" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-content", children: [
+      msg.runId && (logs.length > 0 || ["thinking", "streaming", "awaiting"].includes(String(msg.status || ""))) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        ExecutionLogPanel,
+        {
+          logs,
+          expanded: logsExpanded,
+          onToggle: () => setLogsExpanded((value) => !value)
+        }
+      ),
+      msg.steps?.length > 0 && !isPendingRunStatus(msg.status) && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-steps", children: msg.steps.map((step) => /* @__PURE__ */ jsxRuntimeExports.jsx(StepCard, { step }, step.stepId)) }),
+      planCardVisible ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+        PlanSummaryCard,
+        {
+          msg,
+          checklist,
+          onQuickReply,
+          onSendSuggestion
+        }
+      ) : inlineApprovalVisible ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+        InlineAwaitingCard,
+        {
+          msg,
+          onQuickReply,
+          onSendSuggestion
+        }
+      ) : checklist.length > 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx(ChecklistCard, { checklist }) : null,
+      msg.content && msg.status !== "error" && !inlineApprovalVisible && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-content", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-content-actions", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-copy-btn", onClick: copy, children: copied ? "Copied" : "Copy" }) }),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           MarkdownRenderer,
@@ -9467,8 +12348,199 @@ function AssistantMessage({ msg }) {
         "⚠ ",
         msg.content
       ] }),
-      msg.status === "awaiting" && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-awaiting-note", children: "⏳ Waiting for your reply above…" }),
+      msg.status === "awaiting" && hasConcreteAwaiting && !inlineApprovalVisible && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-awaiting-note", children: "⏳ Waiting for your reply above…" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-bubble-ts", children: formatTs(msg.ts) })
+    ] })
+  ] });
+}
+function ExecutionLogPanel({ logs, expanded, onToggle }) {
+  const items = Array.isArray(logs) ? logs : [];
+  const summary = summarizeLogFeed(items);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-log-panel${expanded ? "" : " kc-log-panel--collapsed"}`, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-log-panel-head", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-log-panel-meta", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-panel-label", children: "Live Execution Log" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-panel-summary", children: summary })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-log-panel-toggle", onClick: onToggle, children: expanded ? "Collapse" : "Expand" })
+    ] }),
+    expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-panel-body", children: items.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-empty", children: "Waiting for execution log output..." }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-log-lines", children: items.slice(-120).map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-log-line", children: [
+      item.clock && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-log-clock", children: item.clock }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-log-text", children: item.text })
+    ] }, item.id)) }) })
+  ] });
+}
+function RunArtifactCards({ cards, runId, onOpenItem, onDownloadItem, onReviewItem }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-grid", children: cards.map((card) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-activity-card kc-activity-card--${card.kind}`, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-activity-card-head", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-kind", children: card.kind }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-title", children: card.title })
+      ] }),
+      card.kind === "edit" && Array.isArray(card.items) && card.items.some((item) => item?.path) && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-activity-card-action", onClick: () => onReviewItem?.(card.items.find((item) => item?.path)), children: "Review" })
+    ] }),
+    Array.isArray(card.items) && card.items.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `kc-activity-card-items${card.kind === "artifact" ? " kc-activity-card-items--stack" : ""}`, children: card.items.slice(0, card.kind === "artifact" ? 6 : 3).map((item) => card.kind === "artifact" ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-activity-card-file", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-activity-card-file-label", children: item.label }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-activity-card-file-actions", children: [
+        (runId || item?.downloadUrl) && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-activity-card-mini", onClick: () => onDownloadItem?.(item, runId), children: "Download" }),
+        item?.path && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-activity-card-mini kc-activity-card-mini--ghost", onClick: () => onOpenItem?.(item), children: "Open" })
+      ] })
+    ] }, `${item.path || item.name || item.label}-${item.label}`) : item?.path ? /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-activity-card-item kc-activity-card-item--action", onClick: () => onOpenItem?.(item), children: item.label }, `${item.path}-${item.label}`) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-activity-card-item", children: item.label }, item.label)) })
+  ] }, `${card.kind}-${card.title}`)) });
+}
+function PlanSummaryCard({ msg, checklist, onQuickReply, onSendSuggestion }) {
+  const [showSuggest, setShowSuggest] = reactExports.useState(false);
+  const [draft, setDraft] = reactExports.useState("");
+  const approvalRequest = msg.approvalRequest && typeof msg.approvalRequest === "object" ? msg.approvalRequest : {};
+  const approvalActions = approvalRequest.actions && typeof approvalRequest.actions === "object" ? approvalRequest.actions : {};
+  const rawSummary = String(approvalRequest.summary || msg.content || "").trim();
+  const summary = rawSummary.length > 520 ? `${rawSummary.slice(0, 520).trim()}…` : rawSummary;
+  const approvalState = String(msg.approvalState || "").trim().toLowerCase();
+  const awaiting = msg.status === "awaiting";
+  const stateLabel = awaiting ? "Plan Ready" : approvalState === "approved" ? "Plan Approved" : approvalState === "rejected" ? "Plan Rejected" : approvalState === "suggested" ? "Plan Updated" : "Plan";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-head", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-plan-card-label", children: stateLabel }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-meta", children: [
+          checklist.length,
+          " task",
+          checklist.length === 1 ? "" : "s"
+        ] })
+      ] }),
+      approvalState && approvalState !== "pending" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `kc-plan-card-badge kc-plan-card-badge--${approvalState}`, children: approvalState })
+    ] }),
+    summary && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-plan-card-summary", children: summary }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-plan-card-list", children: checklist.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsx(ChecklistItem, { item, compact: true }, `plan-${item.step}-${item.title}`)) }),
+    awaiting && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-plan-card-btn kc-plan-card-btn--approve", onClick: () => onQuickReply?.("approve"), children: approvalActions.accept_label || "Implement" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: `kc-plan-card-btn kc-plan-card-btn--ghost${showSuggest ? " kc-plan-card-btn--active" : ""}`,
+            onClick: () => setShowSuggest((value) => !value),
+            children: approvalActions.suggest_label || "Change Plan"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-plan-card-btn kc-plan-card-btn--reject", onClick: () => onQuickReply?.("cancel"), children: approvalActions.reject_label || "Reject" })
+      ] }),
+      showSuggest && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-suggest", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "textarea",
+          {
+            className: "kc-plan-card-input",
+            rows: 3,
+            placeholder: "Say what should change in the plan…",
+            value: draft,
+            onChange: (event) => setDraft(event.target.value)
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: "kc-plan-card-btn kc-plan-card-btn--approve",
+            onClick: () => {
+              if (!draft.trim()) return;
+              onSendSuggestion?.(draft);
+              setDraft("");
+              setShowSuggest(false);
+            },
+            disabled: !draft.trim(),
+            children: "Send"
+          }
+        )
+      ] })
+    ] })
+  ] });
+}
+function InlineAwaitingCard({ msg, onQuickReply, onSendSuggestion }) {
+  const [showSuggest, setShowSuggest] = reactExports.useState(false);
+  const [draft, setDraft] = reactExports.useState("");
+  const approvalRequest = msg.approvalRequest && typeof msg.approvalRequest === "object" ? msg.approvalRequest : {};
+  const approvalActions = approvalRequest.actions && typeof approvalRequest.actions === "object" ? approvalRequest.actions : {};
+  const title = approvalRequest.title || awaitingTitleFromContext(msg.approvalScope, msg.approvalKind, approvalRequest);
+  const summary = String(
+    approvalRequest.summary || msg.content || ""
+  ).trim();
+  const sections = Array.isArray(approvalRequest.sections) ? approvalRequest.sections : [];
+  const helpText = String(approvalRequest.help_text || "").trim();
+  const decisionMode = String(msg.awaitingDecision || (isApprovalLikeAwaiting(msg.approvalScope, msg.approvalKind, approvalRequest) ? "approval" : "reply")).trim().toLowerCase();
+  const hasQuickActions = decisionMode === "approval";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-inline-approval", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-inline-approval-head", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-title", children: title }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-status", children: "awaiting" })
+    ] }),
+    summary && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-summary", children: /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: summary }) }),
+    sections.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-sections", children: sections.map((section, index2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-inline-approval-section", children: [
+      section.title && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-section-title", children: section.title }),
+      Array.isArray(section.items) && section.items.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "kc-inline-approval-list", children: section.items.map((item, itemIndex) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: item }, `${index2}-${itemIndex}`)) })
+    ] }, `${section.title || "section"}-${index2}`)) }),
+    helpText && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-help", children: helpText }),
+    hasQuickActions ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-inline-approval-actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-plan-card-btn kc-plan-card-btn--approve", onClick: () => onQuickReply?.("approve"), children: approvalActions.accept_label || "Approve" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: `kc-plan-card-btn kc-plan-card-btn--ghost${showSuggest ? " kc-plan-card-btn--active" : ""}`,
+            onClick: () => setShowSuggest((value) => !value),
+            children: approvalActions.suggest_label || "Reply"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-plan-card-btn kc-plan-card-btn--reject", onClick: () => onQuickReply?.("cancel"), children: approvalActions.reject_label || "Reject" })
+      ] }),
+      showSuggest && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-suggest", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "textarea",
+          {
+            className: "kc-plan-card-input",
+            rows: 3,
+            placeholder: "Type your reply…",
+            value: draft,
+            onChange: (event) => setDraft(event.target.value)
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: "kc-plan-card-btn kc-plan-card-btn--approve",
+            onClick: () => {
+              if (!draft.trim()) return;
+              onSendSuggestion?.(draft);
+              setDraft("");
+              setShowSuggest(false);
+            },
+            disabled: !draft.trim(),
+            children: "Send"
+          }
+        )
+      ] })
+    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-suggest", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "textarea",
+        {
+          className: "kc-plan-card-input",
+          rows: 3,
+          placeholder: "Type your reply…",
+          value: draft,
+          onChange: (event) => setDraft(event.target.value)
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: "kc-plan-card-btn kc-plan-card-btn--approve",
+          onClick: () => {
+            if (!draft.trim()) return;
+            onSendSuggestion?.(draft);
+            setDraft("");
+          },
+          disabled: !draft.trim(),
+          children: "Send reply"
+        }
+      )
     ] })
   ] });
 }
@@ -9727,7 +12799,7 @@ function AgentApprovalModal({ ctx, value, onChange, onSend, onQuickReply, onSkil
   const approvalRequest = ctx?.approvalRequest && typeof ctx.approvalRequest === "object" ? ctx.approvalRequest : {};
   const approvalActions = approvalRequest.actions && typeof approvalRequest.actions === "object" ? approvalRequest.actions : {};
   const approvalMetadata = approvalRequest.metadata && typeof approvalRequest.metadata === "object" ? approvalRequest.metadata : {};
-  const isSkillApproval = String(ctx?.kind || "").toLowerCase() === "skill_approval" || String(approvalMetadata.approval_mode || "").toLowerCase() === "skill_permission_grant";
+  const isSkillApproval2 = String(ctx?.kind || "").toLowerCase() === "skill_approval" || String(approvalMetadata.approval_mode || "").toLowerCase() === "skill_permission_grant";
   reactExports.useEffect(() => {
     if (showSuggest) inputRef.current?.focus();
   }, [showSuggest]);
@@ -9763,12 +12835,12 @@ function AgentApprovalModal({ ctx, value, onChange, onSend, onQuickReply, onSkil
     always: "Always allow"
   };
   return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-modal-overlay", onClick: (e) => {
-    if (!isSkillApproval && e.target === e.currentTarget) onDismiss();
+    if (!isSkillApproval2 && e.target === e.currentTarget) onDismiss();
   }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-modal", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-modal-header", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-modal-icon", children: isSkillApproval ? "🛡️" : "⏳" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-modal-title", children: approvalRequest.title || (isSkillApproval ? "Skill permission required" : "Agent is waiting for your input") }),
-      !isSkillApproval && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-modal-close", onClick: onDismiss, children: "✕" })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-modal-icon", children: isSkillApproval2 ? "🛡️" : "⏳" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-modal-title", children: approvalRequest.title || (isSkillApproval2 ? "Skill permission required" : "Agent is waiting for your input") }),
+      !isSkillApproval2 && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-modal-close", onClick: onDismiss, children: "✕" })
     ] }),
     (approvalRequest.summary || ctx.prompt) && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-modal-prompt", children: /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: approvalRequest.summary || ctx.prompt }) }),
     Array.isArray(approvalRequest.sections) && approvalRequest.sections.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-approval-sections", children: approvalRequest.sections.map((section, index2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-approval-section", children: [
@@ -9776,7 +12848,7 @@ function AgentApprovalModal({ ctx, value, onChange, onSend, onQuickReply, onSkil
       Array.isArray(section.items) && section.items.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "kc-approval-list", children: section.items.map((item, itemIndex) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: item }, `${index2}-${itemIndex}`)) })
     ] }, `${section.title || "section"}-${index2}`)) }),
     approvalRequest.help_text && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-approval-help", children: approvalRequest.help_text }),
-    isSkillApproval ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+    isSkillApproval2 ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-approval-note-row", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "kc-approval-label", children: "Approval note" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -9855,9 +12927,6 @@ function SendIcon$1() {
     /* @__PURE__ */ jsxRuntimeExports.jsx("polygon", { points: "22 2 15 22 11 13 2 9 22 2" })
   ] });
 }
-function StopIcon$1() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "currentColor", children: /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "4", y: "4", width: "16", height: "16", rx: "2.5" }) });
-}
 function ClearIcon() {
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "3 6 5 6 21 6" }),
@@ -9876,6 +12945,48 @@ function ClockIcon({ size = 14 }) {
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "10" }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "12 6 12 12 16 14" })
+  ] });
+}
+function PaperclipIcon() {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.9", strokeLinecap: "round", strokeLinejoin: "round", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "m21.4 11.1-8.49 8.49a5 5 0 0 1-7.07-7.07l9.19-9.2a3.5 3.5 0 1 1 4.95 4.96L10.76 17.5a2 2 0 1 1-2.83-2.83l8.49-8.48" }) });
+}
+function FolderIcon() {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.9", strokeLinecap: "round", strokeLinejoin: "round", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M3 7.5A1.5 1.5 0 0 1 4.5 6h4l1.5 2h7.5A1.5 1.5 0 0 1 19 9.5v7a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 16.5z" }) });
+}
+function PlanModeIcon() {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.9", strokeLinecap: "round", strokeLinejoin: "round", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 6h11" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 12h11" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 18h11" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "4", cy: "6", r: "1" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "4", cy: "12", r: "1" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "4", cy: "18", r: "1" })
+  ] });
+}
+function AgentModeIcon() {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.9", strokeLinecap: "round", strokeLinejoin: "round", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 3v3" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M7 6h10" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "5", y: "9", width: "14", height: "9", rx: "3" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 13h.01" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M15 13h.01" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9.5 16h5" })
+  ] });
+}
+function ResearchModeIcon() {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.9", strokeLinecap: "round", strokeLinejoin: "round", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "11", cy: "11", r: "6" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "m20 20-3.5-3.5" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M11 8v3l2 2" })
+  ] });
+}
+function PlugModeIcon() {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.9", strokeLinecap: "round", strokeLinejoin: "round", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 7V3" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M15 7V3" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M7 9h10" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 9v3a4 4 0 0 0 8 0V9" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 16v5" })
   ] });
 }
 function HistoryList({ sessions, onLoad, onDelete }) {
@@ -9913,29 +13024,47 @@ function HistoryList({ sessions, onLoad, onDelete }) {
     ] }, label)
   ) });
 }
-const PROVIDER_ORDER = ["anthropic", "openai", "google", "xai"];
-const CLOUD_MODELS = [
-  { id: "anthropic/claude-opus-4-6", label: "Claude Opus 4.6", provider: "anthropic" },
-  { id: "anthropic/claude-sonnet-4-6", label: "Claude Sonnet 4.6", provider: "anthropic" },
-  { id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5", provider: "anthropic" },
-  { id: "openai/gpt-4o", label: "GPT-4o", provider: "openai" },
-  { id: "openai/gpt-4o-mini", label: "GPT-4o mini", provider: "openai" },
-  { id: "openai/gpt-4-turbo", label: "GPT-4 Turbo", provider: "openai" },
-  { id: "google/gemini-2.0-flash", label: "Gemini 2.0 Flash", provider: "google" },
-  { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro", provider: "google" },
-  { id: "google/gemini-1.5-pro", label: "Gemini 1.5 Pro", provider: "google" },
-  { id: "xai/grok-4", label: "Grok 4", provider: "xai" },
-  { id: "xai/grok-4.20-beta-latest-non-reasoning", label: "Grok 4.20", provider: "xai" },
-  { id: "xai/grok-4-1-fast-reasoning", label: "Grok 4.1 Fast Reasoning", provider: "xai" }
-];
-const PROVIDER_META = {
-  anthropic: { label: "Anthropic", settingsKey: "anthropicKey" },
-  openai: { label: "OpenAI", settingsKey: "openaiKey" },
-  google: { label: "Google AI", settingsKey: "googleKey" },
-  xai: { label: "xAI / Grok", settingsKey: "xaiKey" }
-};
 const SESSIONS_KEY = "kendr_sessions_v1";
 const CURRENT_HIST_KEY = "kendr_chat_history_v1";
+const PROVIDERS = [
+  { id: "openai", label: "OpenAI", settingsKey: "openaiKey", defaultModel: "openai/gpt-4o-mini" },
+  { id: "anthropic", label: "Anthropic", settingsKey: "anthropicKey", defaultModel: "anthropic/claude-sonnet-4-6" },
+  { id: "google", label: "Google AI", settingsKey: "googleKey", defaultModel: "google/gemini-2.0-flash" },
+  { id: "xai", label: "xAI / Grok", settingsKey: "xaiKey", defaultModel: "xai/grok-4" }
+];
+const CLOUD_MODEL_CATALOG = {
+  openai: [
+    { name: "gpt-5.4", badge: "latest" },
+    { name: "gpt-5.2", badge: "agent" },
+    { name: "gpt-4o", badge: "best" },
+    { name: "gpt-4o-mini", badge: "cheapest" },
+    { name: "gpt-4-turbo" }
+  ],
+  anthropic: [
+    { name: "claude-opus-4-6", badge: "best" },
+    { name: "claude-sonnet-4-6", badge: "latest" },
+    { name: "claude-haiku-4-5", badge: "cheapest" }
+  ],
+  google: [
+    { name: "gemini-2.5-pro", badge: "best" },
+    { name: "gemini-2.5-flash", badge: "agent" },
+    { name: "gemini-2.0-flash", badge: "latest" },
+    { name: "gemini-1.5-pro" }
+  ],
+  xai: [
+    { name: "grok-4", badge: "best" },
+    { name: "grok-4-1-fast-reasoning", badge: "agent" },
+    { name: "grok-4.20-beta-latest-non-reasoning", badge: "latest" }
+  ]
+};
+const STUDIO_NAV_ITEMS = [
+  { id: "build", label: "Build" },
+  { id: "memory", label: "Memory" },
+  { id: "integrations", label: "Integrations" },
+  { id: "runs", label: "Runs" },
+  { id: "settings", label: "Settings" },
+  { id: "about", label: "About Kendr" }
+];
 function lsGet(key) {
   try {
     return JSON.parse(localStorage.getItem(key));
@@ -9943,9 +13072,9 @@ function lsGet(key) {
     return null;
   }
 }
-function lsSet(key, val) {
+function lsSet(key, value) {
   try {
-    localStorage.setItem(key, JSON.stringify(val));
+    localStorage.setItem(key, JSON.stringify(value));
   } catch {
   }
 }
@@ -9954,12 +13083,12 @@ function readSessions(settings) {
   const days = settings?.chatHistoryRetentionDays ?? 14;
   if (!days || days <= 0) return all.slice().reverse();
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1e3;
-  return all.filter((s) => new Date(s.updatedAt || s.createdAt).getTime() >= cutoff).reverse();
+  return all.filter((session) => new Date(session.updatedAt || session.createdAt).getTime() >= cutoff).reverse();
 }
 function saveCurrentAsSession(chatId) {
   const messages = lsGet(CURRENT_HIST_KEY) || [];
   if (!messages.length) return;
-  const first = messages.find((m2) => m2.role === "user");
+  const first = messages.find((item) => item.role === "user");
   const title = String(first?.content || "").slice(0, 60) || "New conversation";
   const all = lsGet(SESSIONS_KEY) || [];
   const session = {
@@ -9969,7 +13098,7 @@ function saveCurrentAsSession(chatId) {
     updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     messages
   };
-  lsSet(SESSIONS_KEY, [...all.filter((s) => s.id !== chatId), session].slice(-100));
+  lsSet(SESSIONS_KEY, [...all.filter((item) => item.id !== chatId), session].slice(-100));
 }
 function sessionRelTime(dateStr) {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -9979,279 +13108,452 @@ function sessionRelTime(dateStr) {
   const d = new Date(dateStr);
   return d.toLocaleDateString(void 0, { month: "short", day: "numeric" });
 }
+function buildProviderModels(providerId, status) {
+  const selectable = Array.isArray(status?.selectable_models) ? status.selectable_models : [];
+  const details = Array.isArray(status?.selectable_model_details) ? status.selectable_model_details : [];
+  const detailMap = new Map(details.map((item) => [String(item?.name || "").trim(), item]));
+  const catalog = Array.isArray(CLOUD_MODEL_CATALOG[providerId]) ? CLOUD_MODEL_CATALOG[providerId] : [];
+  const seen2 = /* @__PURE__ */ new Set();
+  const merged = [];
+  for (const entry of catalog) {
+    const name = String(entry?.name || "").trim();
+    if (!name) continue;
+    seen2.add(name);
+    merged.push({
+      name,
+      badge: String(entry?.badge || "").trim(),
+      available: selectable.includes(name),
+      agentCapable: detailMap.get(name)?.agent_capable
+    });
+  }
+  for (const name of selectable) {
+    const clean = String(name || "").trim();
+    if (!clean || seen2.has(clean)) continue;
+    const detail = detailMap.get(clean);
+    merged.push({
+      name: clean,
+      badge: "",
+      available: true,
+      agentCapable: detail?.agent_capable
+    });
+  }
+  return merged;
+}
+function modelLabel(modelId) {
+  const raw = String(modelId || "").trim();
+  if (!raw) return "Auto model";
+  if (raw.startsWith("ollama/")) return raw.replace(/^ollama\//, "");
+  const provider = raw.split("/")[0];
+  const name = raw.replace(`${provider}/`, "");
+  const label = PROVIDERS.find((item) => item.id === provider)?.label || provider;
+  return `${label} · ${name}`;
+}
+function StudioNavIcon({ name }) {
+  const common = {
+    width: 15,
+    height: 15,
+    viewBox: "0 0 16 16",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.5,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": true
+  };
+  switch (name) {
+    case "build":
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { ...common, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M3 4.5h10" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5.5 2.5v4" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M10.5 2.5v4" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M3 7.5h10v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" })
+      ] });
+    case "memory":
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { ...common, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5 3.5h6a1 1 0 0 1 1 1v7H4v-7a1 1 0 0 1 1-1z" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 2.5v2" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M10 2.5v2" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 8h4" })
+      ] });
+    case "integrations":
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { ...common, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "5", cy: "5", r: "1.5" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "11", cy: "5", r: "1.5" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "8", cy: "11", r: "1.5" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6.5 5h3" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5.9 6.2 7.3 9.6" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M10.1 6.2 8.7 9.6" })
+      ] });
+    case "runs":
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { ...common, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 3.25a4.75 4.75 0 1 0 4.58 6" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9.75 2.75H13v3.25" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 5.5v2.75l1.75 1.25" })
+      ] });
+    case "settings":
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { ...common, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "8", cy: "8", r: "2.25" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 2.5v1.25" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 12.25v1.25" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12.25 8h1.25" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M2.5 8h1.25" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "m11.89 4.11.88-.88" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "m3.23 12.77.88-.88" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "m11.89 11.89.88.88" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "m3.23 3.23.88.88" })
+      ] });
+    default:
+      return null;
+  }
+}
 function StudioLayout() {
-  const { state, dispatch, refreshOllamaModels } = useApp();
+  const { state, dispatch, refreshModelInventory, refreshOllamaModels } = useApp();
   const [chatKey, setChatKey] = reactExports.useState(0);
   const [chatId, setChatId] = reactExports.useState(() => `chat-${Date.now()}`);
   const [activeSession, setActiveSession] = reactExports.useState(null);
   const [sessions, setSessions] = reactExports.useState(() => readSessions(state.settings));
-  const isOnline = state.backendStatus === "running";
-  const ollamaModels = Array.isArray(state.ollamaModels) ? state.ollamaModels : [];
-  const modelInventory = state.modelInventory;
-  const modelInventoryLoading = !!state.modelInventoryLoading;
-  const modelInventoryError = !!state.modelInventoryError;
-  const providerStatuses = Object.fromEntries(
-    (modelInventory && Array.isArray(modelInventory.providers) ? modelInventory.providers : []).map((p2) => [p2.provider, p2])
-  );
-  const getProviderUiState = reactExports.useCallback((provider) => {
-    const meta = PROVIDER_META[provider];
+  const [historyFlyoutOpen, setHistoryFlyoutOpen] = reactExports.useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = reactExports.useState(false);
+  const historyFlyoutRef = reactExports.useRef(null);
+  const profileMenuRef = reactExports.useRef(null);
+  const providerStatuses = reactExports.useMemo(() => Object.fromEntries(
+    (state.modelInventory && Array.isArray(state.modelInventory.providers) ? state.modelInventory.providers : []).map((item) => [item.provider, item])
+  ), [state.modelInventory]);
+  const localModels = Array.isArray(state.ollamaModels) ? state.ollamaModels : [];
+  const cloudReady = PROVIDERS.some((provider) => {
+    const hasSavedKey = !!String(state.settings?.[provider.settingsKey] || "").trim();
+    const status = providerStatuses[provider.id] || {};
+    const selectable = Array.isArray(status.selectable_models) ? status.selectable_models : [];
+    return hasSavedKey && selectable.length > 0;
+  });
+  const selectedModelReady = (() => {
+    const selected = String(state.selectedModel || "").trim();
+    if (!selected) return false;
+    if (selected.startsWith("ollama/")) {
+      const name = selected.replace(/^ollama\//, "");
+      return localModels.some((model) => String(model?.name || model || "").trim() === name);
+    }
+    const provider = selected.split("/")[0];
     const status = providerStatuses[provider] || {};
-    const hasSavedKey = !!String(state.settings?.[meta.settingsKey] || "").trim();
-    const hasModels = Array.isArray(status.selectable_models) && status.selectable_models.length > 0;
-    const hasFetchError = !!String(status.model_fetch_error || "").trim();
-    if (!hasSavedKey) return { kind: "missing", label: "+ key", title: `Add ${meta.label} API key` };
-    if (modelInventoryLoading || state.backendStatus === "starting" || state.backendStatus === "connecting") {
-      return { kind: "checking", label: "checking", title: `Checking ${meta.label} models…` };
-    }
-    if (modelInventoryError || hasFetchError || !status.ready && !hasModels) {
-      return { kind: "error", label: "error", title: hasFetchError ? `${meta.label}: ${status.model_fetch_error}` : `${meta.label} could not be verified` };
-    }
-    return { kind: "ok", label: "✓", title: `${meta.label} ready` };
-  }, [modelInventoryError, modelInventoryLoading, providerStatuses, state.backendStatus, state.settings]);
-  const navigate = (view) => dispatch({ type: "SET_VIEW", view });
+    const selectable = Array.isArray(status.selectable_models) ? status.selectable_models : [];
+    const modelName = selected.replace(`${provider}/`, "");
+    return selectable.includes(modelName);
+  })();
+  const hasAnyModel = selectedModelReady || cloudReady || localModels.length > 0;
+  reactExports.useEffect(() => {
+    if (state.selectedModel || cloudReady || localModels.length === 0) return;
+    const firstLocal = String(localModels[0]?.name || localModels[0] || "").trim();
+    if (!firstLocal) return;
+    dispatch({ type: "SET_MODEL", model: `ollama/${firstLocal}` });
+  }, [cloudReady, dispatch, localModels, state.selectedModel]);
   reactExports.useEffect(() => {
     setSessions(readSessions(state.settings));
   }, [chatKey, state.settings]);
-  const handleNewChat = reactExports.useCallback(() => {
+  reactExports.useEffect(() => {
+    if (!historyFlyoutOpen) return void 0;
+    const onMouseDown = (event) => {
+      if (historyFlyoutRef.current && !historyFlyoutRef.current.contains(event.target)) setHistoryFlyoutOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [historyFlyoutOpen]);
+  reactExports.useEffect(() => {
+    if (!profileMenuOpen) return void 0;
+    const onMouseDown = (event) => {
+      if (profileMenuRef.current && !profileMenuRef.current.contains(event.target)) setProfileMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [profileMenuOpen]);
+  reactExports.useEffect(() => {
+    setHistoryFlyoutOpen(false);
+    setProfileMenuOpen(false);
+  }, [state.sidebarOpen]);
+  const handleNewChat = () => {
     saveCurrentAsSession(chatId);
     lsSet(CURRENT_HIST_KEY, []);
     const newId = `chat-${Date.now()}`;
     setChatId(newId);
     setActiveSession(null);
-    setChatKey((k2) => k2 + 1);
-  }, [chatId]);
-  const handleLoadSession = reactExports.useCallback((session) => {
+    setChatKey((value) => value + 1);
+    setHistoryFlyoutOpen(false);
+  };
+  const handleLoadSession = (session) => {
     saveCurrentAsSession(chatId);
     const all = lsGet(SESSIONS_KEY) || [];
-    lsSet(SESSIONS_KEY, all.filter((s) => s.id !== session.id));
+    lsSet(SESSIONS_KEY, all.filter((item) => item.id !== session.id));
     lsSet(CURRENT_HIST_KEY, session.messages);
     setChatId(session.id);
     setActiveSession(session);
-    setChatKey((k2) => k2 + 1);
-  }, [chatId]);
-  const handleDeleteSession = reactExports.useCallback((id2) => {
+    setChatKey((value) => value + 1);
+    setHistoryFlyoutOpen(false);
+  };
+  const handleDeleteSession = (id2) => {
     const all = lsGet(SESSIONS_KEY) || [];
-    lsSet(SESSIONS_KEY, all.filter((s) => s.id !== id2));
-    setSessions((prev) => prev.filter((s) => s.id !== id2));
-  }, []);
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-root", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-sidebar", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-sidebar-fixed", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "sl-new-chat", onClick: handleNewChat, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(PlusIcon, {}),
-          " New chat"
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-conv-label", children: "ACTIVE ASSISTANT" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "sl-conv-item active", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(ChatDotIcon, {}),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-conv-current-label", children: activeSession?.title || "Current chat" })
-        ] }),
-        sessions.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-conv-label sl-conv-label--recent", children: "RECENT SESSIONS" })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-sessions-scroll", children: sessions.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-sessions-empty", children: "No past chats yet" }) : sessions.map((s) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-session-row", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "sl-session-btn", onClick: () => handleLoadSession(s), children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-session-title", children: s.title }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-session-time", children: sessionRelTime(s.updatedAt || s.createdAt) })
-        ] }),
+    lsSet(SESSIONS_KEY, all.filter((item) => item.id !== id2));
+    setSessions((current) => current.filter((item) => item.id !== id2));
+    if (activeSession?.id === id2) setActiveSession(null);
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-minimal-root", children: hasAnyModel ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-minimal-shell", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `sl-studio-shell ${state.sidebarOpen ? "" : "sl-studio-shell--collapsed"}`, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("aside", { className: `sl-studio-sidebar ${state.sidebarOpen ? "" : "sl-studio-sidebar--collapsed"}`, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-studio-side-top", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           "button",
           {
-            className: "sl-session-del",
-            title: "Delete",
-            onClick: (e) => {
-              e.stopPropagation();
-              handleDeleteSession(s.id);
-            },
-            children: "×"
-          }
-        )
-      ] }, s.id)) }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-sidebar-bottom", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "sl-nav-btn", onClick: () => navigate("home"), title: "Home", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(HomeNavIcon, {}),
-          " Home"
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "sl-nav-btn", onClick: () => navigate("build"), title: "Build", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(AgentsNavIcon, {}),
-          " Build"
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "sl-nav-btn", onClick: () => navigate("integrations"), title: "Integrations", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(MCPNavIcon, {}),
-          " Tools"
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "sl-nav-btn", onClick: () => navigate("runs"), title: "Runs", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(RunsNavIcon, {}),
-          " Runs"
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "sl-nav-btn", onClick: () => navigate("settings"), title: "AI Engines & Settings", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(SettingsNavIcon, {}),
-          " Settings"
-        ] })
-      ] })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-main", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-topbar", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          ModelPicker,
-          {
-            ollamaModels,
-            onRefreshOllama: () => refreshOllamaModels(true),
-            providerStatuses,
-            getProviderUiState
+            className: "sl-studio-collapse",
+            onClick: () => dispatch({ type: "TOGGLE_SIDEBAR" }),
+            title: state.sidebarOpen ? "Collapse sidebar" : "Expand sidebar",
+            children: state.sidebarOpen ? "‹" : "›"
           }
         ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-topbar-spacer" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-status", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `sl-status-dot ${isOnline ? "on" : ""}` }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isOnline ? "connected" : state.backendStatus })
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: `sl-studio-new ${state.sidebarOpen ? "" : "sl-studio-new--icon"}`, onClick: handleNewChat, title: "New chat", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-studio-new-mark", children: "+" }),
+          state.sidebarOpen && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "New chat" })
         ] })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(ChatPanel, { fullWidth: true, hideHeader: true, studioMode: true }, chatKey)
-    ] })
+      state.sidebarOpen ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-studio-session-list", children: sessions.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-studio-empty", children: "No saved chats yet" }) : sessions.map((session) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-studio-session-row", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: `sl-studio-session ${activeSession?.id === session.id ? "active" : ""}`, onClick: () => handleLoadSession(session), children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-studio-session-title", children: session.title }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-studio-session-time", children: sessionRelTime(session.updatedAt || session.createdAt) })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "sl-studio-session-del", onClick: () => handleDeleteSession(session.id), children: "×" })
+      ] }, session.id)) }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-studio-mini-list", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-history-flyout-root", ref: historyFlyoutRef, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: `sl-studio-mini-session ${historyFlyoutOpen ? "active" : ""}`,
+            onClick: () => setHistoryFlyoutOpen((value) => !value),
+            title: "Chat history",
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(ChatThreadsIcon, {})
+          }
+        ),
+        historyFlyoutOpen && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-history-flyout", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-history-flyout-title", children: "Chats" }),
+          sessions.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-history-flyout-empty", children: "No saved chats yet" }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-history-flyout-list", children: sessions.map((session) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-history-flyout-row", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "sl-history-flyout-item", onClick: () => handleLoadSession(session), children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-history-flyout-item-title", children: session.title }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-history-flyout-item-time", children: sessionRelTime(session.updatedAt || session.createdAt) })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "sl-history-flyout-del", onClick: () => handleDeleteSession(session.id), children: "×" })
+          ] }, session.id)) })
+        ] })
+      ] }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-studio-side-bottom", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-profile-menu-root", ref: profileMenuRef, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            className: `sl-profile-trigger ${profileMenuOpen ? "active" : ""}`,
+            onClick: () => setProfileMenuOpen((value) => !value),
+            title: "Workspace menu",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-profile-avatar", children: "K" }),
+              state.sidebarOpen && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "sl-profile-copy", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-profile-name", children: "Workspace menu" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-profile-sub", children: "Build, runs, memory, settings" })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-profile-caret", children: "⌄" })
+            ]
+          }
+        ),
+        profileMenuOpen && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `sl-profile-menu ${state.sidebarOpen ? "" : "sl-profile-menu--collapsed"}`, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-profile-menu-header", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-profile-avatar sl-profile-avatar--lg", children: "K" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-profile-menu-copy", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-profile-menu-title", children: "Kendr workspace" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-profile-menu-sub", children: "Open a focused surface, then jump back to search in one click." })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-profile-menu-list", children: STUDIO_NAV_ITEMS.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              className: "sl-profile-menu-item",
+              onClick: () => {
+                dispatch({ type: "SET_VIEW", view: item.id });
+                setProfileMenuOpen(false);
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-studio-nav-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx(StudioNavIcon, { name: item.id }) }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-profile-menu-item-label", children: item.label }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-profile-menu-item-arrow", children: "›" })
+              ]
+            },
+            item.id
+          )) })
+        ] })
+      ] }) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-studio-main", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-studio-stage", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ChatPanel,
+      {
+        fullWidth: true,
+        hideHeader: true,
+        studioMode: true,
+        minimalStudio: true,
+        studioAccessory: /* @__PURE__ */ jsxRuntimeExports.jsx(
+          StudioModelPicker,
+          {
+            state,
+            dispatch,
+            providerStatuses,
+            localModels,
+            refreshOllamaModels
+          }
+        )
+      },
+      chatKey
+    ) }) })
+  ] }) }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+    StudioModelGate,
+    {
+      state,
+      dispatch,
+      localModels,
+      refreshModelInventory,
+      refreshOllamaModels
+    }
+  ) });
+}
+function ChatThreadsIcon() {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "15", height: "15", viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M3 4.5h10a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H8.5l-2.5 2v-2H3a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5 7h6" })
   ] });
 }
-function ModelPicker({ ollamaModels, onRefreshOllama, providerStatuses, getProviderUiState }) {
-  const { state, dispatch } = useApp();
+function StudioModelPicker({ state, dispatch, providerStatuses, localModels, refreshOllamaModels }) {
   const [open, setOpen] = reactExports.useState(false);
   const rootRef = reactExports.useRef(null);
-  reactExports.useEffect(() => {
-    if (!open) return;
-    const handler = (e) => {
-      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
-  const select = (modelId, disabled) => {
-    if (disabled) return;
-    dispatch({ type: "SET_MODEL", model: modelId });
-    setOpen(false);
-  };
-  const selected = state.selectedModel;
-  const selectedMeta = CLOUD_MODELS.find((m2) => m2.id === selected);
-  const displayName = !selected ? "Auto (backend default)" : selectedMeta?.label ?? selected.replace(/^ollama\//, "");
-  const selectedProvider = selected ? selectedMeta?.provider || "ollama" : null;
-  const selectedProviderLost = selected && selectedMeta && getProviderUiState(selectedMeta.provider).kind !== "ok";
-  const getModelBadges = (provider, modelId) => {
-    const status = providerStatuses[provider] || {};
-    const name = String(modelId || "").replace(new RegExp(`^${provider}/`), "");
-    return Array.isArray(status.model_badges?.[name]) ? status.model_badges[name] : [];
-  };
-  const isAgentCapable = (provider, modelName) => {
-    const status = providerStatuses[provider] || {};
-    const details = Array.isArray(status.selectable_model_details) ? status.selectable_model_details : [];
-    const matched = details.find((item) => String(item?.name || "") === String(modelName || ""));
-    if (matched && typeof matched.agent_capable === "boolean") return matched.agent_capable;
-    if (provider === "ollama") return false;
-    if (String(status.model || "") === String(modelName || "") && typeof status.agent_capable === "boolean") return status.agent_capable;
-    return false;
-  };
-  reactExports.useEffect(() => {
-    if (!state.selectedModel) return;
-    if (!resolveAgentCapability(state.selectedModel, { providers: Object.values(providerStatuses) })) {
-      dispatch({ type: "SET_MODEL", model: null });
+  const triggerRef = reactExports.useRef(null);
+  const [dropdownStyle, setDropdownStyle] = reactExports.useState(null);
+  const selected = String(state.selectedModel || "").trim();
+  const selectedProvider = selected.startsWith("ollama/") ? "ollama" : String(selected.split("/")[0] || "").trim().toLowerCase();
+  const selectedAvailable = (() => {
+    if (!selected) return true;
+    if (selected.startsWith("ollama/")) {
+      const localName = selected.replace(/^ollama\//, "");
+      return localModels.some((model2) => String(model2?.name || model2 || "").trim() === localName);
     }
-  }, [dispatch, providerStatuses, state.selectedModel]);
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-root", ref: rootRef, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: `mp-trigger ${selectedProviderLost ? "mp-trigger--warn" : ""}`, onClick: () => setOpen((o) => !o), children: [
-      selectedProvider && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-provider-dot ${selectedProvider}` }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-trigger-label", children: displayName }),
-      selectedProviderLost && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-trigger-warn", title: "API key not configured", children: "⚠" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronIcon, {})
-    ] }),
-    open && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-dropdown", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mp-group", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: `mp-option ${!selected ? "active" : ""}`, onClick: () => select(null, false), children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-name", children: "Auto (backend default)" }),
-        !selected && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-check", children: "✓" })
-      ] }) }),
-      PROVIDER_ORDER.map((provider) => {
-        const status = providerStatuses[provider] || {};
-        const ui2 = getProviderUiState(provider);
-        const isConfigured = ui2.kind === "ok";
-        const knownModels = CLOUD_MODELS.filter((m2) => m2.provider === provider);
-        const selectableModels = Array.isArray(status.selectable_models) ? status.selectable_models : [];
-        const models = selectableModels.length ? selectableModels.map((model) => {
-          const existing = knownModels.find((item) => item.id === `${provider}/${model}`);
-          return existing || { id: `${provider}/${model}`, label: model, provider };
-        }) : knownModels;
-        const meta = PROVIDER_META[provider];
+    const provider = selected.split("/")[0];
+    const model = selected.replace(`${provider}/`, "");
+    const status = providerStatuses[provider] || {};
+    const selectable = Array.isArray(status.selectable_models) ? status.selectable_models : [];
+    return selectable.includes(model);
+  })();
+  reactExports.useEffect(() => {
+    if (!open) return void 0;
+    const onMouseDown = (event) => {
+      if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [open]);
+  reactExports.useLayoutEffect(() => {
+    if (!open) return void 0;
+    const updateDropdownPosition = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const margin = 16;
+      const gap = 8;
+      const width = Math.min(420, Math.max(280, viewportWidth - margin * 2));
+      const left = Math.max(margin, Math.min(rect.left, viewportWidth - width - margin));
+      const spaceBelow = viewportHeight - rect.bottom - gap - margin;
+      const spaceAbove = rect.top - gap - margin;
+      const openUpward = spaceBelow < 260 && spaceAbove > spaceBelow;
+      const maxHeight = Math.max(180, openUpward ? spaceAbove : spaceBelow);
+      setDropdownStyle({
+        position: "fixed",
+        left: `${left}px`,
+        width: `${width}px`,
+        maxHeight: `${maxHeight}px`,
+        [openUpward ? "bottom" : "top"]: `${Math.round(openUpward ? viewportHeight - rect.top + gap : rect.bottom + gap)}px`,
+        [openUpward ? "top" : "bottom"]: "auto"
+      });
+    };
+    updateDropdownPosition();
+    window.addEventListener("resize", updateDropdownPosition);
+    window.addEventListener("scroll", updateDropdownPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateDropdownPosition);
+      window.removeEventListener("scroll", updateDropdownPosition, true);
+    };
+  }, [open]);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-root sl-model-picker", ref: rootRef, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "button",
+      {
+        ref: triggerRef,
+        className: `mp-trigger${selected && !selectedAvailable ? " mp-trigger--warn" : ""}`,
+        onClick: () => setOpen((value) => !value),
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-provider-dot ${selectedProvider || "auto"}` }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-trigger-label", children: modelLabel(selected) }),
+          selected && !selectedAvailable && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-trigger-warn", children: "Locked" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-model-trigger-caret", children: "⌄" })
+        ]
+      }
+    ),
+    open && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-dropdown", style: dropdownStyle || void 0, children: [
+      PROVIDERS.map((provider) => {
+        const status = providerStatuses[provider.id] || {};
+        const hasKey = !!String(state.settings?.[provider.settingsKey] || "").trim();
+        const tone = status?.checking ? "checking" : status?.error ? "error" : hasKey ? "ok" : "missing";
+        const toneLabel = status?.checking ? "Checking" : status?.error ? "Error" : hasKey ? "Ready" : "Locked";
+        const models = buildProviderModels(provider.id, status);
         return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-group", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-group-label", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-provider-dot ${provider}` }),
-            meta.label,
-            ui2.kind === "ok" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-key-badge ok", children: "ready" }),
-            ui2.kind === "missing" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-key-badge missing", children: "no key" }),
-            ui2.kind === "checking" && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "mp-key-badge checking", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(SpinnerIcon, { className: "mp-inline-spinner" }),
-              "checking"
-            ] }),
-            ui2.kind === "error" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-key-badge error", children: "error" })
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-group-label mp-group-label--row", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-provider-dot ${provider.id}` }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: provider.label }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-key-badge ${tone}`, children: toneLabel })
           ] }),
-          models.map((m2) => (() => {
-            const modelName = String(m2.id || "").replace(`${provider}/`, "");
-            const agentCapable = isAgentCapable(provider, modelName);
-            const disabled = !isConfigured || !agentCapable;
+          models.map((entry) => {
+            const name = String(entry.name || "").trim();
+            const id2 = `${provider.id}/${name}`;
+            const disabled = !entry.available;
             return /* @__PURE__ */ jsxRuntimeExports.jsxs(
               "button",
               {
-                className: `mp-option ${selected === m2.id ? "active" : ""} ${disabled ? "mp-option--dim" : ""}`,
-                onClick: () => select(m2.id, disabled),
-                title: !isConfigured ? ui2.title : !agentCapable ? "No agent capability: tool/function calls unavailable." : m2.label,
+                className: `mp-option ${selected === id2 ? "active" : ""}${disabled ? " mp-option--dim" : ""}`,
                 disabled,
+                onClick: () => {
+                  if (disabled) return;
+                  dispatch({ type: "SET_MODEL", model: id2 });
+                  setOpen(false);
+                },
                 children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-name", children: m2.label }),
-                  getModelBadges(provider, m2.id).map((badge) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-model-badge ${badge}`, children: badge }, `${m2.id}:${badge}`)),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-model-badge ${agentCapable ? "agent" : "noagent"}`, children: agentCapable ? "agent" : "no-agent" }),
-                  disabled && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-lock", children: "🔒" }),
-                  selected === m2.id && !disabled && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-check", children: "✓" })
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-name", children: name }),
+                  entry.badge && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-model-badge ${entry.badge}`, children: entry.badge }),
+                  typeof entry.agentCapable === "boolean" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `mp-model-badge ${entry.agentCapable ? "agent" : "noagent"}`, children: entry.agentCapable ? "agent" : "text" }),
+                  disabled ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-lock", children: "🔒" }) : selected === id2 ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-check", children: "✓" }) : null
                 ]
               },
-              m2.id
+              id2
             );
-          })()),
-          !isConfigured && /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              className: "mp-add-key-btn",
-              onClick: () => {
-                dispatch({ type: "SET_VIEW", view: "settings" });
-                setOpen(false);
-              },
-              children: ui2.kind === "missing" ? `+ Add ${meta.label} key →` : ui2.kind === "checking" ? `Checking ${meta.label}…` : `Resolve ${meta.label} error →`
-            }
-          )
-        ] }, provider);
+          })
+        ] }, provider.id);
       }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-group", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-group-label mp-group-label--row", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-provider-dot ollama" }),
-          "Local (Ollama)",
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "mp-refresh-btn", onClick: onRefreshOllama, title: "Refresh Ollama models", children: /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshIcon$1, {}) })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Local models" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "mp-refresh-btn", onClick: () => refreshOllamaModels(true), children: "↻" })
         ] }),
-        ollamaModels.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mp-empty", children: [
-          "No local models found.",
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "mp-add-key-btn", onClick: () => {
-            dispatch({ type: "SET_VIEW", view: "models" });
-            setOpen(false);
-          }, children: "Pull a model →" })
-        ] }) : ollamaModels.map((m2) => {
-          const id2 = `ollama/${m2.name || m2}`;
-          const disabled = true;
+        localModels.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mp-empty", children: "No local models found." }) : localModels.map((model) => {
+          const name = String(model?.name || model || "").trim();
+          const id2 = `ollama/${name}`;
           return /* @__PURE__ */ jsxRuntimeExports.jsxs(
             "button",
             {
-              className: `mp-option ${selected === id2 ? "active" : ""} mp-option--dim`,
-              onClick: () => select(id2, disabled),
-              title: "Local models disabled for agent mode: no supported agent capability.",
-              disabled,
+              className: `mp-option ${selected === id2 ? "active" : ""}`,
+              onClick: () => {
+                dispatch({ type: "SET_MODEL", model: id2 });
+                setOpen(false);
+              },
               children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-name", children: m2.name || m2 }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-model-badge noagent", children: "no-agent" }),
-                m2.size && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "mp-option-size", children: [
-                  (m2.size / 1e9).toFixed(1),
-                  " GB"
-                ] }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-lock", children: "🔒" })
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-name", children: name }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-model-badge agent", children: "local" }),
+                selected === id2 && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "mp-option-check", children: "✓" })
               ]
             },
             id2
@@ -10261,72 +13563,99 @@ function ModelPicker({ ollamaModels, onRefreshOllama, providerStatuses, getProvi
     ] })
   ] });
 }
-function SpinnerIcon({ className = "" }) {
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { className, width: "10", height: "10", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M21 12a9 9 0 1 1-3.2-6.9" }) });
-}
-function RefreshIcon$1({ spinning = false }) {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
-    "svg",
-    {
-      width: "12",
-      height: "12",
-      viewBox: "0 0 24 24",
-      fill: "none",
-      stroke: "currentColor",
-      strokeWidth: "2.2",
-      strokeLinecap: "round",
-      style: spinning ? { animation: "sl-spin .7s linear infinite" } : {},
-      children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "23 4 23 10 17 10" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M20.49 15a9 9 0 1 1-2.12-9.36L23 10" })
-      ]
+function StudioModelGate({ state, dispatch, localModels, refreshModelInventory, refreshOllamaModels }) {
+  const api = window.kendrAPI;
+  const [setupMode, setSetupMode] = reactExports.useState("api");
+  const [providerId, setProviderId] = reactExports.useState("openai");
+  const [apiKey, setApiKey] = reactExports.useState("");
+  const [saving, setSaving] = reactExports.useState(false);
+  const [error, setError] = reactExports.useState("");
+  const selectedProvider = PROVIDERS.find((item) => item.id === providerId) || PROVIDERS[0];
+  const saveProvider = async () => {
+    const value = String(apiKey || "").trim();
+    if (!value) {
+      setError("Enter an API key first.");
+      return;
     }
-  );
-}
-function PlusIcon() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("line", { x1: "12", y1: "5", x2: "12", y2: "19" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("line", { x1: "5", y1: "12", x2: "19", y2: "12" })
-  ] });
-}
-function ChatDotIcon() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", strokeLinecap: "round", strokeLinejoin: "round", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" }) });
-}
-function HomeNavIcon() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", strokeLinecap: "round", strokeLinejoin: "round", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M3 10.5 12 3l9 7.5" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5 9.5V21h14V9.5" })
-  ] });
-}
-function RunsNavIcon() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", strokeLinecap: "round", strokeLinejoin: "round", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "10" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "12 6 12 12 16 14" })
-  ] });
-}
-function AgentsNavIcon() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", strokeLinecap: "round", strokeLinejoin: "round", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "2", y: "3", width: "20", height: "14", rx: "2" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 21h8m-4-4v4" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "8", cy: "10", r: "1.5", fill: "currentColor" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "10", r: "1.5", fill: "currentColor" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "16", cy: "10", r: "1.5", fill: "currentColor" })
-  ] });
-}
-function MCPNavIcon() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", strokeLinecap: "round", strokeLinejoin: "round", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "3" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" })
-  ] });
-}
-function SettingsNavIcon() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", strokeLinecap: "round", strokeLinejoin: "round", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "3" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" })
-  ] });
-}
-function ChevronIcon() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", children: /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "6 9 12 15 18 9" }) });
+    setSaving(true);
+    setError("");
+    try {
+      await api?.settings.set(selectedProvider.settingsKey, value);
+      dispatch({ type: "SET_SETTINGS", settings: { [selectedProvider.settingsKey]: value } });
+      if (state.backendStatus === "running") {
+        await api?.backend.restart();
+      } else {
+        await api?.backend.start();
+      }
+      await refreshModelInventory(true);
+      dispatch({ type: "SET_MODEL", model: selectedProvider.defaultModel });
+    } catch (err) {
+      setError(String(err?.message || err || "Could not save provider key."));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const selectLocalModel = async (model) => {
+    const name = String(model?.name || model || "").trim();
+    if (!name) return;
+    dispatch({ type: "SET_MODEL", model: `ollama/${name}` });
+    if (state.backendStatus !== "running") {
+      await api?.backend.start().catch(() => {
+      });
+    }
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-gate", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-gate-card", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-gate-badge", children: "First step" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { className: "sl-gate-title", children: "Connect one model to start" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "sl-gate-copy", children: "Start with one cloud API key or one local model. Everything else stays tucked into the menu until you need it." }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-gate-tabs", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `sl-gate-tab ${setupMode === "api" ? "active" : ""}`, onClick: () => setSetupMode("api"), children: "Use API key" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `sl-gate-tab ${setupMode === "local" ? "active" : ""}`, onClick: () => {
+        setSetupMode("local");
+        refreshOllamaModels(true);
+      }, children: "Use local model" })
+    ] }),
+    setupMode === "api" ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-gate-form", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-gate-provider-row", children: PROVIDERS.map((provider) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: `sl-gate-provider ${provider.id === providerId ? "active" : ""}`,
+          onClick: () => setProviderId(provider.id),
+          children: provider.label
+        },
+        provider.id
+      )) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "input",
+        {
+          className: "sl-gate-input",
+          type: "password",
+          placeholder: `Paste ${selectedProvider.label} API key`,
+          value: apiKey,
+          onChange: (event) => setApiKey(event.target.value),
+          onKeyDown: (event) => event.key === "Enter" && !saving && saveProvider()
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-gate-actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "sl-gate-cta", disabled: saving || !apiKey.trim(), onClick: saveProvider, children: saving ? "Connecting…" : "Save and continue" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "sl-gate-link", onClick: () => dispatch({ type: "SET_VIEW", view: "settings" }), children: "Open full settings" })
+      ] })
+    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-gate-form", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-gate-inline-actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "sl-gate-link", onClick: () => refreshOllamaModels(true), children: "Refresh local models" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "sl-gate-link", onClick: () => dispatch({ type: "SET_VIEW", view: "settings" }), children: "Open model manager" })
+      ] }),
+      localModels.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-gate-empty", children: "No local models found yet. Pull one from the model manager, then come back here." }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-gate-local-list", children: localModels.map((model) => {
+        const name = String(model?.name || model || "").trim();
+        const size = model?.size ? `${(Number(model.size) / 1e9).toFixed(1)} GB` : "";
+        return /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "sl-gate-local-item", onClick: () => selectLocalModel(model), children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-gate-local-name", children: name }),
+          size && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "sl-gate-local-size", children: size })
+        ] }, name);
+      }) })
+    ] }),
+    !!error && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-gate-error", children: error })
+  ] }) });
 }
 const STATUS_COLOR = {
   completed: "#89d185",
@@ -10337,47 +13666,82 @@ const STATUS_COLOR = {
   pending: "#cca700",
   awaiting_user_input: "#e3b341"
 };
+function formatDuration$1(totalSeconds) {
+  const s = Math.max(0, Number(totalSeconds) || 0);
+  const h2 = Math.floor(s / 3600);
+  const m2 = Math.floor(s % 3600 / 60);
+  const sec = s % 60;
+  if (h2 > 0) return `${h2}h ${m2}m ${sec}s`;
+  if (m2 > 0) return `${m2}m ${sec}s`;
+  return `${sec}s`;
+}
+function normalizeRunStatus$1(status) {
+  const raw = String(status || "").trim().toLowerCase();
+  if (raw === "streaming") return "running";
+  if (raw === "awaiting") return "awaiting";
+  if (raw === "done") return "completed";
+  if (raw === "error") return "failed";
+  return raw || "running";
+}
+function isShellProgressItem$1(item) {
+  if (!item || typeof item !== "object") return false;
+  const kind = String(item.kind || "").toLowerCase();
+  const title = String(item.title || "").toLowerCase();
+  const detail = String(item.detail || "").toLowerCase();
+  const command = String(item.command || "").trim();
+  if (command) return true;
+  if (kind.includes("command") || kind.includes("shell")) return true;
+  return /\bshell command\b|\brunning command\b|\bos[_\s-]?agent\b/.test(`${title} ${detail}`);
+}
 function AgentOrchestration() {
-  const { state, dispatch } = useApp();
+  const { state, dispatch, openFile } = useApp();
+  const [tab, setTab] = reactExports.useState("activity");
   const [runs, setRuns] = reactExports.useState([]);
   const [selected, setSelected] = reactExports.useState(null);
   const [runDetail, setRunDetail] = reactExports.useState(null);
   const [loading, setLoading] = reactExports.useState(false);
+  const [diffPreviewPath, setDiffPreviewPath] = reactExports.useState("");
   const backendUrl = state.backendUrl || "http://127.0.0.1:2151";
+  const activityFeed = Array.isArray(state.activityFeed) ? state.activityFeed : [];
   const fetchRuns = reactExports.useCallback(async () => {
     try {
-      const r2 = await fetch(`${backendUrl}/api/runs`);
-      if (r2.ok) {
-        const data = await r2.json();
-        const list = Array.isArray(data) ? data : data.runs || [];
-        setRuns(list);
-        dispatch({ type: "SET_RUNS", runs: list });
-      }
+      const response = await fetch(`${backendUrl}/api/runs`);
+      if (!response.ok) return;
+      const data = await response.json();
+      const list = Array.isArray(data) ? data : data.runs || [];
+      setRuns(list);
+      dispatch({ type: "SET_RUNS", runs: list });
     } catch (_2) {
     }
-  }, [backendUrl]);
+  }, [backendUrl, dispatch]);
   const fetchDetail = reactExports.useCallback(async (runId) => {
+    if (!runId) return;
     setLoading(true);
     try {
       const [runRes, artifactsRes, messagesRes] = await Promise.all([
-        fetch(`${backendUrl}/api/runs/${runId}`).then((r2) => r2.json()).catch(() => null),
-        fetch(`${backendUrl}/api/runs/${runId}/artifacts`).then((r2) => r2.json()).catch(() => []),
-        fetch(`${backendUrl}/api/runs/${runId}/messages`).then((r2) => r2.json()).catch(() => [])
+        fetch(`${backendUrl}/api/runs/${runId}`).then((response) => response.json()).catch(() => null),
+        fetch(`${backendUrl}/api/runs/${runId}/artifacts`).then((response) => response.json()).catch(() => []),
+        fetch(`${backendUrl}/api/runs/${runId}/messages`).then((response) => response.json()).catch(() => [])
       ]);
-      setRunDetail({ run: runRes, artifacts: Array.isArray(artifactsRes) ? artifactsRes : [], messages: Array.isArray(messagesRes) ? messagesRes : [] });
+      setRunDetail({
+        run: runRes,
+        artifacts: Array.isArray(artifactsRes) ? artifactsRes : [],
+        messages: Array.isArray(messagesRes) ? messagesRes : []
+      });
     } catch (_2) {
       setRunDetail(null);
     }
     setLoading(false);
   }, [backendUrl]);
   reactExports.useEffect(() => {
+    if (tab !== "debug") return;
     fetchRuns();
     const id2 = setInterval(fetchRuns, 5e3);
     return () => clearInterval(id2);
-  }, [fetchRuns]);
+  }, [fetchRuns, tab]);
   reactExports.useEffect(() => {
-    if (selected) fetchDetail(selected);
-  }, [selected]);
+    if (tab === "debug" && selected) fetchDetail(selected);
+  }, [selected, fetchDetail, tab]);
   const stopRun = async (runId) => {
     await fetch(`${backendUrl}/api/runs/stop`, {
       method: "POST",
@@ -10400,10 +13764,43 @@ function AgentOrchestration() {
       setRunDetail(null);
     }
   };
+  const inspectRun = reactExports.useCallback((runId) => {
+    if (!runId) return;
+    setTab("debug");
+    setSelected(runId);
+  }, []);
+  const openActivityItem = reactExports.useCallback(async (item) => {
+    const filePath = String(item?.path || "").trim();
+    if (!filePath) return;
+    dispatch({ type: "SET_VIEW", view: "developer" });
+    await openFile(filePath);
+  }, [dispatch, openFile]);
+  const reviewActivityItem = reactExports.useCallback((item) => {
+    const filePath = String(item?.path || "").trim();
+    if (!filePath) return;
+    setDiffPreviewPath(filePath);
+  }, []);
+  const recentActivity = reactExports.useMemo(() => activityFeed.slice(0, 16), [activityFeed]);
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "orchestration-view", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      GitDiffPreview,
+      {
+        cwd: state.projectRoot,
+        filePath: diffPreviewPath,
+        onClose: () => setDiffPreviewPath(""),
+        onOpenFile: (filePath) => openActivityItem({ path: filePath })
+      }
+    ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "orch-header", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { className: "orch-title", children: "Agent Orchestration" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "icon-btn", onClick: fetchRuns, title: "Refresh", children: "⟳" })
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "orch-header-actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "orch-tabs", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `orch-tab ${tab === "activity" ? "active" : ""}`, onClick: () => setTab("activity"), children: "Activity" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `orch-tab ${tab === "debug" ? "active" : ""}`, onClick: () => setTab("debug"), children: "Debug" })
+        ] }),
+        tab === "activity" && recentActivity.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-btn-sm", onClick: () => dispatch({ type: "CLEAR_ACTIVITY_FEED" }), children: "Clear" }),
+        tab === "debug" && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "icon-btn", onClick: fetchRuns, title: "Refresh", children: "⟳" })
+      ] })
     ] }),
     state.backendStatus !== "running" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "orch-banner", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
@@ -10412,7 +13809,61 @@ function AgentOrchestration() {
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn-accent", onClick: () => window.kendrAPI?.backend.start(), children: "Start Backend" })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "orch-layout", children: [
+    tab === "activity" ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "orch-activity", children: recentActivity.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "orch-empty", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "No recent activity yet." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "Start a run in Studio or Project mode." })
+    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "orch-activity-feed", children: recentActivity.map((entry) => {
+      const progress = Array.isArray(entry.progress) ? entry.progress.filter((item) => !isShellProgressItem$1(item)) : [];
+      const cards = summarizeRunArtifacts(progress, entry.artifacts);
+      const checklist = Array.isArray(entry.checklist) ? entry.checklist : [];
+      const planLike = checklist.length > 0 && (entry.mode === "plan" || isPlanApprovalScope(entry.approvalScope, entry.approvalKind, entry.approvalRequest));
+      const latestPath = cards.flatMap((card) => Array.isArray(card.items) ? card.items : []).find((item) => item?.path);
+      const elapsedSeconds = entry.runStartedAt ? Math.max(0, Math.floor((Date.now() - new Date(entry.runStartedAt).getTime()) / 1e3)) : 0;
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-card", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-head", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-meta", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-activity-source", children: entry.source }),
+            entry.modeLabel && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-activity-chip", children: entry.modeLabel }),
+            entry.runId && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-activity-chip", children: entry.runId.slice(-8) })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-meta", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `rp-activity-status rp-activity-status--${normalizeRunStatus$1(entry.status)}`, children: normalizeRunStatus$1(entry.status) }),
+            entry.runId && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-btn-sm", onClick: () => inspectRun(entry.runId), children: "Inspect" })
+          ] })
+        ] }),
+        !!cards.length && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-grid", children: cards.map((card) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-activity-card kc-activity-card--${card.kind}`, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-activity-card-head", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-kind", children: card.kind }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-title", children: card.title })
+            ] }),
+            card.kind === "edit" && Array.isArray(card.items) && card.items.some((item) => item?.path) && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-activity-card-action", onClick: () => reviewActivityItem(card.items.find((item) => item?.path)), children: "Review" })
+          ] }),
+          Array.isArray(card.items) && card.items.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-items", children: card.items.slice(0, 3).map((item) => item?.path ? /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-activity-card-item kc-activity-card-item--action", onClick: () => openActivityItem(item), children: item.label }, `${entry.id}-${item.path}-${item.label}`) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-activity-card-item", children: item.label }, `${entry.id}-${item.label}`)) })
+        ] }, `${entry.id}-${card.kind}-${card.title}`)) }),
+        planLike && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-plan-preview", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "rp-plan-title", children: "Plan" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-list", children: checklist.slice(0, 4).map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-item", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-mark", children: item.done ? "✓" : item.status === "running" ? "…" : "·" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-body", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-row", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-checklist-step", children: [
+                item.step,
+                "."
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-checklist-text", children: item.title })
+            ] }) })
+          ] }, `${entry.id}-${item.step}-${item.title}`)) })
+        ] }),
+        entry.content && !planLike && !isSkillApproval(entry.approvalKind, entry.approvalRequest) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-content", children: [
+          entry.content.slice(0, 320),
+          entry.content.length > 320 ? "…" : ""
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-footer", children: [
+          entry.runId && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: formatDuration$1(elapsedSeconds) }),
+          latestPath?.path && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-btn-sm", onClick: () => openActivityItem(latestPath), children: "Open file" })
+        ] })
+      ] }, entry.id);
+    }) }) }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "orch-layout", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "orch-list", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "orch-list-header", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
           "RUNS (",
@@ -10456,7 +13907,7 @@ function RunItem({ run, selected, onClick, onStop, onDelete }) {
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "run-item-text", children: text || "(no description)" }),
     run.created_at && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "run-item-date", children: new Date(run.created_at).toLocaleString() }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "run-item-actions", onClick: (e) => e.stopPropagation(), children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "run-item-actions", onClick: (event) => event.stopPropagation(), children: [
       isActive && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "run-btn run-btn--stop", onClick: onStop, title: "Stop", children: "■ Stop" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "run-btn run-btn--delete", onClick: onDelete, title: "Delete", children: "✕" })
     ] })
@@ -10470,33 +13921,33 @@ function RunDetail({ detail }) {
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "run-detail-id", children: run?.run_id }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "run-detail-status", style: { color: STATUS_COLOR[run?.status] || "#cccccc" }, children: run?.status })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "run-detail-tabs", children: ["output", "artifacts", "messages"].map((t2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "run-detail-tabs", children: ["output", "artifacts", "messages"].map((name) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
       "button",
       {
-        className: `run-detail-tab ${tab === t2 ? "active" : ""}`,
-        onClick: () => setTab(t2),
+        className: `run-detail-tab ${tab === name ? "active" : ""}`,
+        onClick: () => setTab(name),
         children: [
-          t2.charAt(0).toUpperCase() + t2.slice(1),
-          t2 === "artifacts" && artifacts.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "tab-badge", children: artifacts.length })
+          name.charAt(0).toUpperCase() + name.slice(1),
+          name === "artifacts" && artifacts.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "tab-badge", children: artifacts.length })
         ]
       },
-      t2
+      name
     )) }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "run-detail-body", children: [
       tab === "output" && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: "run-output", children: JSON.stringify(run, null, 2) }),
       tab === "artifacts" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "run-artifacts", children: [
         artifacts.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "detail-empty", children: "No artifacts" }),
-        artifacts.map((a, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "artifact-item", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "artifact-type", children: a.artifact_type || "file" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "artifact-name", children: a.name || a.path || "artifact" })
-        ] }, i))
+        artifacts.map((artifact, index2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "artifact-item", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "artifact-type", children: artifact.artifact_type || "file" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "artifact-name", children: artifact.name || artifact.path || "artifact" })
+        ] }, index2))
       ] }),
       tab === "messages" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "run-messages", children: [
         messages.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "detail-empty", children: "No messages" }),
-        messages.map((m2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `run-msg run-msg--${m2.role || "system"}`, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "run-msg-role", children: m2.role || "system" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "run-msg-content", children: typeof m2.content === "string" ? m2.content.slice(0, 200) : JSON.stringify(m2.content).slice(0, 200) })
-        ] }, i))
+        messages.map((message, index2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `run-msg run-msg--${message.role || "system"}`, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "run-msg-role", children: message.role || "system" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "run-msg-content", children: typeof message.content === "string" ? message.content.slice(0, 200) : JSON.stringify(message.content).slice(0, 200) })
+        ] }, index2))
       ] })
     ] })
   ] });
@@ -12528,15 +15979,15 @@ function TerminalPanel() {
       }
       try {
         const { Terminal } = await __vitePreload(async () => {
-          const { Terminal: Terminal2 } = await import("./xterm-DG8GPk84.js").then((n2) => n2.x);
+          const { Terminal: Terminal2 } = await import("./xterm-DdTcDeHU.js").then((n2) => n2.x);
           return { Terminal: Terminal2 };
         }, true ? [] : void 0, import.meta.url);
         const { FitAddon } = await __vitePreload(async () => {
-          const { FitAddon: FitAddon2 } = await import("./addon-fit-BS4PYES_.js").then((n2) => n2.a);
+          const { FitAddon: FitAddon2 } = await import("./addon-fit-BdzHaoGK.js").then((n2) => n2.a);
           return { FitAddon: FitAddon2 };
         }, true ? [] : void 0, import.meta.url);
         const { WebLinksAddon } = await __vitePreload(async () => {
-          const { WebLinksAddon: WebLinksAddon2 } = await import("./addon-web-links-Dr3PXSD5.js").then((n2) => n2.a);
+          const { WebLinksAddon: WebLinksAddon2 } = await import("./addon-web-links-B2UOZsTd.js").then((n2) => n2.a);
           return { WebLinksAddon: WebLinksAddon2 };
         }, true ? [] : void 0, import.meta.url);
         if (cancelled) return;
@@ -12699,11 +16150,13 @@ function stepIcon(step) {
   return "🤖";
 }
 function AIComposer({ editorInstanceRef }) {
-  const { state: app, dispatch: appDispatch, refreshModelInventory } = useApp();
+  const { state: app, dispatch: appDispatch, openFile, refreshModelInventory } = useApp();
   const [mode, setMode] = reactExports.useState("agent");
   const [messages, setMessages] = reactExports.useState([]);
+  const [diffPreviewPath, setDiffPreviewPath] = reactExports.useState("");
   const [input, setInput] = reactExports.useState("");
   const [streaming, setStreaming] = reactExports.useState(false);
+  const [awaitingContext, setAwaitingContext] = reactExports.useState(null);
   const [attachedFiles, setAttachedFiles] = reactExports.useState([]);
   const [mentionAnchor, setMentionAnchor] = reactExports.useState(null);
   const [applyDiff, setApplyDiff] = reactExports.useState(null);
@@ -12715,6 +16168,7 @@ function AIComposer({ editorInstanceRef }) {
   const threadEndRef = reactExports.useRef(null);
   const inputRef = reactExports.useRef(null);
   const chatId = reactExports.useRef(`comp-${Date.now()}`).current;
+  const mirroredActivityIdsRef = reactExports.useRef([]);
   const apiBase = app.backendUrl || "http://127.0.0.1:2151";
   const activeTab = app.openTabs.find((t2) => t2.path === app.activeTabPath);
   const selection = app.editorSelection;
@@ -12726,6 +16180,18 @@ function AIComposer({ editorInstanceRef }) {
   reactExports.useEffect(() => {
     threadEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+  reactExports.useEffect(() => {
+    const entries = messages.filter(shouldMirrorActivityMessage).map((msg) => buildActivityEntry(msg, { id: `project:${msg.id}`, source: "project" })).filter(Boolean);
+    const nextIds = new Set(entries.map((entry) => entry.id));
+    for (const entry of entries) {
+      appDispatch({ type: "UPSERT_ACTIVITY_ENTRY", entry });
+    }
+    const removedIds = mirroredActivityIdsRef.current.filter((id2) => !nextIds.has(id2));
+    if (removedIds.length) {
+      appDispatch({ type: "REMOVE_ACTIVITY_ENTRIES", ids: removedIds });
+    }
+    mirroredActivityIdsRef.current = Array.from(nextIds);
+  }, [messages, appDispatch]);
   reactExports.useEffect(() => {
     const toEdit = () => {
       setMode("edit");
@@ -12762,26 +16228,36 @@ function AIComposer({ editorInstanceRef }) {
     window.addEventListener("kendr:composer-edit-submit", handler);
     return () => window.removeEventListener("kendr:composer-edit-submit", handler);
   }, []);
-  const runSSE = reactExports.useCallback(async ({ text, chatIdOverride, onStep, onResult, onDone, onError }) => {
+  const runSSE = reactExports.useCallback(async ({ text, chatIdOverride, requestMode = "agent", resumeContext = null, onStep, onActivity, onResult, onAwaiting, onDone, onError }) => {
     const runId = `comp-${Date.now().toString(36)}`;
     const isProjectAgent = !!app.projectRoot;
     const selected = resolveSelectedModel(app.selectedModel);
+    const endpoint = resumeContext ? `${apiBase}/api/chat/resume` : `${apiBase}/api/chat`;
+    const payload = resumeContext ? {
+      run_id: resumeContext.runId,
+      workflow_id: resumeContext.workflowId,
+      text,
+      channel: isProjectAgent ? "project_ui" : "webchat"
+    } : {
+      text,
+      channel: isProjectAgent ? "project_ui" : "webchat",
+      sender_id: isProjectAgent ? "project_ui_user" : "composer",
+      chat_id: chatIdOverride || chatId,
+      run_id: runId,
+      working_directory: app.projectRoot || void 0,
+      project_root: app.projectRoot || void 0,
+      provider: selected.provider || void 0,
+      model: selected.model || void 0,
+      execution_mode: requestMode === "plan" ? "plan" : void 0,
+      planner_mode: requestMode === "plan" ? "always" : void 0,
+      auto_approve_plan: requestMode === "plan" ? false : void 0
+    };
     let resp;
     try {
-      resp = await fetch(`${apiBase}/api/chat`, {
+      resp = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text,
-          channel: isProjectAgent ? "project_ui" : "webchat",
-          sender_id: isProjectAgent ? "project_ui_user" : "composer",
-          chat_id: chatIdOverride || chatId,
-          run_id: runId,
-          working_directory: app.projectRoot || void 0,
-          project_root: app.projectRoot || void 0,
-          provider: selected.provider || void 0,
-          model: selected.model || void 0
-        })
+        body: JSON.stringify(payload)
       });
     } catch (e) {
       refreshModelInventory(true);
@@ -12800,6 +16276,26 @@ function AIComposer({ editorInstanceRef }) {
     esRef.current = es;
     let lastResult = "";
     let stepCount = 0;
+    let awaiting = false;
+    let failed = false;
+    es.addEventListener("activity", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        onActivity?.({
+          id: data.id || `activity-${Date.now()}`,
+          title: data.title || data.kind || "Activity",
+          detail: data.detail || data.command || "",
+          kind: data.kind || "activity",
+          status: data.status || "running",
+          command: data.command || "",
+          cwd: data.cwd || "",
+          actor: data.actor || "",
+          durationLabel: data.duration_label || "",
+          exitCode: data.exit_code
+        });
+      } catch {
+      }
+    });
     es.addEventListener("step", (e) => {
       try {
         const step = JSON.parse(e.data);
@@ -12818,15 +16314,32 @@ function AIComposer({ editorInstanceRef }) {
       try {
         const d = JSON.parse(e.data);
         lastResult = d.final_output || d.output || d.draft_response || d.response || "";
-        onResult?.(lastResult);
+        awaiting = !!(d.awaiting_user_input || d.plan_waiting_for_approval || d.plan_needs_clarification || d.pending_user_input_kind || d.approval_pending_scope || d.pending_user_question || d.approval_request && Object.keys(d.approval_request).length > 0);
+        if (awaiting) {
+          onAwaiting?.({
+            output: lastResult,
+            checklist: extractChecklist$1(d),
+            runId: d.run_id || effectiveId,
+            workflowId: d.workflow_id || effectiveId,
+            prompt: d.pending_user_question || lastResult || "Waiting for your input.",
+            kind: d.pending_user_input_kind || "",
+            scope: d.approval_pending_scope || "",
+            approvalRequest: d.approval_request || null
+          });
+        } else {
+          onResult?.(lastResult);
+        }
       } catch {
       }
     });
     es.addEventListener("done", () => {
+      if (failed) return;
       es.close();
-      onDone?.(lastResult);
+      onDone?.({ output: lastResult, awaiting });
     });
     es.addEventListener("error", (e) => {
+      if (failed) return;
+      failed = true;
       refreshModelInventory(true);
       try {
         const d = JSON.parse(e.data);
@@ -12834,19 +16347,32 @@ function AIComposer({ editorInstanceRef }) {
       } catch {
       }
       es.close();
-      onDone?.(lastResult);
     });
     es.onerror = () => {
+      if (failed) return;
+      failed = true;
       refreshModelInventory(true);
+      onError?.("Run failed");
       es.close();
-      onDone?.(lastResult);
     };
   }, [apiBase, chatId, app.projectRoot, app.selectedModel, refreshModelInventory]);
   const stopStream = () => esRef.current?.close();
+  const openArtifact = reactExports.useCallback(async (item) => {
+    const filePath = String(item?.path || "").trim();
+    if (!filePath) return;
+    await openFile(filePath);
+  }, [openFile]);
+  const reviewArtifact = reactExports.useCallback((item) => {
+    const filePath = String(item?.path || "").trim();
+    if (!filePath) return;
+    setDiffPreviewPath(filePath);
+  }, []);
   const buildContextPrompt = reactExports.useCallback((userText) => {
     let ctx = userText;
     if (mode === "agent") {
       ctx = "[IDE agent mode]\n- Work like a coding agent inside an IDE.\n- Inspect files and context before changing code.\n- Keep progress updates and final answers concise, direct, and action-oriented.\n- If you propose code changes, prefer complete code blocks with filenames when that helps apply them cleanly.\n- Use the current project and file context instead of answering generically.\n\n" + userText;
+    } else if (mode === "plan") {
+      ctx = "[IDE plan mode]\n- Inspect project context before acting.\n- Produce a concise implementation plan first.\n- Wait for approval before writing code.\n- Keep the plan actionable and sequenced.\n\n" + userText;
     }
     if (activeTab) {
       const content = window.__tabContents?.[activeTab.path] ?? activeTab.content ?? "";
@@ -12880,7 +16406,7 @@ ${c.slice(0, 2e3)}
     if (selectedModelMeta.model) {
       return {
         primary: `Selected · ${selectedModelMeta.label}`,
-        secondary: app.projectRoot ? `Project · ${basename(app.projectRoot)}` : ""
+        secondary: app.projectRoot ? `Project · ${basename$1(app.projectRoot)}` : ""
       };
     }
     const configuredProvider = String(modelInventory?.configured_provider || "").trim().toLowerCase();
@@ -12893,29 +16419,43 @@ ${c.slice(0, 2e3)}
       const activeDiffers = configuredProvider !== activeProvider || configuredModel !== activeModel;
       return {
         primary: `${configuredReady ? "Configured" : "Configured offline"} · ${configuredLabel}`,
-        secondary: activeDiffers && activeProvider && activeModel ? `Active · ${resolveSelectedModel(`${activeProvider}/${activeModel}`).label}` : app.projectRoot ? `Project · ${basename(app.projectRoot)}` : ""
+        secondary: activeDiffers && activeProvider && activeModel ? `Active · ${resolveSelectedModel(`${activeProvider}/${activeModel}`).label}` : app.projectRoot ? `Project · ${basename$1(app.projectRoot)}` : ""
       };
     }
     return {
       primary: "Auto · Backend default",
-      secondary: app.projectRoot ? `Project · ${basename(app.projectRoot)}` : ""
+      secondary: app.projectRoot ? `Project · ${basename$1(app.projectRoot)}` : ""
     };
   })();
-  const send = reactExports.useCallback(async () => {
-    const text = input.trim();
+  const send = reactExports.useCallback(async (textOverride = "", isResume = false) => {
+    const text = String(textOverride || input).trim();
     if (!text || streaming) return;
     setInput("");
     setMentionAnchor(null);
-    const msgId = `a-${Date.now()}`;
-    setMessages((m2) => [
-      ...m2,
-      { id: `u-${Date.now()}`, role: "user", content: text },
-      { id: msgId, role: "assistant", content: "", steps: [], status: "thinking" }
-    ]);
+    const resumeMessageId = String(awaitingContext?.messageId || "").trim();
+    const preserveInlineBubble = isResume && resumeMessageId && !isSkillApproval(awaitingContext?.kind, awaitingContext?.approvalRequest);
+    const msgId = isResume && resumeMessageId && !preserveInlineBubble ? resumeMessageId : `a-${Date.now()}`;
+    setMessages((messages2) => {
+      let next = [...messages2, { id: `u-${Date.now()}`, role: "user", content: text }];
+      if (preserveInlineBubble && resumeMessageId) {
+        const normalizedReply = text.toLowerCase();
+        const approvalState = normalizedReply === "approve" ? "approved" : normalizedReply === "cancel" ? "rejected" : "suggested";
+        next = next.map((message) => message.id === resumeMessageId ? { ...message, status: "done", approvalState } : message);
+      }
+      if (isResume && resumeMessageId && !preserveInlineBubble) {
+        next = next.map((message) => message.id === msgId ? { ...message, content: "", steps: [], progress: [], checklist: [], status: "thinking", approvalRequest: null, approvalScope: "", approvalKind: "" } : message);
+      } else {
+        next.push({ id: msgId, role: "assistant", content: "", steps: [], progress: [], checklist: [], status: "thinking", mode, approvalRequest: null, approvalScope: "", approvalKind: "" });
+      }
+      return next;
+    });
     setStreaming(true);
+    setAwaitingContext(null);
     try {
       await runSSE({
-        text: buildContextPrompt(text),
+        text: isResume ? text : buildContextPrompt(text),
+        requestMode: mode,
+        resumeContext: isResume ? awaitingContext : null,
         onStep: (step) => setMessages((m2) => m2.map((msg) => {
           if (msg.id !== msgId) return msg;
           const steps = [...msg.steps || []];
@@ -12924,16 +16464,39 @@ ${c.slice(0, 2e3)}
           else steps.push(step);
           return { ...msg, steps };
         })),
+        onActivity: (item) => setMessages((messages2) => messages2.map((message) => {
+          if (message.id !== msgId) return message;
+          const prev = Array.isArray(message.progress) ? message.progress : [];
+          return { ...message, progress: [item, ...prev].slice(0, 16) };
+        })),
         onResult: (out) => setMessages((m2) => m2.map(
           (msg) => msg.id === msgId ? { ...msg, content: out, status: "streaming" } : msg
         )),
-        onDone: (out) => {
+        onAwaiting: (data) => {
+          setAwaitingContext({ ...data, messageId: msgId });
+          setMessages((messages2) => messages2.map((message) => message.id === msgId ? {
+            ...message,
+            content: data.output,
+            checklist: data.checklist,
+            status: "awaiting",
+            approvalRequest: data.approvalRequest || null,
+            approvalScope: data.scope || "",
+            approvalKind: data.kind || "",
+            approvalState: "pending"
+          } : message));
+        },
+        onDone: ({ output, awaiting }) => {
+          if (awaiting) {
+            setStreaming(false);
+            return;
+          }
           setMessages((m2) => m2.map(
-            (msg) => msg.id === msgId ? { ...msg, content: out || msg.content, status: "done" } : msg
+            (msg) => msg.id === msgId ? { ...msg, content: output || msg.content, status: "done" } : msg
           ));
           setStreaming(false);
         },
         onError: (err) => {
+          setAwaitingContext(null);
           setMessages((m2) => m2.map(
             (msg) => msg.id === msgId ? { ...msg, content: err, status: "error" } : msg
           ));
@@ -12946,7 +16509,7 @@ ${c.slice(0, 2e3)}
       ));
       setStreaming(false);
     }
-  }, [input, streaming, runSSE, buildContextPrompt]);
+  }, [input, streaming, runSSE, buildContextPrompt, mode, awaitingContext]);
   const sendEdit = reactExports.useCallback(async () => {
     const prompt2 = editPromptRef.current.trim();
     if (!prompt2 || editStreaming || !activeTab) return;
@@ -12967,9 +16530,9 @@ Return ONLY the complete modified code in a single code block. No explanation.`;
       await runSSE({
         text: fullPrompt,
         chatIdOverride: `edit-${chatId}`,
-        onDone: (result) => {
+        onDone: ({ output }) => {
           setEditStreaming(false);
-          setEditDiff({ original: codeToEdit, modified: extractCode(result), lang });
+          setEditDiff({ original: codeToEdit, modified: extractCode(output || ""), lang });
           setEditPhase("diff");
         },
         onError: () => {
@@ -13055,6 +16618,15 @@ Return ONLY the complete modified code in a single code block. No explanation.`;
     if (e.key === "Escape") setMentionAnchor(null);
   };
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-panel", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      GitDiffPreview,
+      {
+        cwd: app.projectRoot,
+        filePath: diffPreviewPath,
+        onClose: () => setDiffPreviewPath(""),
+        onOpenFile: (filePath) => openArtifact({ path: filePath })
+      }
+    ),
     applyDiff && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-apply-overlay", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-apply-bar", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ac-apply-title", children: applyDiff.filename ? `✨ Create ${applyDiff.filename}` : `✨ Edit ${activeTab?.name || "file"}` }),
@@ -13077,7 +16649,7 @@ Return ONLY the complete modified code in a single code block. No explanation.`;
     ] }),
     !applyDiff && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-header", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-mode-tabs", children: [["agent", "Agent"], ["chat", "Chat"], ["edit", "Edit"]].map(([id2, label]) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-mode-tabs", children: [["agent", "Agent"], ["plan", "Plan"], ["chat", "Chat"], ["edit", "Edit"]].map(([id2, label]) => /* @__PURE__ */ jsxRuntimeExports.jsx(
           "button",
           {
             className: `ac-mode-tab ${mode === id2 ? "active" : ""}`,
@@ -13104,13 +16676,14 @@ Return ONLY the complete modified code in a single code block. No explanation.`;
               onClick: () => {
                 setMessages([]);
                 setAttachedFiles([]);
+                setAwaitingContext(null);
               },
               children: "⊘"
             }
           )
         ] })
       ] }),
-      (mode === "agent" || mode === "chat") && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      (mode === "agent" || mode === "plan" || mode === "chat") && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
         (activeTab || attachedFiles.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-context-bar", children: [
           activeTab && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "ac-ctx-file", children: [
             "📄 ",
@@ -13128,16 +16701,33 @@ Return ONLY the complete modified code in a single code block. No explanation.`;
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-thread", children: [
           messages.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-empty", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-empty-icon", children: mode === "agent" ? "✨" : "💬" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-empty-title", children: mode === "agent" ? "Agent" : "Chat" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-empty-sub", children: mode === "agent" ? "The agent works against the current project like an IDE coding assistant. It can inspect files, run tasks, and prepare code edits with project context." : "Ask questions about code, get explanations, or request suggestions." }),
-            activeTab && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-chips", children: (mode === "agent" ? ["Refactor this file", "Find and fix bugs", "Add TypeScript types", "Write unit tests"] : ["Explain this code", "What does this do?", "How can I improve this?", "Find potential issues"]).map((s) => /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "ac-chip", onClick: () => {
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-empty-icon", children: mode === "agent" ? "✨" : mode === "plan" ? "🗺️" : "💬" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-empty-title", children: mode === "agent" ? "Agent" : mode === "plan" ? "Plan" : "Chat" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-empty-sub", children: mode === "agent" ? "The agent works against the current project like an IDE coding assistant. It can inspect files, run tasks, and prepare code edits with project context." : mode === "plan" ? "Plan mode inspects the project, proposes the work, and waits before implementation." : "Ask questions about code, get explanations, or request suggestions." }),
+            activeTab && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-chips", children: (mode === "agent" ? ["Refactor this file", "Find and fix bugs", "Add TypeScript types", "Write unit tests"] : mode === "plan" ? ["Plan a refactor for this file", "Plan the bug fix work", "Outline implementation steps", "Break this task into milestones"] : ["Explain this code", "What does this do?", "How can I improve this?", "Find potential issues"]).map((s) => /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "ac-chip", onClick: () => {
               setInput(s);
               inputRef.current?.focus();
             }, children: s }, s)) })
           ] }),
           messages.map((msg) => /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `ac-msg ac-msg--${msg.role}`, children: msg.role === "user" ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "ac-user-bubble", children: msg.content }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-asst-msg", children: [
             msg.steps?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(AgentSteps, { steps: msg.steps, live: streaming && msg.status !== "done" && msg.status !== "error" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(ComposerActivityCards, { progress: msg.progress, artifacts: msg.artifacts, onOpenItem: openArtifact, onReviewItem: reviewArtifact }),
+            msg.checklist?.length > 0 && (msg.mode === "plan" || isPlanApprovalScope(msg.approvalScope, msg.approvalKind, msg.approvalRequest)) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              ComposerPlanCard,
+              {
+                msg,
+                onQuickReply: (reply) => send(reply, true),
+                onSendSuggestion: (reply) => send(reply, true)
+              }
+            ),
+            msg.status === "awaiting" && !isSkillApproval(msg.approvalKind, msg.approvalRequest) && !(msg.checklist?.length > 0 && (msg.mode === "plan" || isPlanApprovalScope(msg.approvalScope, msg.approvalKind, msg.approvalRequest))) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              ComposerAwaitingCard,
+              {
+                msg,
+                onQuickReply: (reply) => send(reply, true),
+                onSendSuggestion: (reply) => send(reply, true)
+              }
+            ),
             msg.status === "thinking" && !msg.steps?.length ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-thinking-row", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "ac-thinking", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", {}),
@@ -13148,7 +16738,7 @@ Return ONLY the complete modified code in a single code block. No explanation.`;
             ] }) : msg.status === "error" ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-error-msg", children: [
               "⚠ ",
               msg.content
-            ] }) : msg.content ? /* @__PURE__ */ jsxRuntimeExports.jsx(AgentResponse, { content: msg.content, onApply: mode === "agent" ? handleApplyBlock : null }) : null
+            ] }) : msg.content && !(msg.status === "awaiting" && !isSkillApproval(msg.approvalKind, msg.approvalRequest)) && !(msg.checklist?.length > 0 && (msg.mode === "plan" || isPlanApprovalScope(msg.approvalScope, msg.approvalKind, msg.approvalRequest))) ? /* @__PURE__ */ jsxRuntimeExports.jsx(AgentResponse, { content: msg.content, onApply: mode === "agent" ? handleApplyBlock : null }) : null
           ] }) }, msg.id)),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: threadEndRef })
         ] }),
@@ -13162,7 +16752,7 @@ Return ONLY the complete modified code in a single code block. No explanation.`;
             {
               ref: inputRef,
               className: "ac-input",
-              placeholder: mode === "agent" ? "Ask the project agent to inspect, edit, debug, or explain code… (@ to mention files, Ctrl+Enter to send)" : "Ask about code… (Ctrl+Enter to send)",
+              placeholder: mode === "agent" ? "Ask the project agent to inspect, edit, debug, or explain code… (@ to mention files, Ctrl+Enter to send)" : mode === "plan" ? "Ask for a plan first. Kendr will inspect the project and wait before changing code… (Ctrl+Enter)" : "Ask about code… (Ctrl+Enter to send)",
               value: input,
               onChange: handleInputChange,
               onKeyDown: handleKey,
@@ -13172,6 +16762,10 @@ Return ONLY the complete modified code in a single code block. No explanation.`;
           ),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-input-footer", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ac-input-hint", children: "Ctrl+Enter" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ac-flow-strip", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `ac-flow-chip ac-flow-chip--${mode}`, children: mode === "plan" ? "Plan first" : mode === "agent" ? "Project run" : "Chat" }),
+              activeTab && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ac-flow-chip", children: activeTab.name })
+            ] }),
             /* @__PURE__ */ jsxRuntimeExports.jsx(
               "button",
               {
@@ -13284,6 +16878,180 @@ function AgentSteps({ steps, live }) {
     ] }, s.stepId || i)) })
   ] });
 }
+function ComposerActivityCards({ progress, artifacts, onOpenItem, onReviewItem }) {
+  const cards = summarizeRunArtifacts(progress, artifacts);
+  if (!cards.length) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-grid", children: cards.map((card) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-activity-card kc-activity-card--${card.kind}`, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-activity-card-head", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-kind", children: card.kind }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-title", children: card.title })
+      ] }),
+      card.kind === "edit" && Array.isArray(card.items) && card.items.some((item) => item?.path) && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-activity-card-action", onClick: () => onReviewItem?.(card.items.find((item) => item?.path)), children: "Review" })
+    ] }),
+    Array.isArray(card.items) && card.items.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-items", children: card.items.slice(0, 3).map((item) => item?.path ? /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-activity-card-item kc-activity-card-item--action", onClick: () => onOpenItem?.(item), children: item.label }, `${item.path}-${item.label}`) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-activity-card-item", children: item.label }, item.label)) })
+  ] }, `${card.kind}-${card.title}`)) });
+}
+function ComposerPlanCard({ msg, onQuickReply, onSendSuggestion }) {
+  const [showSuggest, setShowSuggest] = reactExports.useState(false);
+  const [draft, setDraft] = reactExports.useState("");
+  const checklist = Array.isArray(msg.checklist) ? msg.checklist : [];
+  if (!checklist.length) return null;
+  const approvalRequest = msg.approvalRequest && typeof msg.approvalRequest === "object" ? msg.approvalRequest : {};
+  const approvalActions = approvalRequest.actions && typeof approvalRequest.actions === "object" ? approvalRequest.actions : {};
+  const awaiting = msg.status === "awaiting";
+  const summary = String(approvalRequest.summary || msg.content || "").trim();
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-plan-card-head", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-plan-card-label", children: awaiting ? "Plan Ready" : "Plan" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-meta", children: [
+        checklist.length,
+        " task",
+        checklist.length === 1 ? "" : "s"
+      ] })
+    ] }) }),
+    summary && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-plan-card-summary", children: summary }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-plan-card-list", children: checklist.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-item", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-mark", children: item.done ? "✓" : item.status === "running" ? "…" : "·" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-body", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-row", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-checklist-step", children: [
+            item.step,
+            "."
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-checklist-text", children: item.title })
+        ] }),
+        item.detail && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-detail", children: item.detail })
+      ] })
+    ] }, `${item.step}-${item.title}`)) }),
+    awaiting && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-plan-card-btn kc-plan-card-btn--approve", onClick: () => onQuickReply?.("approve"), children: approvalActions.accept_label || "Implement" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: `kc-plan-card-btn kc-plan-card-btn--ghost${showSuggest ? " kc-plan-card-btn--active" : ""}`,
+            onClick: () => setShowSuggest((value) => !value),
+            children: approvalActions.suggest_label || "Change Plan"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-plan-card-btn kc-plan-card-btn--reject", onClick: () => onQuickReply?.("cancel"), children: approvalActions.reject_label || "Reject" })
+      ] }),
+      showSuggest && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-suggest", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "textarea",
+          {
+            className: "kc-plan-card-input",
+            rows: 3,
+            placeholder: "Say what should change in the plan…",
+            value: draft,
+            onChange: (event) => setDraft(event.target.value)
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: "kc-plan-card-btn kc-plan-card-btn--approve",
+            disabled: !draft.trim(),
+            onClick: () => {
+              if (!draft.trim()) return;
+              onSendSuggestion?.(draft);
+              setDraft("");
+              setShowSuggest(false);
+            },
+            children: "Send"
+          }
+        )
+      ] })
+    ] })
+  ] });
+}
+function ComposerAwaitingCard({ msg, onQuickReply, onSendSuggestion }) {
+  const [showSuggest, setShowSuggest] = reactExports.useState(false);
+  const [draft, setDraft] = reactExports.useState("");
+  const approvalRequest = msg.approvalRequest && typeof msg.approvalRequest === "object" ? msg.approvalRequest : {};
+  const approvalActions = approvalRequest.actions && typeof approvalRequest.actions === "object" ? approvalRequest.actions : {};
+  const title = approvalRequest.title || "Waiting for input";
+  const summary = String(approvalRequest.summary || msg.content || "").trim();
+  const sections = Array.isArray(approvalRequest.sections) ? approvalRequest.sections : [];
+  const hasQuickActions = !!(approvalActions.accept_label || approvalActions.reject_label || approvalActions.suggest_label || msg.approvalScope);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-inline-approval", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-inline-approval-head", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-title", children: title }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-status", children: "awaiting" })
+    ] }),
+    summary && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-summary", children: /* @__PURE__ */ jsxRuntimeExports.jsx(AcText, { text: summary }) }),
+    sections.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-sections", children: sections.map((section, index2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-inline-approval-section", children: [
+      section.title && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-section-title", children: section.title }),
+      Array.isArray(section.items) && section.items.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "kc-inline-approval-list", children: section.items.map((item, itemIndex) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: item }, `${index2}-${itemIndex}`)) })
+    ] }, `${section.title || "section"}-${index2}`)) }),
+    approvalRequest.help_text && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-inline-approval-help", children: approvalRequest.help_text }),
+    hasQuickActions ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-inline-approval-actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-plan-card-btn kc-plan-card-btn--approve", onClick: () => onQuickReply?.("approve"), children: approvalActions.accept_label || "Approve" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: `kc-plan-card-btn kc-plan-card-btn--ghost${showSuggest ? " kc-plan-card-btn--active" : ""}`,
+            onClick: () => setShowSuggest((value) => !value),
+            children: approvalActions.suggest_label || "Reply"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-plan-card-btn kc-plan-card-btn--reject", onClick: () => onQuickReply?.("cancel"), children: approvalActions.reject_label || "Reject" })
+      ] }),
+      showSuggest && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-suggest", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "textarea",
+          {
+            className: "kc-plan-card-input",
+            rows: 3,
+            placeholder: "Type your reply…",
+            value: draft,
+            onChange: (event) => setDraft(event.target.value)
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: "kc-plan-card-btn kc-plan-card-btn--approve",
+            disabled: !draft.trim(),
+            onClick: () => {
+              if (!draft.trim()) return;
+              onSendSuggestion?.(draft);
+              setDraft("");
+              setShowSuggest(false);
+            },
+            children: "Send"
+          }
+        )
+      ] })
+    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-plan-card-suggest", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "textarea",
+        {
+          className: "kc-plan-card-input",
+          rows: 3,
+          placeholder: "Type your reply…",
+          value: draft,
+          onChange: (event) => setDraft(event.target.value)
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: "kc-plan-card-btn kc-plan-card-btn--approve",
+          disabled: !draft.trim(),
+          onClick: () => {
+            if (!draft.trim()) return;
+            onSendSuggestion?.(draft);
+            setDraft("");
+          },
+          children: "Send reply"
+        }
+      )
+    ] })
+  ] });
+}
 function AgentResponse({ content, onApply }) {
   const parts = [];
   const re2 = /```(\w*)\n?([\s\S]*?)```/g;
@@ -13357,15 +17125,44 @@ const PRESETS = [
   { name: "go run", command: "go run .", icon: "🔵" },
   { name: "cargo run", command: "cargo run", icon: "🦀" }
 ];
+function formatDuration(totalSeconds) {
+  const s = Math.max(0, Number(totalSeconds) || 0);
+  const h2 = Math.floor(s / 3600);
+  const m2 = Math.floor(s % 3600 / 60);
+  const sec = s % 60;
+  if (h2 > 0) return `${h2}h ${m2}m ${sec}s`;
+  if (m2 > 0) return `${m2}m ${sec}s`;
+  return `${sec}s`;
+}
+function isShellProgressItem(item) {
+  if (!item || typeof item !== "object") return false;
+  const kind = String(item.kind || "").toLowerCase();
+  const title = String(item.title || "").toLowerCase();
+  const detail = String(item.detail || "").toLowerCase();
+  const command = String(item.command || "").trim();
+  if (command) return true;
+  if (kind.includes("command") || kind.includes("shell")) return true;
+  return /\bshell command\b|\brunning command\b|\bos[_\s-]?agent\b/.test(`${title} ${detail}`);
+}
+function normalizeRunStatus(status) {
+  const raw = String(status || "").trim().toLowerCase();
+  if (raw === "streaming") return "running";
+  if (raw === "awaiting") return "awaiting";
+  if (raw === "done") return "completed";
+  if (raw === "error") return "failed";
+  return raw || "running";
+}
 function RunPanel() {
-  const { state, dispatch } = useApp();
+  const { state, dispatch, openFile } = useApp();
   const [configs, setConfigs] = reactExports.useState(loadConfigs);
   const [showAdd, setShowAdd] = reactExports.useState(false);
   const [showPresets, setShowPresets] = reactExports.useState(false);
   const [newName, setNewName] = reactExports.useState("");
   const [newCmd, setNewCmd] = reactExports.useState("");
   const [newCwd, setNewCwd] = reactExports.useState("");
+  const [diffPreviewPath, setDiffPreviewPath] = reactExports.useState("");
   const [running, setRunning] = reactExports.useState(null);
+  const activityFeed = Array.isArray(state.activityFeed) ? state.activityFeed : [];
   const persist = (next) => {
     setConfigs(next);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
@@ -13396,11 +17193,11 @@ function RunPanel() {
     persist([...configs, cfg]);
     setShowPresets(false);
   };
-  const deleteConfig = (id2) => persist(configs.filter((c) => c.id !== id2));
+  const deleteConfig = (id2) => persist(configs.filter((cfg) => cfg.id !== id2));
   const runConfig = reactExports.useCallback(async (cfg) => {
     setRunning(cfg.id);
     dispatch({ type: "SET_TERMINAL", open: true });
-    await new Promise((r2) => setTimeout(r2, 150));
+    await new Promise((resolve) => setTimeout(resolve, 150));
     window.dispatchEvent(new CustomEvent("kendr:run-command", {
       detail: { command: cfg.cwd ? `cd "${cfg.cwd}" && ${cfg.command}` : cfg.command }
     }));
@@ -13410,98 +17207,159 @@ function RunPanel() {
     const dir = await window.kendrAPI?.dialog.openDirectory();
     if (dir) setter(dir);
   };
+  const openActivityItem = reactExports.useCallback(async (item) => {
+    const filePath = String(item?.path || "").trim();
+    if (!filePath) return;
+    await openFile(filePath);
+  }, [openFile]);
+  const reviewActivityItem = reactExports.useCallback((item) => {
+    const filePath = String(item?.path || "").trim();
+    if (!filePath) return;
+    setDiffPreviewPath(filePath);
+  }, []);
+  const activityItems = reactExports.useMemo(() => activityFeed.slice(0, 10), [activityFeed]);
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-root", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      GitDiffPreview,
+      {
+        cwd: state.projectRoot,
+        filePath: diffPreviewPath,
+        onClose: () => setDiffPreviewPath(""),
+        onOpenFile: (filePath) => openActivityItem({ path: filePath })
+      }
+    ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-header", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-title", children: "Run Configurations" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-title", children: "Activity" }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-header-actions", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-btn-sm", onClick: () => setShowPresets((s) => !s), children: "Templates" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-btn-sm rp-btn-sm--primary", onClick: () => setShowAdd((s) => !s), children: "+ Add" })
+        !!activityItems.length && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-btn-sm", onClick: () => dispatch({ type: "CLEAR_ACTIVITY_FEED" }), children: "Clear" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-btn-sm", onClick: () => setShowPresets((value) => !value), children: "Templates" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-btn-sm rp-btn-sm--primary", onClick: () => setShowAdd((value) => !value), children: "+ Add" })
       ] })
     ] }),
-    showPresets && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-presets", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "rp-presets-label", children: "Click to add preset" }),
-      PRESETS.map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "rp-preset-item", onClick: () => addPreset(p2), children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: p2.icon }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-preset-name", children: p2.name }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-preset-cmd", children: p2.command })
-      ] }, p2.name))
-    ] }),
-    showAdd && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-add-form", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "input",
-        {
-          className: "rp-input",
-          placeholder: "Name (optional)",
-          value: newName,
-          onChange: (e) => setNewName(e.target.value)
-        }
-      ),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "input",
-        {
-          className: "rp-input",
-          placeholder: "Command  e.g. npm run dev",
-          value: newCmd,
-          onChange: (e) => setNewCmd(e.target.value),
-          onKeyDown: (e) => e.key === "Enter" && addConfig()
-        }
-      ),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-dir-row", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "input",
-          {
-            className: "rp-input rp-input--flex",
-            placeholder: "Working dir (optional, default: project root)",
-            value: newCwd,
-            onChange: (e) => setNewCwd(e.target.value)
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-icon-btn", onClick: () => openFolder(setNewCwd), children: "…" })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-form-actions", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-add-confirm", onClick: addConfig, disabled: !newCmd.trim(), children: "Add" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-cancel", onClick: () => setShowAdd(false), children: "Cancel" })
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-list", children: [
+      activityItems.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-empty rp-empty--activity", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "No recent agent activity yet." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "Start a run in Studio or Project mode and it will appear here." })
+      ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "rp-activity-feed", children: activityItems.map((entry) => {
+        const progress = Array.isArray(entry.progress) ? entry.progress.filter((item) => !isShellProgressItem(item)) : [];
+        const cards = summarizeRunArtifacts(progress, entry.artifacts);
+        const checklist = Array.isArray(entry.checklist) ? entry.checklist : [];
+        const planLike = checklist.length > 0 && (entry.mode === "plan" || isPlanApprovalScope(entry.approvalScope, entry.approvalKind, entry.approvalRequest));
+        const latestPath = cards.flatMap((card) => Array.isArray(card.items) ? card.items : []).find((item) => item?.path);
+        const elapsedSeconds = entry.runStartedAt ? Math.max(0, Math.floor((Date.now() - new Date(entry.runStartedAt).getTime()) / 1e3)) : 0;
+        return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-card", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-head", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-meta", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-activity-source", children: entry.source }),
+              entry.modeLabel && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-activity-chip", children: entry.modeLabel }),
+              entry.runId && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-activity-chip", children: entry.runId.slice(-8) })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `rp-activity-status rp-activity-status--${normalizeRunStatus(entry.status)}`, children: normalizeRunStatus(entry.status) })
+          ] }),
+          !!cards.length && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-grid", children: cards.map((card) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `kc-activity-card kc-activity-card--${card.kind}`, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-activity-card-head", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-kind", children: card.kind }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-title", children: card.title })
+              ] }),
+              card.kind === "edit" && Array.isArray(card.items) && card.items.some((item) => item?.path) && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-activity-card-action", onClick: () => reviewActivityItem(card.items.find((item) => item?.path)), children: "Review" })
+            ] }),
+            Array.isArray(card.items) && card.items.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-activity-card-items", children: card.items.slice(0, 3).map((item) => item?.path ? /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kc-activity-card-item kc-activity-card-item--action", onClick: () => openActivityItem(item), children: item.label }, `${entry.id}-${item.path}-${item.label}`) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-activity-card-item", children: item.label }, `${entry.id}-${item.label}`)) })
+          ] }, `${entry.id}-${card.kind}-${card.title}`)) }),
+          planLike && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-plan-preview", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "rp-plan-title", children: "Plan" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-list", children: checklist.slice(0, 4).map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-item", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-mark", children: item.done ? "✓" : item.status === "running" ? "…" : "·" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kc-checklist-body", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kc-checklist-row", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "kc-checklist-step", children: [
+                  item.step,
+                  "."
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kc-checklist-text", children: item.title })
+              ] }) })
+            ] }, `${entry.id}-${item.step}-${item.title}`)) })
+          ] }),
+          entry.content && !planLike && !isSkillApproval(entry.approvalKind, entry.approvalRequest) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-content", children: [
+            entry.content.slice(0, 240),
+            entry.content.length > 240 ? "…" : ""
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-activity-footer", children: [
+            entry.runId && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: formatDuration(elapsedSeconds) }),
+            latestPath?.path && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-btn-sm", onClick: () => openActivityItem(latestPath), children: "Open file" })
+          ] })
+        ] }, entry.id);
+      }) }),
+      (showPresets || showAdd || configs.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-command-block", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "rp-section-title", children: "Commands" }),
+        showPresets && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-presets", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "rp-presets-label", children: "Click to add preset" }),
+          PRESETS.map((preset) => /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "rp-preset-item", onClick: () => addPreset(preset), children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: preset.icon }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-preset-name", children: preset.name }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-preset-cmd", children: preset.command })
+          ] }, preset.name))
+        ] }),
+        showAdd && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-add-form", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "rp-input", placeholder: "Name (optional)", value: newName, onChange: (event) => setNewName(event.target.value) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              className: "rp-input",
+              placeholder: "Command  e.g. npm run dev",
+              value: newCmd,
+              onChange: (event) => setNewCmd(event.target.value),
+              onKeyDown: (event) => event.key === "Enter" && addConfig()
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-dir-row", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "input",
+              {
+                className: "rp-input rp-input--flex",
+                placeholder: "Working dir (optional, default: project root)",
+                value: newCwd,
+                onChange: (event) => setNewCwd(event.target.value)
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-icon-btn", onClick: () => openFolder(setNewCwd), children: "…" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-form-actions", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-add-confirm", onClick: addConfig, disabled: !newCmd.trim(), children: "Add" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-cancel", onClick: () => setShowAdd(false), children: "Cancel" })
+          ] })
+        ] }),
+        !configs.length && !showAdd && !showPresets ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-empty rp-empty--commands", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "No run configurations yet." }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { children: [
+            "Click ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Templates" }),
+            " or ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "+ Add" }),
+            "."
+          ] })
+        ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "rp-config-list", children: configs.map((cfg) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `rp-config ${running === cfg.id ? "running" : ""}`, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              className: "rp-run-btn",
+              onClick: () => runConfig(cfg),
+              title: `Run: ${cfg.command}`,
+              disabled: running === cfg.id,
+              children: running === cfg.id ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-running-dot" }) : cfg.icon || "▶"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-config-info", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-config-name", children: cfg.name }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-config-cmd", children: cfg.command }),
+            cfg.cwd && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "rp-config-cwd", children: [
+              "📁 ",
+              cfg.cwd.split(/[\\/]/).slice(-2).join("/")
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "rp-del-btn", onClick: () => deleteConfig(cfg.id), title: "Remove", children: "✕" })
+        ] }, cfg.id)) })
       ] })
-    ] }),
-    configs.length === 0 && !showAdd && !showPresets && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-empty", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "No run configurations yet." }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { children: [
-        "Click ",
-        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Templates" }),
-        " for quick presets or ",
-        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "+ Add" }),
-        " to create a custom command."
-      ] })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "rp-list", children: configs.map((cfg) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `rp-config ${running === cfg.id ? "running" : ""}`, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          className: "rp-run-btn",
-          onClick: () => runConfig(cfg),
-          title: `Run: ${cfg.command}`,
-          disabled: running === cfg.id,
-          children: running === cfg.id ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-running-dot" }) : cfg.icon || "▶"
-        }
-      ),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "rp-config-info", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-config-name", children: cfg.name }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "rp-config-cmd", children: cfg.command }),
-        cfg.cwd && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "rp-config-cwd", children: [
-          "📁 ",
-          cfg.cwd.split(/[\\/]/).slice(-2).join("/")
-        ] })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          className: "rp-del-btn",
-          onClick: () => deleteConfig(cfg.id),
-          title: "Remove",
-          children: "✕"
-        }
-      )
-    ] }, cfg.id)) })
+    ] })
   ] });
 }
 function GitPanel() {
@@ -13754,8 +17612,8 @@ function ProjectWorkspace() {
           /* @__PURE__ */ jsxRuntimeExports.jsx(TabBar, {}),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pw-toolbar-actions", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `pw-tool-btn ${showBottom && bottomTab === "terminal" ? "active" : ""}`, title: "Terminal (Ctrl+`)", onClick: () => toggleBottom("terminal"), children: /* @__PURE__ */ jsxRuntimeExports.jsx(TermIcon, {}) }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `pw-tool-btn ${showBottom && bottomTab === "run" ? "active" : ""}`, title: "Run Panel", onClick: () => toggleBottom("run"), children: /* @__PURE__ */ jsxRuntimeExports.jsx(RunIcon, {}) }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `pw-tool-btn ${state.composerOpen ? "active" : ""}`, title: "Agent Panel (Ctrl+Shift+A)", onClick: () => dispatch({ type: "TOGGLE_COMPOSER" }), children: /* @__PURE__ */ jsxRuntimeExports.jsx(ComposerIcon, {}) })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `pw-tool-btn ${showBottom && bottomTab === "run" ? "active" : ""}`, title: "Activity Panel", onClick: () => toggleBottom("run"), children: /* @__PURE__ */ jsxRuntimeExports.jsx(RunIcon, {}) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `pw-tool-btn ${state.composerOpen ? "active" : ""}`, title: "Workflow Panel (Ctrl+Shift+A)", onClick: () => dispatch({ type: "TOGGLE_COMPOSER" }), children: /* @__PURE__ */ jsxRuntimeExports.jsx(ComposerIcon, {}) })
           ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pw-editor-area", style: { position: "relative" }, children: [
@@ -13807,7 +17665,7 @@ function ProjectWorkspace() {
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pw-bottom", style: { height: bottomH }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pw-bottom-header", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `pw-bottom-tab ${bottomTab === "terminal" ? "active" : ""}`, onClick: () => setBottomTab("terminal"), children: "Terminal" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `pw-bottom-tab ${bottomTab === "run" ? "active" : ""}`, onClick: () => setBottomTab("run"), children: "Run" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: `pw-bottom-tab ${bottomTab === "run" ? "active" : ""}`, onClick: () => setBottomTab("run"), children: "Activity" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pw-bottom-spacer" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "pw-bottom-close", onClick: () => setShowBottom(false), children: "✕" })
         ] }),
@@ -14028,118 +17886,6 @@ function ComposerIcon() {
     /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 2L2 7l10 5 10-5-10-5z" }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M2 17l10 5 10-5" }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M2 12l10 5 10-5" })
-  ] });
-}
-function HomePanel() {
-  const { state, dispatch } = useApp();
-  const runs = Array.isArray(state.runs) ? state.runs : [];
-  const recentRuns = runs.slice(0, 4);
-  const connectedCloudProviders = [
-    state.settings?.openaiKey,
-    state.settings?.anthropicKey,
-    state.settings?.googleKey,
-    state.settings?.xaiKey
-  ].filter(Boolean).length;
-  const localModels = Array.isArray(state.ollamaModels) ? state.ollamaModels.length : 0;
-  const primaryAction = connectedCloudProviders || localModels ? { label: "Create Assistant", target: "studio" } : { label: "Connect AI Engine", target: "settings" };
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kendr-page kendr-home", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "hero-card", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hero-copy", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "eyebrow", children: "AI Operating System" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { children: "Kendr unifies assistants, tools, memory, and runs in one workspace." }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "Build in chat, connect your systems, route across local and cloud models, and inspect every run without leaving the product shell." }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hero-actions", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kendr-btn kendr-btn--primary", onClick: () => dispatch({ type: "SET_VIEW", view: primaryAction.target }), children: primaryAction.label }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kendr-btn kendr-btn--ghost", onClick: () => dispatch({ type: "SET_VIEW", view: "developer" }), children: "Open Developer Workspace" })
-        ] })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hero-metrics", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard$1, { label: "Connected cloud providers", value: String(connectedCloudProviders), detail: "OpenAI, Anthropic, Google, xAI" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard$1, { label: "Detected local models", value: String(localModels), detail: "Ollama-ready engines" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard$1, { label: "Recent runs", value: String(runs.length), detail: "Durable execution history" })
-      ] })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "grid-two", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "surface-card", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader$1, { title: "Recommended Next Steps", subtitle: "Get to a complete first run quickly." }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          ActionRow,
-          {
-            title: "Create your first Studio assistant",
-            detail: "Describe a task, let Kendr wire the basics, then test it in chat.",
-            actionLabel: "Open Studio",
-            onAction: () => dispatch({ type: "SET_VIEW", view: "studio" })
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          ActionRow,
-          {
-            title: "Connect tools and tool sources",
-            detail: "Install connectors, import MCP servers, and make capabilities available to agents.",
-            actionLabel: "Open Integrations",
-            onAction: () => dispatch({ type: "SET_VIEW", view: "integrations" })
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          ActionRow,
-          {
-            title: "Inspect execution traces",
-            detail: "See what tools, models, and memory were used during every run.",
-            actionLabel: "Open Runs",
-            onAction: () => dispatch({ type: "SET_VIEW", view: "runs" })
-          }
-        )
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "surface-card", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader$1, { title: "Workspace Status", subtitle: "A product view of the current environment." }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "status-grid", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(StatusPill, { label: "Backend", value: state.backendStatus, tone: state.backendStatus === "running" ? "ok" : "warn" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(StatusPill, { label: "Project", value: state.projectRoot ? state.projectRoot.split(/[\\/]/).pop() : "Not connected", tone: state.projectRoot ? "neutral" : "warn" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(StatusPill, { label: "Mode", value: state.appMode === "studio" ? "Studio" : "Developer", tone: "neutral" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(StatusPill, { label: "Selected model", value: state.selectedModel || "Auto routing", tone: "neutral" })
-        ] })
-      ] })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "surface-card", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader$1, { title: "Recent Activity", subtitle: "The most recent assistant and workflow runs." }),
-      recentRuns.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "empty-state", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "empty-state__title", children: "No runs yet" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "empty-state__body", children: "Start in Studio to create an assistant or open Runs after your first task completes." })
-      ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "run-table", children: recentRuns.map((run) => /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "run-table__row", onClick: () => dispatch({ type: "SET_VIEW", view: "runs" }), children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `run-dot run-dot--${run.status || "pending"}` }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "run-table__title", children: (run.text || run.workflow_id || run.run_id || "Untitled run").slice(0, 64) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "run-table__status", children: run.status || "pending" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "run-table__date", children: run.created_at ? new Date(run.created_at).toLocaleString() : "recent" })
-      ] }, run.run_id)) })
-    ] })
-  ] });
-}
-function SectionHeader$1({ title, subtitle }) {
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "section-header", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: title }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: subtitle })
-  ] }) });
-}
-function MetricCard$1({ label, value, detail }) {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "metric-card", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__label", children: label }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__value", children: value }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__detail", children: detail })
-  ] });
-}
-function ActionRow({ title, detail, actionLabel, onAction }) {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "action-row", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "action-row__title", children: title }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "action-row__detail", children: detail })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kendr-btn kendr-btn--ghost", onClick: onAction, children: actionLabel })
-  ] });
-}
-function StatusPill({ label, value, tone }) {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `status-pill status-pill--${tone}`, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "status-pill__label", children: label }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "status-pill__value", children: value })
   ] });
 }
 const TYPE_ICONS = { skill: "⚡", mcp_server: "🔌", api: "🌐", agent: "🤖", tool: "🔧" };
@@ -15494,14 +19240,14 @@ function MachineHub() {
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hero-metrics", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Apps", value: String(Number(status?.installed_software_count || 0)), detail: "Installed tools in snapshot" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Host", value: system.hostname || "unknown", detail: system.architecture || "unknown" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Memory", value: system.total_memory_gb ? `${system.total_memory_gb} GB` : "unknown", detail: system.python_version ? `Python ${system.python_version}` : "Python unknown" })
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard$1, { label: "Apps", value: String(Number(status?.installed_software_count || 0)), detail: "Installed tools in snapshot" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard$1, { label: "Host", value: system.hostname || "unknown", detail: system.architecture || "unknown" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard$1, { label: "Memory", value: system.total_memory_gb ? `${system.total_memory_gb} GB` : "unknown", detail: system.python_version ? `Python ${system.python_version}` : "Python unknown" })
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "grid-two machine-grid", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "surface-card machine-card", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "System Snapshot", subtitle: "Machine-wide environment facts" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader$1, { title: "System Snapshot", subtitle: "Machine-wide environment facts" }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "machine-kv-grid", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(KeyValue, { label: "Host", value: system.hostname || "unknown" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx(KeyValue, { label: "OS", value: [system.os, system.os_release].filter(Boolean).join(" ") || system.platform || "unknown" }),
@@ -15514,7 +19260,7 @@ function MachineHub() {
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "surface-card machine-card", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "Synced Apps", subtitle: "Software inventory snapshot" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader$1, { title: "Synced Apps", subtitle: "Software inventory snapshot" }),
         apps.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "empty-state", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "empty-state__title", children: "No apps synced yet" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "empty-state__body", children: "Run machine sync first." })
@@ -15529,13 +19275,13 @@ function MachineHub() {
     ] })
   ] });
 }
-function SectionHeader({ title, subtitle }) {
+function SectionHeader$1({ title, subtitle }) {
   return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "section-header", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: title }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: subtitle })
   ] }) });
 }
-function MetricCard({ label, value, detail }) {
+function MetricCard$1({ label, value, detail }) {
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "metric-card", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__label", children: label }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__value", children: value }),
@@ -15647,6 +19393,27 @@ const TABS$1 = [
   { id: "editor", label: "Editor" },
   { id: "chat", label: "Chat" }
 ];
+function formatDateTime(value) {
+  if (!value) return "Not checked yet";
+  const ts = new Date(value);
+  if (Number.isNaN(ts.getTime())) return "Not checked yet";
+  return ts.toLocaleString();
+}
+function describeFeed(updateStatus, settings) {
+  const savedFeed = String(settings.updateBaseUrl || "").trim();
+  if (savedFeed) return savedFeed;
+  if (updateStatus.feedSource === "packaged") return "Packaged release feed";
+  if (updateStatus.feedSource === "env" && updateStatus.feedUrl) return updateStatus.feedUrl;
+  return "Not configured";
+}
+function describeUpdateStatus(updateStatus) {
+  if (!updateStatus) return "Update status unavailable.";
+  if (updateStatus.status === "downloading" && updateStatus.progress?.percent != null) {
+    const percent = Math.max(0, Math.min(100, Number(updateStatus.progress.percent || 0)));
+    return `Downloading update (${percent.toFixed(percent >= 10 ? 0 : 1)}%).`;
+  }
+  return updateStatus.message || "Update status unavailable.";
+}
 function Settings() {
   const { state, dispatch } = useApp();
   const [tab, setTab] = reactExports.useState("general");
@@ -15717,6 +19484,10 @@ function Settings() {
     if (dir) update(key, dir);
   };
   const s = settings;
+  const updateStatus = state.updateStatus || {};
+  const updateFeed = describeFeed(updateStatus, s);
+  const updateSummary = describeUpdateStatus(updateStatus);
+  const updateVersion = updateStatus.downloadedVersion || updateStatus.availableVersion || updateStatus.currentVersion || "unknown";
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "st-root", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-tabs", children: TABS$1.map((t2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
       "button",
@@ -15751,6 +19522,48 @@ function Settings() {
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Display Name", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "st-input", value: s.gitName || "", onChange: (e) => update("gitName", e.target.value) }) }),
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Email", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "st-input", value: s.gitEmail || "", onChange: (e) => update("gitEmail", e.target.value) }) }),
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "GitHub PAT", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "st-input", type: "password", value: s.githubPat || "", onChange: (e) => update("githubPat", e.target.value), placeholder: "ghp_…" }) })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(Section, { title: "Application Updates", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Enable Remote Updates", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "checkbox", className: "st-check", checked: s.updatesEnabled !== false, onChange: (e) => update("updatesEnabled", e.target.checked) }) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Update Feed URL", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              className: "st-input",
+              value: s.updateBaseUrl || "",
+              onChange: (e) => update("updateBaseUrl", e.target.value),
+              placeholder: "Use the packaged release feed when left blank"
+            }
+          ) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Update Channel", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              className: "st-input st-input--sm",
+              value: s.updateChannel || "latest",
+              onChange: (e) => update("updateChannel", e.target.value),
+              placeholder: "latest"
+            }
+          ) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Check Every (minutes)", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              className: "st-input st-input--sm",
+              type: "number",
+              min: "15",
+              max: "1440",
+              value: Number(s.updateCheckIntervalMinutes || 240),
+              onChange: (e) => update("updateCheckIntervalMinutes", Math.max(15, Math.min(1440, Number(e.target.value || 240))))
+            }
+          ) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Auto-download Releases", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "checkbox", className: "st-check", checked: s.autoDownloadUpdates !== false, onChange: (e) => update("autoDownloadUpdates", e.target.checked) }) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Install on Quit", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "checkbox", className: "st-check", checked: s.autoInstallOnQuit !== false, onChange: (e) => update("autoInstallOnQuit", e.target.checked) }) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Allow Pre-release Versions", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "checkbox", className: "st-check", checked: !!s.allowPrereleaseUpdates, onChange: (e) => update("allowPrereleaseUpdates", e.target.checked) }) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-info-banner", children: updateSummary }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-info-banner", style: { marginTop: 8 }, children: `Current version: ${updateStatus.currentVersion || "unknown"} · Target version: ${updateVersion} · Feed: ${updateFeed} · Last check: ${formatDateTime(updateStatus.checkedAt)}` }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "st-actions", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "st-btn", onClick: () => api?.updates?.check(), disabled: updateStatus.status === "checking", children: updateStatus.status === "checking" ? "Checking…" : "Check for Updates" }),
+            updateStatus.status === "available" && updateStatus.autoDownload === false && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "st-btn-accent", onClick: () => api?.updates?.download(), children: "Download Update" }),
+            updateStatus.status === "downloaded" && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "st-btn-accent", onClick: () => api?.updates?.install(), children: "Restart to Update" })
+          ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs(Section, { title: "Machine Sync", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Auto Sync Machine Index", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -15801,7 +19614,7 @@ function Settings() {
         ] })
       ] }),
       tab === "rag" && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-info-banner", children: "Configure retrieval-augmented generation (RAG) sources. These are used by research and document agents." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-info-banner", children: "Configure RAG infrastructure defaults here. Deep Research can optionally consume an indexed KB at run time, but KB creation and indexing live in Super-RAG." }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs(Section, { title: "Vector Store", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Backend", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { className: "st-select", value: s.vectorStore || "chroma", onChange: (e) => update("vectorStore", e.target.value), children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "chroma", children: "Chroma (local)" }),
@@ -15836,12 +19649,12 @@ function Settings() {
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Chunk Size", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "st-input st-input--sm", type: "number", value: s.ragChunkSize || 512, onChange: (e) => update("ragChunkSize", +e.target.value) }) }),
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Chunk Overlap", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "st-input st-input--sm", type: "number", value: s.ragChunkOverlap || 64, onChange: (e) => update("ragChunkOverlap", +e.target.value) }) }),
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Auto-index on start", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "checkbox", className: "st-check", checked: !!s.ragAutoIndex, onChange: (e) => update("ragAutoIndex", e.target.checked) }) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-actions", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "st-btn-accent", onClick: async () => {
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "st-actions", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "st-btn-accent", onClick: () => {
             try {
-              await fetch(`${apiBase}/api/rag/index`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: s.ragLocalPaths?.split(",").map((p2) => p2.trim()).filter(Boolean) }) });
-            } catch {
+              window.open(`${apiBase}/rag`, "_blank", "noopener,noreferrer");
+            } catch (_2) {
             }
-          }, children: "Index Documents Now" }) })
+          }, children: "Open Super-RAG" }) })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs(Section, { title: "Web Connectors", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(Row, { label: "Confluence URL", children: /* @__PURE__ */ jsxRuntimeExports.jsx("input", { className: "st-input", value: s.confluenceUrl || "", onChange: (e) => update("confluenceUrl", e.target.value), placeholder: "https://company.atlassian.net" }) }),
@@ -16259,6 +20072,8 @@ function ModelDocs() {
     return () => clearInterval(timer);
   }, [apiBase]);
   const rows = reactExports.useMemo(() => {
+    const comparisonRows = Array.isArray(inventory?.comparison_rows) ? inventory.comparison_rows : [];
+    if (comparisonRows.length) return comparisonRows;
     const providers = Array.isArray(inventory?.providers) ? inventory.providers : [];
     return providers.filter((provider) => provider.has_key || provider.provider === "ollama");
   }, [inventory]);
@@ -16385,7 +20200,7 @@ function ModelDocs() {
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "md-table-wrap", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("table", { className: "md-table", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("thead", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Provider" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Configured Model" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Model" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Status" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Context" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Tool Calling" }),
@@ -16397,30 +20212,33 @@ function ModelDocs() {
           /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Suggested Best" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "Suggested Cheapest" })
         ] }) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: rows.map((provider) => {
-          const badges = provider.model_badges || {};
-          const latest = Object.keys(badges).find((model) => badges[model]?.includes("latest")) || "—";
-          const best = Object.keys(badges).find((model) => badges[model]?.includes("best")) || "—";
-          const cheapest = Object.keys(badges).find((model) => badges[model]?.includes("cheapest")) || "—";
-          const capabilities = provider.model_capabilities || {};
-          const status = provider.model_fetch_error ? `Error: ${provider.model_fetch_error}` : provider.ready ? "Ready" : provider.note || "Not ready";
+        /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: rows.map((row, index2) => {
+          const capabilities = row.model_capabilities || row.capabilities || {};
+          const providerLabel = row.provider || row.model_family || row.source_provider || "—";
+          const sourceProvider = row.source_provider && row.source_provider !== providerLabel ? row.source_provider : "";
+          const status = row.status || (row.model_fetch_error ? `Error: ${row.model_fetch_error}` : "Ready");
           return /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: provider.provider }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-model-cell", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: provider.model || "—" }),
-              provider.model_badges?.[provider.model]?.map((badge) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `md-chip ${badge}`, children: badge }, `${provider.provider}:${provider.model}:${badge}`))
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: providerLabel }),
+              sourceProvider && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "md-chip", children: sourceProvider })
             ] }) }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: provider.model_fetch_error ? "md-error-text" : "", children: status }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: provider.context_window ? `${provider.context_window.toLocaleString()} tokens` : "—" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "md-model-cell", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: row.model || "—" }),
+              row.selected && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "md-chip best", children: "active" }),
+              !row.selected && row.configured && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "md-chip latest", children: "configured" }),
+              (row.model_badges || []).map((badge) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `md-chip ${badge}`, children: badge }, `${providerLabel}:${row.model}:${badge}`))
+            ] }) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: row.model_fetch_error ? "md-error-text" : "", children: status }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: row.context_window ? `${row.context_window.toLocaleString()} tokens` : "—" }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.tool_calling) }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(provider.agent_capable) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(row.agent_capable) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.vision) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.structured_output) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: capabilityLabel(capabilities.reasoning) }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: latest }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: best }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: cheapest })
-          ] }, provider.provider);
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: row.suggested_latest || "—" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: row.suggested_best || "—" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: row.suggested_cheapest || "—" })
+          ] }, `${providerLabel}:${row.model || row.provider}:${index2}`);
         }) })
       ] }) })
     ] })
@@ -16446,96 +20264,250 @@ function SettingsHub() {
     tab === "docs" && /* @__PURE__ */ jsxRuntimeExports.jsx(ModelDocs, {})
   ] });
 }
-const PRIMARY_NAV = [
-  { id: "home", label: "Home" },
-  { id: "studio", label: "Studio" },
-  { id: "build", label: "Build" },
-  { id: "machine", label: "Machine" },
-  { id: "memory", label: "Memory" },
-  { id: "integrations", label: "Integrations" },
-  { id: "runs", label: "Runs" },
-  { id: "marketplace", label: "Marketplace" },
-  { id: "settings", label: "Settings" }
-];
+function formatCheckedAt(value) {
+  if (!value) return "Not checked yet";
+  const ts = new Date(value);
+  if (Number.isNaN(ts.getTime())) return "Not checked yet";
+  return ts.toLocaleString();
+}
+function updateFeedLabel(updateStatus) {
+  if (updateStatus.feedUrl) return updateStatus.feedUrl;
+  if (updateStatus.feedSource === "packaged") return "Packaged release feed";
+  return "Not configured";
+}
+function AboutPanel() {
+  const api = window.kendrAPI;
+  const { state } = useApp();
+  const updateStatus = state.updateStatus || {};
+  const currentVersion = updateStatus.currentVersion || "unknown";
+  const targetVersion = updateStatus.downloadedVersion || updateStatus.availableVersion || currentVersion;
+  const downloading = updateStatus.status === "downloading";
+  const checking = updateStatus.status === "checking";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kendr-page kendr-about", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "hero-card kendr-about-hero", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hero-copy", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "eyebrow", children: "About Kendr" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { children: "Kendr is an execution workspace for research, planning, and agent-driven work." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "Instead of treating AI like a single chat box, Kendr gives you one surface for deep research, model routing, local file search, multi-step plans, workflow execution, and persistent run history. It is designed to move from a question to a real outcome." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "hero-actions", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kendr-btn kendr-btn--primary", onClick: () => api?.shell?.openExternal("https://kendr.org"), children: "Visit kendr.org" }) })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hero-metrics", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Primary role", value: "Research to execution", detail: "One workspace across discovery, planning, and delivery." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Core interaction", value: "Prompt + workflow", detail: "Start in search, branch into plan, agent, or deep research." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(MetricCard, { label: "Built for", value: "Real tasks", detail: "Files, systems, tools, runs, and inspectable outputs." })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "grid-two", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "surface-card", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "What Kendr Does", subtitle: "A practical view of the product." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AboutList,
+          {
+            items: [
+              "Deep research with structured settings, citations, and source controls.",
+              "Model routing across cloud and local models from the same workspace.",
+              "Agent and plan modes for multi-step tasks that go beyond a single reply.",
+              "Connections to files, MCP tools, integrations, and execution traces.",
+              "A persistent shell where research, runs, and settings stay connected."
+            ]
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "surface-card", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "Why It Exists", subtitle: "The product intent behind Kendr." }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "kendr-about-copy", children: "Kendr is built around the idea that useful AI products should not stop at text generation. They should help users investigate, plan, act, inspect what happened, and continue from there. The goal is to turn fragmented AI interactions into a coherent working environment." })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "surface-card", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "Core Surfaces", subtitle: "The main ways Kendr is meant to be used." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "about-grid", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AboutCard,
+          {
+            title: "Studio",
+            body: "A focused orchestration surface for search-first work, research flows, planning, and model selection."
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AboutCard,
+          {
+            title: "Build",
+            body: "Automation, builders, and higher-level product assembly surfaces."
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AboutCard,
+          {
+            title: "Integrations",
+            body: "Connect external systems, MCP servers, and tools that agents can use."
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AboutCard,
+          {
+            title: "Runs",
+            body: "Inspect execution history, workflow status, and traceable agent output."
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AboutCard,
+          {
+            title: "Memory",
+            body: "Keep relevant context, project state, and reusable information close to execution."
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AboutCard,
+          {
+            title: "Settings",
+            body: "Control providers, models, local engines, and environment-level behavior."
+          }
+        )
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "surface-card", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "Creator", subtitle: "Project attribution." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "about-creator", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "about-creator-name", children: "Prashant Dey" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "about-creator-copy", children: [
+          "Creator of Kendr. The project website is ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kendr-inline-link", onClick: () => api?.shell?.openExternal("https://kendr.org"), children: "kendr.org" }),
+          "."
+        ] })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "surface-card", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(SectionHeader, { title: "Desktop Updates", subtitle: "Remote application delivery for installed users." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "about-grid", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AboutCard,
+          {
+            title: "Current Version",
+            body: currentVersion
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AboutCard,
+          {
+            title: "Update Status",
+            body: updateStatus.message || "Update status unavailable."
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AboutCard,
+          {
+            title: "Release Feed",
+            body: updateFeedLabel(updateStatus)
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "kendr-about-copy", children: `Target version: ${targetVersion} · Last check: ${formatCheckedAt(updateStatus.checkedAt)}` }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hero-actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kendr-btn kendr-btn--primary", onClick: () => api?.updates?.check(), disabled: checking, children: checking ? "Checking…" : "Check for Updates" }),
+        updateStatus.status === "available" && updateStatus.autoDownload === false && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kendr-btn", onClick: () => api?.updates?.download(), children: "Download Update" }),
+        updateStatus.status === "downloaded" && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kendr-btn", onClick: () => api?.updates?.install(), children: "Restart to Update" }),
+        downloading && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "kendr-btn", disabled: true, children: "Downloading…" })
+      ] })
+    ] })
+  ] });
+}
+function SectionHeader({ title, subtitle }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "section-header", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: title }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: subtitle })
+  ] }) });
+}
+function MetricCard({ label, value, detail }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "metric-card", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__label", children: label }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__value", children: value }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "metric-card__detail", children: detail })
+  ] });
+}
+function AboutCard({ title, body }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "about-card", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "about-card__title", children: title }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "about-card__body", children: body })
+  ] });
+}
+function AboutList({ items }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "about-list", children: items.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "about-list__item", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "about-list__dot" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: item })
+  ] }, item)) });
+}
 function App() {
-  const { state, dispatch } = useApp();
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "app-root", children: [
+  const { state } = useApp();
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(RendererErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "app-root", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "titlebar", style: { WebkitAppRegion: "drag" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "titlebar-icon titlebar-icon--brand", style: { WebkitAppRegion: "no-drag" }, children: "K" }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "titlebar-brand", style: { WebkitAppRegion: "no-drag" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "titlebar-brand__name", children: "Kendr" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "titlebar-brand__tag", children: "AI Operating System" })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "titlebar-brand__tag", children: "From research to execution" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(MenuBar, {}),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "titlebar-center", style: { WebkitAppRegion: "drag" }, children: !["home", "studio"].includes(state.activeView) && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "titlebar-project", children: state.projectRoot ? state.projectRoot.split(/[\\/]/).pop() : "Workspace" }) }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(ModeSwitch, {})
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "shell-nav", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "shell-nav__items", children: PRIMARY_NAV.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          className: `shell-nav__item ${state.activeView === item.id ? "active" : ""}`,
-          onClick: () => dispatch({ type: "SET_VIEW", view: item.id }),
-          children: item.label
-        },
-        item.id
-      )) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "titlebar-center", style: { WebkitAppRegion: "drag" }, children: state.activeView !== "studio" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "titlebar-project", children: state.projectRoot ? state.projectRoot.split(/[\\/]/).pop() : "Workspace" }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(ModeSwitch, {}),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "shell-nav__status", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `status-chip ${state.backendStatus === "running" ? "ok" : "warn"}`, children: state.backendStatus === "running" ? "Connected" : state.backendStatus }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "status-chip neutral", children: state.selectedModel || "Auto routing" })
+        state.activeView !== "studio" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "status-chip neutral", children: state.selectedModel || "No model selected" })
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "app-body app-body--shell", children: /* @__PURE__ */ jsxRuntimeExports.jsx(RenderActiveView, {}) }),
     /* @__PURE__ */ jsxRuntimeExports.jsx(StatusBar, {}),
     state.commandPaletteOpen && /* @__PURE__ */ jsxRuntimeExports.jsx(CommandPalette, {})
-  ] });
+  ] }) });
 }
 function RenderActiveView() {
-  const { state } = useApp();
-  switch (state.activeView) {
-    case "home":
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(HomePanel, {});
-    case "studio":
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(StudioLayout, {});
-    case "build":
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(BuildHub, {});
-    case "machine":
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(MachineHub, {});
-    case "memory":
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(MemoryHub, {});
-    case "integrations":
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(IntegrationsHub, {});
-    case "runs":
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(AgentOrchestration, {});
-    case "marketplace":
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(SkillsPanel, {});
-    case "settings":
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(SettingsHub, {});
-    case "developer":
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(ProjectWorkspace, {});
-    default:
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(HomePanel, {});
-  }
+  const { state, dispatch } = useApp();
+  if (state.activeView === "studio") return /* @__PURE__ */ jsxRuntimeExports.jsx(StudioLayout, {});
+  const titles = {
+    build: "Build",
+    machine: "Machine",
+    memory: "Memory",
+    integrations: "Integrations",
+    runs: "Runs",
+    marketplace: "Marketplace",
+    settings: "Settings",
+    developer: "Developer",
+    about: "About Kendr"
+  };
+  const content = (() => {
+    switch (state.activeView) {
+      case "build":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(BuildHub, {});
+      case "machine":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(MachineHub, {});
+      case "memory":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(MemoryHub, {});
+      case "integrations":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(IntegrationsHub, {});
+      case "runs":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(AgentOrchestration, {});
+      case "marketplace":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(SkillsPanel, {});
+      case "settings":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(SettingsHub, {});
+      case "developer":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(ProjectWorkspace, {});
+      case "about":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(AboutPanel, {});
+      default:
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(StudioLayout, {});
+    }
+  })();
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-shell-view", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sl-back-bar", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "sl-back-btn", onClick: () => dispatch({ type: "SET_VIEW", view: "studio" }), children: "← Back to search" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-back-title", children: titles[state.activeView] || "Workspace" })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sl-shell-view-body", children: content })
+  ] });
 }
 function ModeSwitch() {
   const { state, dispatch } = useApp();
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "ms-switch", style: { WebkitAppRegion: "no-drag" }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs(
-      "button",
-      {
-        className: `ms-btn ${state.appMode === "developer" ? "active" : ""}`,
-        onClick: () => {
-          dispatch({ type: "SET_APP_MODE", mode: "developer" });
-          dispatch({ type: "SET_VIEW", view: "developer" });
-        },
-        title: "Developer workspace",
-        children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(DevIcon, {}),
-          " Developer"
-        ]
-      }
-    ),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
       "button",
       {
         className: `ms-btn ${state.appMode === "studio" ? "active" : ""}`,
@@ -16543,26 +20515,20 @@ function ModeSwitch() {
           dispatch({ type: "SET_APP_MODE", mode: "studio" });
           dispatch({ type: "SET_VIEW", view: "studio" });
         },
-        title: "Studio workspace",
-        children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(StudioIcon, {}),
-          " Studio"
-        ]
+        children: "Studio"
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "button",
+      {
+        className: `ms-btn ${state.appMode === "developer" ? "active" : ""}`,
+        onClick: () => {
+          dispatch({ type: "SET_APP_MODE", mode: "developer" });
+          dispatch({ type: "SET_VIEW", view: "developer" });
+        },
+        children: "Developer"
       }
     )
-  ] });
-}
-function DevIcon() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "16 18 22 12 16 6" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "8 6 2 12 8 18" })
-  ] });
-}
-function StudioIcon() {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 2L2 7l10 5 10-5-10-5z" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M2 17l10 5 10-5" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M2 12l10 5 10-5" })
   ] });
 }
 client.createRoot(document.getElementById("root")).render(

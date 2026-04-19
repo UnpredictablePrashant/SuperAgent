@@ -4,6 +4,7 @@ import os
 import re
 import textwrap
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 
 
@@ -273,28 +274,311 @@ def preprocess_markdown(md_text: str, asset_dir: Path) -> str:
     return replace_mermaid_blocks(md_text, asset_dir)
 
 
-def link_callback(uri, rel):
-    """
-    Resolve local image/file paths for xhtml2pdf.
-    """
-    path = Path(uri)
+def _resolve_local_resource(uri: str, *, base_path: str | Path | None = None, rel: str | None = None) -> str:
+    if not uri:
+        return uri
 
+    parsed = urlparse(uri)
+    if parsed.scheme in {"http", "https", "data", "mailto"}:
+        return uri
+    if parsed.scheme == "file":
+        file_path = Path(unquote(parsed.path))
+        return str(file_path) if file_path.exists() else uri
+
+    path = Path(uri)
     if path.is_absolute() and path.exists():
         return str(path)
 
+    roots = []
+    if base_path:
+        roots.append(Path(base_path))
     if rel:
-        rel_path = Path(rel) / uri
-        if rel_path.exists():
-            return str(rel_path.resolve())
+        roots.append(Path(rel))
+    roots.append(Path.cwd())
 
-    cwd_path = Path.cwd() / uri
-    if cwd_path.exists():
-        return str(cwd_path.resolve())
+    for root in roots:
+        try:
+            candidate = (root / uri).resolve()
+        except Exception:
+            continue
+        if candidate.exists():
+            return str(candidate)
 
     return uri
 
 
-def build_html_from_markdown(md_text: str) -> str:
+def link_callback(uri, rel, *, base_path: str | Path | None = None):
+    """
+    Resolve local image/file paths for xhtml2pdf.
+    """
+    return _resolve_local_resource(uri, base_path=base_path, rel=rel)
+
+
+def _report_stylesheet(*, for_pdf: bool) -> str:
+    page_css = """
+            @page {
+                size: A4;
+                margin: 0.82in 0.72in 0.86in 0.72in;
+            }
+    """ if for_pdf else ""
+    body_padding = "0" if for_pdf else "36px 22px 54px"
+    shell_width = "100%" if for_pdf else "960px"
+    shell_shadow = "none" if for_pdf else "0 18px 52px rgba(15, 23, 42, 0.12)"
+    shell_radius = "0" if for_pdf else "24px"
+    return f"""
+            {page_css}
+            body {{
+                font-family: "Georgia", "Times New Roman", serif;
+                font-size: 11pt;
+                line-height: 1.72;
+                color: #1f2937;
+                background: #eef3f8;
+                margin: 0;
+                padding: {body_padding};
+            }}
+
+            .report-shell {{
+                max-width: {shell_width};
+                margin: 0 auto;
+                background: #ffffff;
+                border: 1px solid #dbe4ee;
+                border-radius: {shell_radius};
+                box-shadow: {shell_shadow};
+                padding: 0.8in 0.72in 0.9in;
+            }}
+
+            h1, h2, h3, h4, h5, h6 {{
+                color: #0f172a;
+                font-family: "Georgia", "Times New Roman", serif;
+                page-break-after: avoid;
+            }}
+
+            h1 {{
+                font-size: 28pt;
+                margin: 0 0 18px;
+                padding-bottom: 10px;
+                border-bottom: 2px solid #0f766e;
+                letter-spacing: -0.02em;
+            }}
+
+            h2 {{
+                font-size: 18pt;
+                margin: 28px 0 10px;
+                padding-bottom: 4px;
+                border-bottom: 1px solid #d7e1eb;
+            }}
+
+            h3 {{
+                font-size: 14pt;
+                margin: 20px 0 8px;
+                color: #134e4a;
+            }}
+
+            h4, h5, h6 {{
+                margin: 14px 0 6px;
+            }}
+
+            p {{
+                margin: 0 0 12px;
+                text-align: justify;
+            }}
+
+            blockquote {{
+                margin: 14px 0;
+                padding: 10px 14px;
+                border-left: 4px solid #0f766e;
+                background: #f3fbfa;
+                color: #334155;
+                font-style: italic;
+            }}
+
+            ul, ol {{
+                margin: 8px 0 14px 24px;
+                padding: 0;
+            }}
+
+            li {{
+                margin-bottom: 5px;
+            }}
+
+            li p {{
+                margin-bottom: 4px;
+                text-align: justify;
+            }}
+
+            a {{
+                color: #0f766e;
+                text-decoration: none;
+                font-weight: 600;
+            }}
+
+            strong {{
+                font-weight: 700;
+                color: #0f172a;
+            }}
+
+            em {{
+                font-style: italic;
+                color: #475569;
+            }}
+
+            code {{
+                font-family: "Courier New", monospace;
+                background-color: #f8fafc;
+                padding: 2px 4px;
+                border: 1px solid #dbe4ee;
+                border-radius: 3px;
+                font-size: 9.6pt;
+            }}
+
+            pre {{
+                font-family: "Courier New", monospace;
+                background-color: #0f172a;
+                color: #e2e8f0;
+                border: 1px solid #1e293b;
+                border-radius: 10px;
+                padding: 12px 14px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                font-size: 9pt;
+                line-height: 1.5;
+                overflow-x: auto;
+            }}
+
+            pre code {{
+                background-color: transparent;
+                border: none;
+                padding: 0;
+                color: inherit;
+            }}
+
+            table {{
+                border-collapse: collapse;
+                width: 100%;
+                margin: 16px 0;
+                table-layout: fixed;
+                background: #ffffff;
+                border: 1px solid #dbe4ee;
+            }}
+
+            th, td {{
+                border: 1px solid #dbe4ee;
+                padding: 8px 10px;
+                vertical-align: top;
+                word-wrap: break-word;
+                font-size: 10pt;
+                text-align: left;
+            }}
+
+            th {{
+                background: #0f172a;
+                color: #f8fafc;
+                font-weight: 700;
+            }}
+
+            tr:nth-child(even) td {{
+                background: #f8fafc;
+            }}
+
+            img {{
+                max-width: 100%;
+                display: block;
+                margin: 16px auto 8px;
+                border-radius: 8px;
+                border: 1px solid #dbe4ee;
+            }}
+
+            hr {{
+                border: none;
+                border-top: 1px solid #cbd5e1;
+                margin: 22px 0;
+            }}
+
+            .report-footer {{
+                margin-top: 34px;
+                padding-top: 16px;
+                border-top: 1px solid #d7e1eb;
+                page-break-inside: avoid;
+                text-align: center;
+            }}
+
+            .brand-lockup {{
+                display: inline-flex;
+                align-items: center;
+                gap: 10px;
+                color: #0f172a;
+                font-family: "Georgia", "Times New Roman", serif;
+                font-weight: 700;
+                letter-spacing: 0.02em;
+            }}
+
+            .brand-mark {{
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 28px;
+                height: 28px;
+                border-radius: 9px;
+                background: linear-gradient(135deg, #0f766e 0%, #134e4a 100%);
+                color: #f8fafc;
+                font-size: 12pt;
+                line-height: 1;
+                box-shadow: 0 8px 18px rgba(15, 118, 110, 0.16);
+            }}
+
+            .brand-name {{
+                font-size: 11pt;
+                color: #0f172a;
+            }}
+    """
+
+
+def _inject_named_anchors(html_body: str) -> str:
+    def _replace(match):
+        tag_name = match.group(1)
+        attrs = match.group(2) or ""
+        if re.search(r'\bname\s*=', attrs):
+            return match.group(0)
+        id_match = re.search(r'\bid\s*=\s*"([^"]+)"', attrs)
+        if not id_match:
+            return match.group(0)
+        anchor = id_match.group(1)
+        return f'<a name="{anchor}"></a><{tag_name}{attrs}>'
+
+    return re.sub(r"<(h[1-6])([^>]*)>", _replace, html_body)
+
+
+def _absolutize_local_media_paths(html_body: str, *, base_path: str | Path | None = None) -> str:
+    if not base_path:
+        return html_body
+
+    def _replace(match):
+        attr = match.group(1)
+        quote = match.group(2)
+        value = match.group(3)
+        resolved = _resolve_local_resource(value, base_path=base_path)
+        return f'{attr}={quote}{resolved}{quote}'
+
+    return re.sub(r'(src)\s*=\s*(["\'])([^"\']+)\2', _replace, html_body)
+
+
+def _report_footer_html() -> str:
+    return """
+            <footer class="report-footer" aria-label="Kendr footer">
+                <div class="brand-lockup">
+                    <span class="brand-mark">K</span>
+                    <span class="brand-name">Kendr</span>
+                </div>
+            </footer>
+    """
+
+
+def build_html_from_markdown(
+    md_text: str,
+    *,
+    for_pdf: bool = False,
+    base_path: str | Path | None = None,
+) -> str:
     import markdown
     html_body = markdown.markdown(
         md_text,
@@ -304,140 +588,26 @@ def build_html_from_markdown(md_text: str) -> str:
             "fenced_code",
             "toc",
             "sane_lists",
-            "nl2br"
+            "nl2br",
+            "attr_list",
         ]
     )
+    html_body = _inject_named_anchors(html_body)
+    html_body = _absolutize_local_media_paths(html_body, base_path=base_path)
 
     return f"""
     <html>
     <head>
         <meta charset="utf-8">
         <style>
-            @page {{
-                size: A4;
-                margin: 0.8in;
-            }}
-
-            body {{
-                font-family: Helvetica, Arial, sans-serif;
-                font-size: 11pt;
-                line-height: 1.6;
-                color: #222;
-            }}
-
-            h1 {{
-                font-size: 24pt;
-                margin-bottom: 10px;
-                border-bottom: 2px solid #444;
-                padding-bottom: 6px;
-            }}
-
-            h2 {{
-                font-size: 18pt;
-                margin-top: 20px;
-                margin-bottom: 8px;
-                color: #333;
-            }}
-
-            h3 {{
-                font-size: 14pt;
-                margin-top: 16px;
-                margin-bottom: 6px;
-                color: #444;
-            }}
-
-            h4, h5, h6 {{
-                margin-top: 12px;
-                margin-bottom: 6px;
-            }}
-
-            p {{
-                margin: 8px 0;
-            }}
-
-            strong {{
-                font-weight: bold;
-            }}
-
-            em {{
-                font-style: italic;
-            }}
-
-            ul, ol {{
-                margin-top: 6px;
-                margin-bottom: 10px;
-                margin-left: 22px;
-            }}
-
-            li {{
-                margin-bottom: 4px;
-            }}
-
-            blockquote {{
-                border-left: 4px solid #999;
-                padding-left: 10px;
-                color: #555;
-                margin: 10px 0;
-            }}
-
-            code {{
-                font-family: Courier, monospace;
-                background-color: #f4f4f4;
-                padding: 2px 4px;
-                border: 1px solid #ddd;
-            }}
-
-            pre {{
-                font-family: Courier, monospace;
-                background-color: #f4f4f4;
-                border: 1px solid #ddd;
-                padding: 10px;
-                white-space: pre-wrap;
-                word-wrap: break-word;
-                font-size: 9pt;
-            }}
-
-            pre code {{
-                background-color: transparent;
-                border: none;
-                padding: 0;
-            }}
-
-            table {{
-                border-collapse: collapse;
-                width: 100%;
-                margin: 12px 0;
-                table-layout: fixed;
-            }}
-
-            th, td {{
-                border: 1px solid #999;
-                padding: 6px;
-                vertical-align: top;
-                word-wrap: break-word;
-                font-size: 10pt;
-            }}
-
-            th {{
-                background-color: #eaeaea;
-                font-weight: bold;
-            }}
-
-            img {{
-                max-width: 100%;
-                display: block;
-                margin: 12px 0;
-            }}
-
-            hr {{
-                border: none;
-                border-top: 1px solid #999;
-                margin: 16px 0;
-            }}
+            {_report_stylesheet(for_pdf=for_pdf)}
         </style>
     </head>
     <body>
-        {html_body}
+        <main class="report-shell">
+            {html_body}
+            {_report_footer_html()}
+        </main>
     </body>
     </html>
     """
@@ -457,14 +627,14 @@ def md_to_pdf(md_file: str, pdf_file: str) -> None:
     md_text = md_path.read_text(encoding="utf-8")
 
     processed_md = preprocess_markdown(md_text, asset_dir)
-    html_output = build_html_from_markdown(processed_md)
+    html_output = build_html_from_markdown(processed_md, for_pdf=True, base_path=md_path.parent)
 
     from xhtml2pdf import pisa
     with open(pdf_file, "wb") as pdf:
         result = pisa.CreatePDF(
             src=html_output,
             dest=pdf,
-            link_callback=link_callback
+            link_callback=lambda uri, rel: link_callback(uri, rel, base_path=md_path.parent),
         )
 
     if result.err:

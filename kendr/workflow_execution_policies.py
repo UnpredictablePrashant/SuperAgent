@@ -34,6 +34,7 @@ def dispatch_workflow_execution_policies(
         _handle_channel_bootstrap,
         _handle_pending_user_input_gate,
         _handle_resume_workflow_dispatch,
+        _handle_review_flow,
         _handle_conversational_shortcut,
         _handle_capability_inventory_shortcut,
         _handle_direct_tool_runtime,
@@ -61,7 +62,6 @@ def dispatch_workflow_execution_policies(
         _handle_long_document_subplan_gate,
         _handle_local_drive_ingestion,
         _handle_post_approval_explicit_workflow,
-        _handle_review_flow,
         _handle_extension_handler_generation,
         _handle_planned_batch_dispatch,
         _handle_dynamic_agent_runner_dispatch,
@@ -476,6 +476,7 @@ def _handle_long_document_subplan_gate(runtime: Any, state: dict[str, Any], cont
 def _handle_local_drive_ingestion(runtime: Any, state: dict[str, Any], context: WorkflowPolicyContext) -> dict[str, Any] | None:
     if not (
         not state.get("plan_steps")
+        and not runtime._is_long_document_request(state)
         and runtime._has_local_drive_request(state)
         and runtime._is_agent_available(state, "local_drive_agent")
         and state.get("last_agent") != "local_drive_agent"

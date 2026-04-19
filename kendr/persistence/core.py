@@ -4,12 +4,18 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
 
+from kendr.unicode_utils import sanitize_text
+
 
 _LOG = logging.getLogger(__name__)
+
+
+sqlite3.register_adapter(str, sanitize_text)
 
 
 def _repo_root() -> Path:
@@ -46,6 +52,8 @@ DB_PATH = resolve_db_path()
 
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATED_PRIMARY_DB_PATHS: set[str] = set()
+_INITIALIZE_LOCK = threading.Lock()
+_INITIALIZED_PRIMARY_DB_PATHS: set[str] = set()
 _MIGRATION_TABLE_NAME = "_db_migration_sources"
 _CORE_TABLES = (
     "runs",
@@ -169,6 +177,66 @@ def _ensure_parent_dir(db_path: str):
         os.makedirs(parent, exist_ok=True)
 
 
+def _pragma_scalar(row: object) -> str:
+    if row is None:
+        return ""
+    if isinstance(row, sqlite3.Row):
+        try:
+            return str(next(iter(row))).strip()
+        except Exception:
+            values = list(row)
+            return str(values[0]).strip() if values else ""
+    if isinstance(row, (tuple, list)):
+        return str(row[0]).strip() if row else ""
+    return str(row).strip()
+
+
+def _apply_connection_pragmas(conn: sqlite3.Connection, resolved_db_path: str) -> str:
+    conn.execute("PRAGMA busy_timeout = 30000")
+
+    journal_mode = ""
+    wal_error: Exception | None = None
+    try:
+        journal_mode = _pragma_scalar(conn.execute("PRAGMA journal_mode = WAL").fetchone()).lower()
+    except sqlite3.OperationalError as exc:
+        wal_error = exc
+
+    if wal_error is not None:
+        _LOG.warning(
+            "WAL mode unavailable for %s: %s. Falling back to DELETE journal mode.",
+            resolved_db_path,
+            wal_error,
+        )
+    elif journal_mode and journal_mode != "wal":
+        _LOG.warning(
+            "SQLite kept journal_mode=%s for %s instead of WAL. Falling back to DELETE journal mode.",
+            journal_mode,
+            resolved_db_path,
+        )
+
+    if wal_error is not None or journal_mode != "wal":
+        try:
+            fallback_mode = _pragma_scalar(conn.execute("PRAGMA journal_mode = DELETE").fetchone()).lower()
+            journal_mode = fallback_mode or "delete"
+        except sqlite3.OperationalError as exc:
+            _LOG.warning(
+                "DELETE journal mode fallback failed for %s: %s. Continuing with SQLite defaults.",
+                resolved_db_path,
+                exc,
+            )
+            journal_mode = journal_mode or "unknown"
+
+    try:
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except sqlite3.OperationalError as exc:
+        _LOG.warning(
+            "SQLite synchronous pragma failed for %s: %s. Continuing with SQLite defaults.",
+            resolved_db_path,
+            exc,
+        )
+    return journal_mode or "unknown"
+
+
 @contextmanager
 def _connect(db_path: str = DB_PATH):
     resolved_db_path = resolve_db_path(db_path)
@@ -176,9 +244,7 @@ def _connect(db_path: str = DB_PATH):
     conn = sqlite3.connect(resolved_db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA busy_timeout = 30000")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
+        _apply_connection_pragmas(conn, resolved_db_path)
         yield conn
         conn.commit()
     finally:
@@ -379,11 +445,9 @@ def _migrate_legacy_databases_once(db_path: str) -> None:
         _LOG.warning("Legacy DB auto-migration skipped for %s: %s", resolved_db_path, exc)
 
 
-def initialize_db(db_path: str = DB_PATH):
-    resolved_db_path = resolve_db_path(db_path)
-    with _connect(resolved_db_path) as conn:
-        conn.executescript(
-            """
+def _bootstrap_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
             CREATE TABLE IF NOT EXISTS runs (
                 run_id TEXT PRIMARY KEY,
                 workflow_id TEXT,
@@ -918,24 +982,79 @@ def initialize_db(db_path: str = DB_PATH):
                 ON orchestration_events (run_id, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_orchestration_events_subject
                 ON orchestration_events (subject_type, subject_id, timestamp DESC);
-            """
-        )
-        _ensure_column(conn, "runs", "workflow_id", "TEXT")
-        _ensure_column(conn, "runs", "attempt_id", "TEXT")
-        _ensure_column(conn, "task_sessions", "workflow_id", "TEXT")
-        _ensure_column(conn, "task_sessions", "attempt_id", "TEXT")
-        _ensure_column(conn, "runs", "updated_at", "TEXT")
-        _ensure_column(conn, "runs", "working_directory", "TEXT")
-        _ensure_column(conn, "runs", "run_output_dir", "TEXT")
-        _ensure_column(conn, "runs", "session_id", "TEXT")
-        _ensure_column(conn, "runs", "parent_run_id", "TEXT")
-        _ensure_column(conn, "runs", "resumable", "INTEGER")
-        _ensure_column(conn, "runs", "checkpoint_json", "TEXT")
-        _ensure_column(conn, "agent_executions", "completed_at", "TEXT")
-        _ensure_column(conn, "plan_tasks", "side_effect_level", "TEXT NOT NULL DEFAULT 'unknown'")
-        _ensure_column(conn, "plan_tasks", "conflict_keys_json", "TEXT NOT NULL DEFAULT '[]'")
-        _ensure_column(conn, "plan_tasks", "lease_owner", "TEXT DEFAULT ''")
-        _ensure_column(conn, "plan_tasks", "lease_expires_at", "TEXT")
-        _ensure_column(conn, "plan_tasks", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "plan_tasks", "last_attempt_at", "TEXT")
+        """
+    )
+    _ensure_column(conn, "runs", "workflow_id", "TEXT")
+    _ensure_column(conn, "runs", "attempt_id", "TEXT")
+    _ensure_column(conn, "task_sessions", "workflow_id", "TEXT")
+    _ensure_column(conn, "task_sessions", "attempt_id", "TEXT")
+    _ensure_column(conn, "runs", "updated_at", "TEXT")
+    _ensure_column(conn, "runs", "working_directory", "TEXT")
+    _ensure_column(conn, "runs", "run_output_dir", "TEXT")
+    _ensure_column(conn, "runs", "session_id", "TEXT")
+    _ensure_column(conn, "runs", "parent_run_id", "TEXT")
+    _ensure_column(conn, "runs", "resumable", "INTEGER")
+    _ensure_column(conn, "runs", "checkpoint_json", "TEXT")
+    _ensure_column(conn, "agent_executions", "completed_at", "TEXT")
+    _ensure_column(conn, "plan_tasks", "side_effect_level", "TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "plan_tasks", "conflict_keys_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(conn, "plan_tasks", "lease_owner", "TEXT DEFAULT ''")
+    _ensure_column(conn, "plan_tasks", "lease_expires_at", "TEXT")
+    _ensure_column(conn, "plan_tasks", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "plan_tasks", "last_attempt_at", "TEXT")
+
+
+def _is_retryable_bootstrap_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).strip().lower()
+    retryable_markers = (
+        "database is locked",
+        "database schema is locked",
+        "database table is locked",
+        "database busy",
+        "locking protocol",
+    )
+    return any(marker in message for marker in retryable_markers)
+
+
+def initialize_db(db_path: str = DB_PATH):
+    resolved_db_path = resolve_db_path(db_path)
+    if resolved_db_path in _INITIALIZED_PRIMARY_DB_PATHS and os.path.isfile(resolved_db_path):
+        _migrate_legacy_databases_once(resolved_db_path)
+        return
+
+    attempts_raw = str(os.getenv("KENDR_DB_INIT_RETRIES", "")).strip()
+    delay_raw = str(os.getenv("KENDR_DB_INIT_RETRY_DELAY_SECONDS", "")).strip()
+    try:
+        attempts = max(1, int(attempts_raw or "3"))
+    except ValueError:
+        attempts = 3
+    try:
+        base_delay = max(0.0, float(delay_raw or "0.1"))
+    except ValueError:
+        base_delay = 0.1
+
+    with _INITIALIZE_LOCK:
+        if resolved_db_path in _INITIALIZED_PRIMARY_DB_PATHS and os.path.isfile(resolved_db_path):
+            _migrate_legacy_databases_once(resolved_db_path)
+            return
+
+        for attempt in range(attempts):
+            try:
+                with _connect(resolved_db_path) as conn:
+                    _bootstrap_schema(conn)
+                _INITIALIZED_PRIMARY_DB_PATHS.add(resolved_db_path)
+                break
+            except sqlite3.OperationalError as exc:
+                if not _is_retryable_bootstrap_error(exc) or attempt >= attempts - 1:
+                    raise
+                sleep_for = base_delay * (2 ** attempt)
+                _LOG.warning(
+                    "SQLite bootstrap locked for %s (attempt %d/%d): %s. Retrying in %.2fs.",
+                    resolved_db_path,
+                    attempt + 1,
+                    attempts,
+                    exc,
+                    sleep_for,
+                )
+                time.sleep(sleep_for)
     _migrate_legacy_databases_once(resolved_db_path)

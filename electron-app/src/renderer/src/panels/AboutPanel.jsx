@@ -1,7 +1,27 @@
 import React from 'react'
+import { useApp } from '../contexts/AppContext'
+
+function formatCheckedAt(value) {
+  if (!value) return 'Not checked yet'
+  const ts = new Date(value)
+  if (Number.isNaN(ts.getTime())) return 'Not checked yet'
+  return ts.toLocaleString()
+}
+
+function updateFeedLabel(updateStatus) {
+  if (updateStatus.feedUrl) return updateStatus.feedUrl
+  if (updateStatus.feedSource === 'packaged') return 'Packaged release feed'
+  return 'Not configured'
+}
 
 export default function AboutPanel() {
   const api = window.kendrAPI
+  const { state } = useApp()
+  const updateStatus = state.updateStatus || {}
+  const currentVersion = updateStatus.currentVersion || 'unknown'
+  const targetVersion = updateStatus.downloadedVersion || updateStatus.availableVersion || currentVersion
+  const downloading = updateStatus.status === 'downloading'
+  const checking = updateStatus.status === 'checking'
 
   return (
     <div className="kendr-page kendr-about">
@@ -88,6 +108,47 @@ export default function AboutPanel() {
           <div className="about-creator-copy">
             Creator of Kendr. The project website is <button className="kendr-inline-link" onClick={() => api?.shell?.openExternal('https://kendr.org')}>kendr.org</button>.
           </div>
+        </div>
+      </section>
+
+      <section className="surface-card">
+        <SectionHeader title="Desktop Updates" subtitle="Remote application delivery for installed users." />
+        <div className="about-grid">
+          <AboutCard
+            title="Current Version"
+            body={currentVersion}
+          />
+          <AboutCard
+            title="Update Status"
+            body={updateStatus.message || 'Update status unavailable.'}
+          />
+          <AboutCard
+            title="Release Feed"
+            body={updateFeedLabel(updateStatus)}
+          />
+        </div>
+        <p className="kendr-about-copy">
+          {`Target version: ${targetVersion} · Last check: ${formatCheckedAt(updateStatus.checkedAt)}`}
+        </p>
+        <div className="hero-actions">
+          <button className="kendr-btn kendr-btn--primary" onClick={() => api?.updates?.check()} disabled={checking}>
+            {checking ? 'Checking…' : 'Check for Updates'}
+          </button>
+          {updateStatus.status === 'available' && updateStatus.autoDownload === false && (
+            <button className="kendr-btn" onClick={() => api?.updates?.download()}>
+              Download Update
+            </button>
+          )}
+          {updateStatus.status === 'downloaded' && (
+            <button className="kendr-btn" onClick={() => api?.updates?.install()}>
+              Restart to Update
+            </button>
+          )}
+          {downloading && (
+            <button className="kendr-btn" disabled>
+              Downloading…
+            </button>
+          )}
         </div>
       </section>
     </div>

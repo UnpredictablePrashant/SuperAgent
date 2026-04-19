@@ -69,6 +69,30 @@ npm run package:linux
 
 The packaging step builds a standalone backend bundle first, then embeds it into the Electron installer.
 
+## Remote auto-update releases
+
+Kendr now supports Electron remote updates for installed users.
+
+Release builds should be produced with `KENDR_UPDATE_URL` pointing at the HTTP(S) directory where you will host:
+
+- Windows `latest.yml` + installer artifacts
+- macOS `latest-mac.yml` + `zip`/`dmg` artifacts
+- Linux `latest-linux.yml` + `AppImage`/`deb` artifacts
+
+Example:
+
+```bash
+export KENDR_UPDATE_URL="https://downloads.kendr.org/desktop"
+npm run release
+```
+
+Notes:
+
+- `npm run package*` still works for local packaging without publishing metadata.
+- The generic provider does not upload files for you. After building, copy the contents of `dist/` to the remote update directory yourself or via CI/CD.
+- macOS auto-update requires a signed app.
+- Users can override the packaged feed from **Settings → Application Updates** if you want to point a specific build at another release server.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |

@@ -3348,6 +3348,11 @@ button.status-item:hover { background: rgba(255,255,255,.06); }
   gap: 5px;
   margin-top: 8px;
 }
+.kc-activity-card-items--stack {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
 .kc-activity-card-item {
   display: inline-flex;
   align-items: center;
@@ -3367,6 +3372,50 @@ button.status-item:hover { background: rgba(255,255,255,.06); }
   border-color: rgba(0,201,167,.28);
   color: var(--kc-teal);
   background: rgba(0,201,167,.08);
+}
+.kc-activity-card-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,.08);
+  background: rgba(255,255,255,.03);
+}
+.kc-activity-card-file-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--kc-text);
+}
+.kc-activity-card-file-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.kc-activity-card-mini {
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(0,201,167,.28);
+  background: rgba(0,201,167,.08);
+  color: var(--kc-teal);
+  font-size: 10px;
+  font-weight: 700;
+  transition: border-color .12s, color .12s, background .12s;
+}
+.kc-activity-card-mini:hover {
+  border-color: rgba(0,201,167,.45);
+  background: rgba(0,201,167,.13);
+}
+.kc-activity-card-mini--ghost {
+  border-color: rgba(255,255,255,.08);
+  background: rgba(255,255,255,.03);
+  color: var(--kc-text);
+}
+.kc-activity-card-mini--ghost:hover {
+  border-color: var(--kc-teal);
+  color: var(--kc-teal);
 }
 
 /* Step timeline */

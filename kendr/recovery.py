@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from kendr.orchestration import state_awaiting_user_input
+from kendr.unicode_utils import safe_json_dumps, sanitize_text
 
 
 RUN_MANIFEST_FILE = "run_manifest.json"
@@ -32,15 +33,17 @@ def _now_iso() -> str:
 
 
 def _safe_json(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, (bool, int, float)):
         return value
+    if isinstance(value, str):
+        return sanitize_text(value)
     if isinstance(value, Path):
-        return str(value)
+        return sanitize_text(value)
     if isinstance(value, dict):
         return {str(key): _safe_json(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_safe_json(item) for item in value]
-    return str(value)
+    return sanitize_text(value)
 
 
 def recovery_file_paths(run_output_dir: str) -> dict[str, str]:
@@ -216,10 +219,10 @@ def write_recovery_files(
         active_agent=active_agent,
         completed_at=completed_at,
     )
-    Path(paths["manifest"]).write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-    Path(paths["checkpoint"]).write_text(json.dumps(checkpoint, indent=2, ensure_ascii=False), encoding="utf-8")
-    Path(paths["heartbeat"]).write_text(json.dumps(heartbeat, indent=2, ensure_ascii=False), encoding="utf-8")
-    Path(paths["summary"]).write_text(json.dumps(resume_summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    Path(paths["manifest"]).write_text(safe_json_dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    Path(paths["checkpoint"]).write_text(safe_json_dumps(checkpoint, indent=2, ensure_ascii=False), encoding="utf-8")
+    Path(paths["heartbeat"]).write_text(safe_json_dumps(heartbeat, indent=2, ensure_ascii=False), encoding="utf-8")
+    Path(paths["summary"]).write_text(safe_json_dumps(resume_summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return {
         "manifest": manifest,
         "checkpoint": checkpoint,

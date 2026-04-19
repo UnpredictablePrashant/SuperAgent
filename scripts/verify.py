@@ -76,6 +76,10 @@ def _run_unittest(modules: list[str], *, label: str) -> None:
     _run([PYTHON, "-m", "unittest", "-v", *modules], label=label)
 
 
+def _run_release_non_socket() -> None:
+    _run([PYTHON, "scripts/release_gate_non_socket.py"], label="release non-socket suite")
+
+
 def _slugify_heading(text: str) -> str:
     value = text.strip().lower()
     value = re.sub(r"[^\w\s-]", "", value)
@@ -211,7 +215,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "phases",
         nargs="*",
-        help="Phases to run: compile, unit, smoke, docs, docker, integration, all, ci",
+        help="Phases to run: compile, unit, smoke, docs, docker, integration, release-non-socket, all, ci",
     )
     parser.add_argument(
         "--strict-docker",
@@ -232,7 +236,7 @@ def _resolve_phases(phases: list[str]) -> list[str]:
         else:
             resolved.append(phase)
 
-    allowed = {"compile", "unit", "smoke", "docs", "docker", "integration"}
+    allowed = {"compile", "unit", "smoke", "docs", "docker", "integration", "release-non-socket"}
     unknown = [phase for phase in resolved if phase not in allowed]
     if unknown:
         raise SystemExit(f"Unknown verification phase(s): {', '.join(unknown)}")
@@ -255,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         "docs": _validate_docs,
         "docker": lambda: _run_docker(args.strict_docker),
         "integration": lambda: _run_unittest(INTEGRATION_TEST_MODULES, label="integration tests"),
+        "release-non-socket": _run_release_non_socket,
     }
 
     for phase in phases:

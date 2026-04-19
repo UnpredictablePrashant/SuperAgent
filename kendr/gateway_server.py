@@ -50,6 +50,7 @@ from kendr.skill_manager import (
     resolve_runtime_skill,
     test_skill,
 )
+from kendr.unicode_utils import safe_json_dumps, sanitize_text
 
 
 REGISTRY = build_registry()
@@ -57,6 +58,7 @@ RUNTIME = AgentRuntime(REGISTRY)
 CAPABILITY_REGISTRY = CapabilityRegistryService()
 # NOTE: Always use RUNTIME.agent_routing (not a cached reference) so refreshes
 # via _rebuild_skill_registry() / _refresh_mcp_agents() are reflected.
+MAX_REGISTRY_QUERY_LIMIT = 10_000
 
 
 def _rebuild_skill_registry() -> None:
@@ -251,7 +253,7 @@ def _html_page(title: str, body: str) -> bytes:
 
 class GatewayHandler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, payload: dict | list):
-        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        body = safe_json_dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -259,7 +261,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_html(self, status: int, title: str, body: str):
-        page = _html_page(title, body)
+        page = _html_page(sanitize_text(title), sanitize_text(body))
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
@@ -319,7 +321,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             items = CAPABILITY_REGISTRY.list_auth_profiles(
                 workspace_id=workspace_id,
                 provider=provider,
-                limit=max(1, min(limit, 1000)),
+                limit=max(1, min(limit, MAX_REGISTRY_QUERY_LIMIT)),
             )
             self._send_json(200, {"workspace_id": workspace_id, "count": len(items), "items": items})
             return
@@ -329,7 +331,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             limit = int(str((params.get("limit") or ["200"])[0] or "200"))
             items = CAPABILITY_REGISTRY.list_policy_profiles(
                 workspace_id=workspace_id,
-                limit=max(1, min(limit, 1000)),
+                limit=max(1, min(limit, MAX_REGISTRY_QUERY_LIMIT)),
             )
             self._send_json(200, {"workspace_id": workspace_id, "count": len(items), "items": items})
             return
@@ -347,7 +349,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 status=status,
                 visibility=visibility,
                 search=search,
-                limit=max(1, min(limit, 5000)),
+                limit=max(1, min(limit, MAX_REGISTRY_QUERY_LIMIT)),
             )
             self._send_json(200, {"workspace_id": workspace_id, "count": len(items), "items": items})
             return
@@ -366,7 +368,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 runs = CAPABILITY_REGISTRY.list_health_runs(
                     workspace_id=workspace_id,
                     capability_id=capability_id,
-                    limit=max(1, min(limit, 1000)),
+                    limit=max(1, min(limit, MAX_REGISTRY_QUERY_LIMIT)),
                 )
                 self._send_json(200, {"workspace_id": workspace_id, "capability_id": capability_id, "count": len(runs), "items": runs})
                 return
@@ -376,7 +378,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     workspace_id=workspace_id,
                     capability_id=capability_id,
                     action=str((params.get("action") or [""])[0] or "").strip(),
-                    limit=max(1, min(limit, 2000)),
+                    limit=max(1, min(limit, MAX_REGISTRY_QUERY_LIMIT)),
                 )
                 self._send_json(200, {"workspace_id": workspace_id, "capability_id": capability_id, "count": len(events), "items": events})
                 return
@@ -1214,6 +1216,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             "research_citation_style",
             "research_enable_plagiarism_check",
             "research_web_search_enabled",
+            "research_search_backend",
             "research_date_range",
             "research_max_sources",
             "research_checkpoint_enabled",

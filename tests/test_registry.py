@@ -44,6 +44,11 @@ class RegistryDiscoveryTests(unittest.TestCase):
         cards = {card["agent_name"]: card for card in registry.agent_cards()}
         self.assertEqual(cards["superrag_agent"]["requirements"], ["openai"])
 
+    def test_legacy_deep_research_agent_is_not_publicly_discovered(self):
+        registry = build_registry()
+        self.assertNotIn("deep_research_agent", registry.agents)
+        self.assertIn("long_document_agent", registry.agents)
+
 
 if __name__ == "__main__":
     unittest.main()
